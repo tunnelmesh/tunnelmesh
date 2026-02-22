@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1520,6 +1521,13 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		}
 	}
 
+	// Clear stale version files from a previous object lifecycle at this key.
+	// DeleteObject only removes the live metadata; version files persist on disk.
+	// Without this, re-creating a key would show history from its deleted predecessor.
+	if isNewObject {
+		s.clearVersionDir(bucket, key)
+	}
+
 	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
 	s.archiveCurrentVersionAtomic(bucket, key)
 
@@ -1788,6 +1796,11 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
+	}
+
+	// Clear stale version files from a previous object lifecycle at this key.
+	if isNewObject {
+		s.clearVersionDir(bucket, key)
 	}
 
 	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
@@ -2603,6 +2616,17 @@ func (s *Store) ImportObjectMeta(ctx context.Context, bucket, key string, metaJS
 		return nil, fmt.Errorf("invalid object meta JSON: %w", err)
 	}
 
+	// Ensure LastModified is set — legacy or test metadata may omit it.
+	// Re-marshal so the stored JSON always has a valid timestamp.
+	if meta.LastModified.IsZero() {
+		meta.LastModified = time.Now().UTC()
+		var marshalErr error
+		metaJSON, marshalErr = json.Marshal(meta)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("re-marshal meta with timestamp: %w", marshalErr)
+		}
+	}
+
 	// Pre-create directories outside the lock (MkdirAll is idempotent)
 	bucketDir := s.bucketPath(bucket)
 	metaDir := filepath.Join(bucketDir, "meta")
@@ -2657,6 +2681,11 @@ func (s *Store) ImportObjectMeta(ctx context.Context, bucket, key string, metaJS
 			s.mu.Unlock()
 			return nil, nil
 		}
+	}
+
+	// Clear stale version files from a previous object lifecycle at this key.
+	if isNewObject {
+		s.clearVersionDir(bucket, key)
 	}
 
 	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
@@ -2916,6 +2945,22 @@ func generateVersionID() string {
 	return fmt.Sprintf("%d-%06x", time.Now().UnixNano(), randomInt)
 }
 
+// timestampFromVersionID extracts the creation time encoded in a version ID.
+// Version IDs have the format "{unixNano}-{random6hex}"; the nanosecond
+// prefix is extracted and converted to a UTC time. Returns zero time if
+// the version ID is empty or does not start with a valid integer.
+func timestampFromVersionID(versionID string) time.Time {
+	s := versionID
+	if idx := strings.IndexByte(versionID, '-'); idx >= 0 {
+		s = versionID[:idx]
+	}
+	ns, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || ns <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns).UTC()
+}
+
 // versionDir returns the path to an object's version directory.
 func (s *Store) versionDir(bucket, key string) string {
 	return filepath.Join(s.bucketPath(bucket), "versions", key)
@@ -2965,6 +3010,38 @@ func (s *Store) archiveCurrentVersion(bucket, key string) error {
 	s.statsVersionBytes.Add(meta.Size)
 
 	return nil
+}
+
+// clearVersionDir removes all archived version files for an object.
+// Used when a new object is created at a previously-used key to prevent stale
+// versions from a deleted predecessor appearing in the version history.
+// Caller must hold s.mu.Lock().
+func (s *Store) clearVersionDir(bucket, key string) {
+	versionDir := s.versionDir(bucket, key)
+	entries, err := os.ReadDir(versionDir)
+	if err != nil {
+		return // Directory doesn't exist — nothing to clear
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(versionDir, entry.Name())
+		// Decrement stats before removing
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			var meta ObjectMeta
+			if json.Unmarshal(data, &meta) == nil {
+				s.statsVersionCount.Add(-1)
+				s.statsVersionBytes.Add(-meta.Size)
+			}
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			s.logger.Warn().Err(removeErr).
+				Str("bucket", bucket).Str("key", key).
+				Str("file", entry.Name()).
+				Msg("Failed to clear stale version file on new object creation")
+		}
+	}
 }
 
 // archiveCurrentVersionAtomic archives the current version using atomicWriteFile
@@ -3728,11 +3805,15 @@ func (s *Store) ListVersions(ctx context.Context, bucket, key string) ([]Version
 
 	// Get current version
 	if meta, err := s.getObjectMeta(bucket, key); err == nil {
+		lm := meta.LastModified
+		if lm.IsZero() {
+			lm = timestampFromVersionID(meta.VersionID)
+		}
 		versions = append(versions, VersionInfo{
 			VersionID:    meta.VersionID,
 			Size:         meta.Size,
 			ETag:         meta.ETag,
-			LastModified: meta.LastModified,
+			LastModified: lm,
 			IsCurrent:    true,
 		})
 	}
@@ -3760,11 +3841,15 @@ func (s *Store) ListVersions(ctx context.Context, bucket, key string) ([]Version
 			continue
 		}
 
+		lm := meta.LastModified
+		if lm.IsZero() {
+			lm = timestampFromVersionID(meta.VersionID)
+		}
 		versions = append(versions, VersionInfo{
 			VersionID:    meta.VersionID,
 			Size:         meta.Size,
 			ETag:         meta.ETag,
-			LastModified: meta.LastModified,
+			LastModified: lm,
 			IsCurrent:    false,
 		})
 	}
