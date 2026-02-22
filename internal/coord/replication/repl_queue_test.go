@@ -1146,8 +1146,10 @@ func TestTriggerManifestSync_WorkerDrains(t *testing.T) {
 	t.Fatal("worker did not send manifest within 2 seconds of TriggerManifestSync")
 }
 
-// TestTriggerManifestSync_Deduplication verifies that two rapid calls before
-// the worker fires result in exactly one runAutoSyncCycle invocation, not two.
+// TestTriggerManifestSync_Deduplication verifies that two calls that both arrive
+// while the worker is busy processing the first result in exactly one cycle, not two.
+// It uses preSyncHook to pause the worker at a deterministic point, ensuring the
+// second TriggerManifestSync call races with an in-progress cycle (not a future one).
 func TestTriggerManifestSync_Deduplication(t *testing.T) {
 	transport := newMockTransport()
 	s3Store := newMockS3Store()
@@ -1162,20 +1164,36 @@ func TestTriggerManifestSync_Deduplication(t *testing.T) {
 		ChunkPipelineWindow: 5,
 		AutoSyncInterval:    24 * time.Hour,
 	})
+
+	// Hook: block the worker at the start of its first cycle until we release it.
+	// This guarantees the second TriggerManifestSync call arrives while the cycle
+	// is in progress and the channel is empty (worker already consumed the first signal).
+	workerStarted := make(chan struct{})
+	releaseCh := make(chan struct{})
+	r.preSyncHook = func() {
+		close(workerStarted) // signal: worker is inside the cycle, channel now empty
+		<-releaseCh          // block until test releases
+		r.preSyncHook = nil  // run hook only for the first cycle
+	}
+
 	require.NoError(t, r.Start())
 	t.Cleanup(func() { _ = r.Stop() })
 
 	r.AddPeer("coord-b", "coord-b")
 	s3Store.addObjectWithChunks("bucket1", "file.txt", []string{"h1"}, map[string][]byte{"h1": []byte("data")})
 
-	// Two rapid triggers before the worker can drain the first.
+	// First trigger: worker wakes from manifestSyncCh, enters the hook, and blocks.
 	r.TriggerManifestSync()
+	<-workerStarted // worker has read the channel; channel is now empty
+
+	// Second trigger: channel is empty, so this queues a real signal.
 	r.TriggerManifestSync()
+	assert.Equal(t, 1, len(r.manifestSyncCh), "second trigger queued while worker is busy")
 
-	// The channel is buffered(1): second call is a no-op.
-	assert.LessOrEqual(t, len(r.manifestSyncCh), 1, "deduplicated: at most 1 signal in channel")
+	// Release: worker finishes cycle 1 then drains the second signal (no cycle 2).
+	close(releaseCh)
 
-	// Worker will fire once and drain the channel — wait for it.
+	// Wait for the manifest from cycle 1.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		transport.mu.Lock()
@@ -1209,7 +1227,7 @@ func TestTriggerManifestSync_Deduplication(t *testing.T) {
 			transport.mu.Unlock()
 
 			assert.Equal(t, 1, finalCount,
-				"two rapid TriggerManifestSync calls should result in exactly one cycle")
+				"trigger queued during an in-progress cycle should be drained, not cause a second cycle")
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

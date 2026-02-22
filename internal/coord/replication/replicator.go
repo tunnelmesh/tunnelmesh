@@ -212,6 +212,10 @@ type Replicator struct {
 	// On-demand manifest sync trigger (buffered 1 — deduplicated).
 	manifestSyncCh chan struct{}
 
+	// preSyncHook is called at the start of each runAutoSyncCycle. Nil in production.
+	// Tests set this to block the worker at a deterministic point.
+	preSyncHook func()
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup

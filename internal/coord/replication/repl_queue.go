@@ -234,6 +234,12 @@ func (r *Replicator) runAutoSyncWorker() {
 		return
 	case <-r.manifestSyncCh:
 		r.runAutoSyncCycle()
+		// Drain any trigger that arrived during the cycle — the cycle already
+		// captured the latest state, so an immediately queued trigger is redundant.
+		select {
+		case <-r.manifestSyncCh:
+		default:
+		}
 	case <-time.After(2 * time.Minute):
 	}
 
@@ -248,6 +254,11 @@ func (r *Replicator) runAutoSyncWorker() {
 			r.runAutoSyncCycle()
 		case <-r.manifestSyncCh:
 			r.runAutoSyncCycle()
+			// Drain any trigger that arrived during the cycle.
+			select {
+			case <-r.manifestSyncCh:
+			default:
+			}
 		}
 	}
 }
@@ -257,6 +268,10 @@ func (r *Replicator) runAutoSyncWorker() {
 // (owned by peer coordinators) are skipped to prevent ping-pong replication
 // where replicas re-replicate received objects back to the source.
 func (r *Replicator) runAutoSyncCycle() {
+	if r.preSyncHook != nil {
+		r.preSyncHook()
+	}
+
 	peers := r.GetPeers()
 	if len(peers) == 0 {
 		return
