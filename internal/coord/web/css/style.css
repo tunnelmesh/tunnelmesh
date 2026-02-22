@@ -286,21 +286,16 @@ main > section {
     background: #1a1a2e;
 }
 
-/* Leaflet map background (for areas without tiles) */
+/* Leaflet map background — matches CartoDB Dark Matter ocean colour so
+   sub-pixel gaps between tiles are invisible in all browsers */
 .leaflet-container {
-    background: #1a1a2e;
+    background: #0d0e11 !important;
 }
 
-/* Fix tile seams (white lines between tiles) */
+/* Fix tile seams */
 .leaflet-tile {
     outline: none !important;
-
-    /* GPU acceleration prevents subpixel gaps */
-    backface-visibility: hidden;
-    transform: translate3d(0, 0, 0);
-
-    /* Slightly enlarge tiles to overlap seams */
-    margin: -0.5px;
+    border: none !important;
 }
 
 .leaflet-tile-pane {
