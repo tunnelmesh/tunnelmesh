@@ -1,9 +1,9 @@
 ![Admin Dashboard](docs/images/tunnelmesh_banner.webp)
 
 > [!WARNING]
-> **Expect breaking changes**: Parts of this early experimental project are in flux, expect some flake.
+> **Highly experimental**: You're early, and parts of this project are still in flux.
 
-# TunnelMesh
+# tunnelmesh
 
 [![CI](https://github.com/tunnelmesh/tunnelmesh/actions/workflows/ci.yml/badge.svg)](https://github.com/tunnelmesh/tunnelmesh/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/tunnelmesh/tunnelmesh/branch/main/graph/badge.svg)](https://codecov.io/gh/tunnelmesh/tunnelmesh)
