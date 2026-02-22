@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2603,6 +2604,17 @@ func (s *Store) ImportObjectMeta(ctx context.Context, bucket, key string, metaJS
 		return nil, fmt.Errorf("invalid object meta JSON: %w", err)
 	}
 
+	// Ensure LastModified is set — legacy or test metadata may omit it.
+	// Re-marshal so the stored JSON always has a valid timestamp.
+	if meta.LastModified.IsZero() {
+		meta.LastModified = time.Now().UTC()
+		var marshalErr error
+		metaJSON, marshalErr = json.Marshal(meta)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("re-marshal meta with timestamp: %w", marshalErr)
+		}
+	}
+
 	// Pre-create directories outside the lock (MkdirAll is idempotent)
 	bucketDir := s.bucketPath(bucket)
 	metaDir := filepath.Join(bucketDir, "meta")
@@ -2914,6 +2926,22 @@ func generateVersionID() string {
 	_, _ = cryptorand.Read(randomBytes[:])
 	randomInt := binary.BigEndian.Uint32(randomBytes[:]) & 0xFFFFFF
 	return fmt.Sprintf("%d-%06x", time.Now().UnixNano(), randomInt)
+}
+
+// timestampFromVersionID extracts the creation time encoded in a version ID.
+// Version IDs have the format "{unixNano}-{random6hex}"; the nanosecond
+// prefix is extracted and converted to a UTC time. Returns zero time if
+// the version ID is empty or does not start with a valid integer.
+func timestampFromVersionID(versionID string) time.Time {
+	s := versionID
+	if idx := strings.IndexByte(versionID, '-'); idx >= 0 {
+		s = versionID[:idx]
+	}
+	ns, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || ns <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns).UTC()
 }
 
 // versionDir returns the path to an object's version directory.
@@ -3728,11 +3756,15 @@ func (s *Store) ListVersions(ctx context.Context, bucket, key string) ([]Version
 
 	// Get current version
 	if meta, err := s.getObjectMeta(bucket, key); err == nil {
+		lm := meta.LastModified
+		if lm.IsZero() {
+			lm = timestampFromVersionID(meta.VersionID)
+		}
 		versions = append(versions, VersionInfo{
 			VersionID:    meta.VersionID,
 			Size:         meta.Size,
 			ETag:         meta.ETag,
-			LastModified: meta.LastModified,
+			LastModified: lm,
 			IsCurrent:    true,
 		})
 	}
@@ -3760,11 +3792,15 @@ func (s *Store) ListVersions(ctx context.Context, bucket, key string) ([]Version
 			continue
 		}
 
+		lm := meta.LastModified
+		if lm.IsZero() {
+			lm = timestampFromVersionID(meta.VersionID)
+		}
 		versions = append(versions, VersionInfo{
 			VersionID:    meta.VersionID,
 			Size:         meta.Size,
 			ETag:         meta.ETag,
-			LastModified: meta.LastModified,
+			LastModified: lm,
 			IsCurrent:    false,
 		})
 	}
