@@ -1521,6 +1521,13 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		}
 	}
 
+	// Clear stale version files from a previous object lifecycle at this key.
+	// DeleteObject only removes the live metadata; version files persist on disk.
+	// Without this, re-creating a key would show history from its deleted predecessor.
+	if isNewObject {
+		s.clearVersionDir(bucket, key)
+	}
+
 	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
 	s.archiveCurrentVersionAtomic(bucket, key)
 
@@ -1789,6 +1796,11 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
+	}
+
+	// Clear stale version files from a previous object lifecycle at this key.
+	if isNewObject {
+		s.clearVersionDir(bucket, key)
 	}
 
 	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
@@ -2671,6 +2683,11 @@ func (s *Store) ImportObjectMeta(ctx context.Context, bucket, key string, metaJS
 		}
 	}
 
+	// Clear stale version files from a previous object lifecycle at this key.
+	if isNewObject {
+		s.clearVersionDir(bucket, key)
+	}
+
 	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
 	s.archiveCurrentVersionAtomic(bucket, key)
 
@@ -2993,6 +3010,38 @@ func (s *Store) archiveCurrentVersion(bucket, key string) error {
 	s.statsVersionBytes.Add(meta.Size)
 
 	return nil
+}
+
+// clearVersionDir removes all archived version files for an object.
+// Used when a new object is created at a previously-used key to prevent stale
+// versions from a deleted predecessor appearing in the version history.
+// Caller must hold s.mu.Lock().
+func (s *Store) clearVersionDir(bucket, key string) {
+	versionDir := s.versionDir(bucket, key)
+	entries, err := os.ReadDir(versionDir)
+	if err != nil {
+		return // Directory doesn't exist — nothing to clear
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(versionDir, entry.Name())
+		// Decrement stats before removing
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			var meta ObjectMeta
+			if json.Unmarshal(data, &meta) == nil {
+				s.statsVersionCount.Add(-1)
+				s.statsVersionBytes.Add(-meta.Size)
+			}
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			s.logger.Warn().Err(removeErr).
+				Str("bucket", bucket).Str("key", key).
+				Str("file", entry.Name()).
+				Msg("Failed to clear stale version file on new object creation")
+		}
+	}
 }
 
 // archiveCurrentVersionAtomic archives the current version using atomicWriteFile

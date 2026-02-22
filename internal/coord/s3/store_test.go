@@ -1329,6 +1329,38 @@ func TestVersioning_DeleteCleansVersions(t *testing.T) {
 	assert.Empty(t, versions)
 }
 
+func TestVersioning_DeleteAndRecreateStartsFreshHistory(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	require.NoError(t, store.CreateBucket(context.Background(), "test-bucket", "alice", 2, nil))
+
+	// Create original file with multiple versions
+	for i := 1; i <= 3; i++ {
+		content := []byte(strings.Repeat("v", i*10))
+		_, err := store.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
+		require.NoError(t, err)
+	}
+
+	// Verify 3 versions exist (current + 2 archived)
+	versions, err := store.ListVersions(context.Background(), "test-bucket", "file.txt")
+	require.NoError(t, err)
+	assert.Len(t, versions, 3)
+
+	// Delete the file (moves to recycle bin, version files remain on disk)
+	require.NoError(t, store.DeleteObject(context.Background(), "test-bucket", "file.txt"))
+
+	// Re-create the file fresh
+	newContent := []byte("fresh start")
+	_, err = store.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(newContent), int64(len(newContent)), "text/plain", nil)
+	require.NoError(t, err)
+
+	// Version history must only show the new file — NOT the old pre-deletion versions
+	versions, err = store.ListVersions(context.Background(), "test-bucket", "file.txt")
+	require.NoError(t, err)
+	assert.Len(t, versions, 1, "re-created file should have no history from deleted predecessor")
+	assert.True(t, versions[0].IsCurrent)
+	assert.Equal(t, int64(len(newContent)), versions[0].Size)
+}
+
 func TestVersioning_RetentionPruning(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	store.SetVersionRetentionDays(30) // 30 day retention
