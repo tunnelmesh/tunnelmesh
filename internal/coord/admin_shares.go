@@ -246,6 +246,9 @@ func (s *Server) handleShareByName(w http.ResponseWriter, r *http.Request) {
 		// know to purge the orphaned fs+ bucket promptly.
 		if s.replicator != nil {
 			s.replicator.EnqueueReplication(s3.SystemBucket, s3.FileSharesPath, "put")
+			// Immediately broadcast manifest so peers purge deleted bucket's objects
+			// without waiting for the next 5-minute auto-sync cycle.
+			s.replicator.TriggerManifestSync()
 		}
 
 		w.Header().Set("Content-Type", "application/json")

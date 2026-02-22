@@ -850,7 +850,6 @@ func TestRegression_PurgeOrphanedBucketsStaleEmptyShares(t *testing.T) {
 	assert.Equal(t, 1, purged, "empty (non-nil) share list should allow purging")
 }
 
-// =============================================================================
 // 21. Regression: Identical re-imports must NOT create version archives
 // =============================================================================
 // Auto-sync re-imports all objects every 5 min. Without the ETag guard,
@@ -963,4 +962,90 @@ func TestRegression_EmptyETagImportNotSkipped(t *testing.T) {
 	entries, err := os.ReadDir(versionsDir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "empty ETag re-import should still archive (legacy behavior)")
+}
+
+// =============================================================================
+// 24. Regression: Delete on source → manifest reconciliation purges on replica
+// =============================================================================
+
+func TestRegression_ManifestReconciliationPurgesDeletedObjects(t *testing.T) {
+	src := newRegressionStore(t, "coord1")
+	dst := newRegressionStore(t, "coord2")
+	ctx := context.Background()
+
+	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2, nil))
+
+	// Upload 3 files and replicate all to dst
+	files := map[string][]byte{
+		"keep1.txt":     []byte("File that should survive reconciliation"),
+		"keep2.txt":     []byte("Another file that should survive"),
+		"delete_me.txt": []byte("This file will be deleted on source"),
+	}
+	for key, data := range files {
+		meta := uploadFile(t, src, "data", key, data)
+		replicateFile(t, src, dst, "data", key, meta)
+	}
+
+	// Verify all 3 files exist on dst
+	for key, data := range files {
+		requireFileReadable(t, dst, "data", key, data, "before delete")
+	}
+
+	// Delete the file on source
+	require.NoError(t, src.PurgeObject(ctx, "data", "delete_me.txt"))
+
+	// Build manifest from source (simulates what auto-sync sends)
+	srcKeys, err := src.GetAllObjectKeys(ctx)
+	require.NoError(t, err)
+	assert.Len(t, srcKeys["data"], 2, "source should have 2 objects after delete")
+
+	// Simulate manifest reconciliation on dst: purge objects not in source manifest
+	dstKeys, err := dst.GetAllObjectKeys(ctx)
+	require.NoError(t, err)
+	assert.Len(t, dstKeys["data"], 3, "dst should still have 3 objects before reconciliation")
+
+	// Build manifest set
+	manifestSet := make(map[string]map[string]struct{})
+	for bucket, keys := range srcKeys {
+		keySet := make(map[string]struct{})
+		for _, k := range keys {
+			keySet[k] = struct{}{}
+		}
+		manifestSet[bucket] = keySet
+	}
+
+	// Reconcile: purge objects on dst not in manifest
+	var purged int
+	for bucket, keys := range dstKeys {
+		if bucket == "_tunnelmesh" {
+			continue
+		}
+		senderKeys, hasBucket := manifestSet[bucket]
+		if !hasBucket {
+			continue
+		}
+		for _, key := range keys {
+			if _, exists := senderKeys[key]; !exists {
+				require.NoError(t, dst.PurgeObject(ctx, bucket, key))
+				purged++
+			}
+		}
+	}
+
+	assert.Equal(t, 1, purged, "should purge exactly the deleted object")
+
+	// Verify surviving files are still readable
+	requireFileReadable(t, dst, "data", "keep1.txt", files["keep1.txt"], "after reconciliation")
+	requireFileReadable(t, dst, "data", "keep2.txt", files["keep2.txt"], "after reconciliation")
+
+	// Verify deleted file is gone
+	_, err = dst.HeadObject(ctx, "data", "delete_me.txt")
+	assert.ErrorIs(t, err, ErrObjectNotFound, "deleted object should be purged on replica")
+
+	// Age and GC — surviving files must still be readable
+	ageAllChunks(t, dst, 2*time.Hour)
+	dst.RunGarbageCollection(ctx)
+
+	requireFileReadable(t, dst, "data", "keep1.txt", files["keep1.txt"], "after GC")
+	requireFileReadable(t, dst, "data", "keep2.txt", files["keep2.txt"], "after GC")
 }

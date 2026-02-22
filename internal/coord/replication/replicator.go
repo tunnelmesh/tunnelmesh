@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 	"golang.org/x/time/rate"
 )
 
@@ -118,6 +119,10 @@ type S3Store interface {
 	// GetAllObjectKeys returns all object keys grouped by bucket.
 	// Used by the rebalancer to iterate all objects for redistribution.
 	GetAllObjectKeys(ctx context.Context) (map[string][]string, error)
+
+	// GetBucketOwner returns the owner of a bucket (empty string if bucket not found).
+	// Used by manifest reconciliation to validate sender ownership.
+	GetBucketOwner(ctx context.Context, bucket string) string
 }
 
 // ChunkRegistryInterface defines operations for chunk ownership tracking.
@@ -149,8 +154,9 @@ type Replicator struct {
 	chunkAckTimeout     time.Duration // Timeout for chunk-level ACKs (Phase 4)
 
 	// Peer coordinators
-	mu    sync.RWMutex
-	peers map[string]bool // map[coordMeshIP]true
+	mu        sync.RWMutex
+	peers     map[string]bool   // map[coordMeshIP]true
+	peerNames map[string]string // map[coordMeshIP]coordinatorName
 
 	// Pending ACKs (file-level)
 	pendingMu sync.RWMutex
@@ -202,6 +208,13 @@ type Replicator struct {
 
 	// Auto-sync interval (0 = disabled)
 	autoSyncInterval time.Duration
+
+	// On-demand manifest sync trigger (buffered 1 — deduplicated).
+	manifestSyncCh chan struct{}
+
+	// preSyncHook is called at the start of each runAutoSyncCycle. Nil in production.
+	// Tests set this to block the worker at a deterministic point.
+	preSyncHook func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -325,6 +338,7 @@ func NewReplicator(config Config) *Replicator {
 		sendSem:                make(chan struct{}, config.MaxConcurrentSends),
 		rateLimiter:            rate.NewLimiter(rate.Limit(config.RateLimit), config.RateBurst),
 		peers:                  make(map[string]bool),
+		peerNames:              make(map[string]string),
 		pending:                make(map[string]*pendingReplication),
 		pendingChunks:          make(map[string]*pendingChunkReplication),
 		pendingFetchRequests:   make(map[string]chan *FetchChunkResponsePayload),
@@ -333,6 +347,7 @@ func NewReplicator(config Config) *Replicator {
 		deferredChunks:         make(map[string]struct{}),
 		deferredNotify:         make(chan struct{}, 1),
 		replQueue:              make(chan struct{}, 1),
+		manifestSyncCh:         make(chan struct{}, 1),
 		chunkPipelineWindow:    config.ChunkPipelineWindow,
 		autoSyncInterval:       config.AutoSyncInterval,
 		ctx:                    ctx,
@@ -348,6 +363,17 @@ func NewReplicator(config Config) *Replicator {
 // SetRebalancer attaches a rebalancer to this replicator.
 func (r *Replicator) SetRebalancer(rb *Rebalancer) {
 	r.rebalancer = rb
+}
+
+// TriggerManifestSync signals the auto-sync worker to immediately broadcast the
+// current object manifest to all peers. This is used after local bucket deletion
+// so replicas can purge orphaned objects without waiting for the next scheduled cycle.
+// Non-blocking and deduplicated: if a sync is already queued, this is a no-op.
+func (r *Replicator) TriggerManifestSync() {
+	select {
+	case r.manifestSyncCh <- struct{}{}:
+	default:
+	}
 }
 
 // Start starts the replicator background tasks.
@@ -418,14 +444,15 @@ func (r *Replicator) releaseSendSlot() {
 }
 
 // AddPeer adds a coordinator peer to replicate to.
-func (r *Replicator) AddPeer(coordMeshIP string) {
+func (r *Replicator) AddPeer(coordMeshIP, name string) {
 	r.mu.Lock()
 	added := false
 	if !r.peers[coordMeshIP] {
-		r.logger.Info().Str("peer", coordMeshIP).Msg("Added replication peer")
+		r.logger.Info().Str("peer", coordMeshIP).Str("name", name).Msg("Added replication peer")
 		r.peers[coordMeshIP] = true
 		added = true
 	}
+	r.peerNames[coordMeshIP] = name
 	r.mu.Unlock()
 
 	if added && r.rebalancer != nil {
@@ -440,6 +467,7 @@ func (r *Replicator) RemovePeer(coordMeshIP string) {
 	if r.peers[coordMeshIP] {
 		r.logger.Info().Str("peer", coordMeshIP).Msg("Removed replication peer")
 		delete(r.peers, coordMeshIP)
+		delete(r.peerNames, coordMeshIP)
 		removed = true
 	}
 	r.mu.Unlock()
@@ -459,6 +487,26 @@ func (r *Replicator) GetPeers() []string {
 		peers = append(peers, peer)
 	}
 	return peers
+}
+
+// getPeerNodeIDs returns the set of coordinator names for all known peers.
+// This is used for ownership checks where bucket owners are stored as
+// coordinator names (e.g. "coordinator-1") rather than mesh IPs.
+func (r *Replicator) getPeerNodeIDs() map[string]struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make(map[string]struct{}, len(r.peerNames))
+	for _, name := range r.peerNames {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// getPeerName returns the coordinator name for a given mesh IP.
+func (r *Replicator) getPeerName(meshIP string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.peerNames[meshIP]
 }
 
 // RequestSync sends a sync request to a specific coordinator peer.
@@ -667,6 +715,8 @@ func (r *Replicator) handleIncomingMessage(from string, data []byte) error {
 		return r.handleFetchChunkResponse(msg)
 	case MessageTypeReplicateObjectMeta:
 		return r.handleReplicateObjectMeta(msg)
+	case MessageTypeObjectManifest:
+		return r.handleObjectManifest(msg)
 	default:
 		r.logger.Warn().Str("type", string(msg.Type)).Msg("Unknown message type")
 		return fmt.Errorf("unknown message type: %s", msg.Type)
@@ -2432,6 +2482,117 @@ func (r *Replicator) handleReplicateObjectMeta(msg *Message) error {
 		Msg("Successfully imported object metadata")
 
 	r.incrementReceivedCount()
+	return nil
+}
+
+// handleObjectManifest processes an incoming object manifest from a peer.
+// It purges local objects not present in the manifest, recovering from lost deletes.
+func (r *Replicator) handleObjectManifest(msg *Message) error {
+	var payload ObjectManifestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return fmt.Errorf("unmarshal object manifest payload: %w", err)
+	}
+
+	// Build set of (bucket, key) from the manifest for O(1) lookups
+	manifestSet := make(map[string]map[string]struct{}, len(payload.BucketKeys))
+	for bucket, keys := range payload.BucketKeys {
+		keySet := make(map[string]struct{}, len(keys))
+		for _, k := range keys {
+			keySet[k] = struct{}{}
+		}
+		manifestSet[bucket] = keySet
+	}
+
+	ctx, cancel := context.WithTimeout(r.ctx, 2*time.Minute)
+	defer cancel()
+
+	localKeys, err := r.s3.GetAllObjectKeys(ctx)
+	if err != nil {
+		r.logger.Warn().Err(err).Msg("Manifest reconciliation: failed to get local object keys")
+		return fmt.Errorf("get local keys: %w", err)
+	}
+
+	// Collect objects to purge: local objects not in the manifest.
+	// Safety: skip system bucket, only purge from buckets the sender owns.
+	//
+	// Two cases handled:
+	//   1. Bucket in manifest: purge objects locally present but absent from manifest
+	//      (sender updated/deleted individual objects).
+	//   2. Bucket NOT in manifest: sender owns the bucket locally but excluded it
+	//      entirely → sender deleted the whole bucket → purge all local objects.
+	//      This is the primary mechanism for cleaning up replicated buckets after
+	//      a file share (or any bucket) is deleted on the primary coordinator.
+	//
+	// maxPurgePerManifest caps the object-level reconciliation case (case 1) to
+	// limit damage from unexpected state mismatches. Case 2 (bucket deletion) has
+	// no cap because we must purge the entire bucket to recover storage.
+	const maxPurgePerManifest = 1000
+	var purged int
+
+	// Resolve the sender's coordinator name once (msg.From is a mesh IP).
+	senderName := r.getPeerName(msg.From)
+
+	for bucket, keys := range localKeys {
+		// Never purge system bucket based on manifest
+		if bucket == auth.SystemBucket {
+			continue
+		}
+
+		// Only process buckets the sender actually owns. On replicas, the
+		// bucket owner is set to the source coordinator's node ID during import.
+		// This prevents coordinator A's manifest from purging objects in buckets
+		// owned by coordinator C that were replicated to this node.
+		if owner := r.s3.GetBucketOwner(ctx, bucket); owner == "" || owner != senderName {
+			continue
+		}
+
+		senderKeys, senderHasBucket := manifestSet[bucket]
+		if !senderHasBucket {
+			// Sender owns this bucket but omitted it from the manifest entirely.
+			// This means the sender deleted the bucket; purge all local objects.
+			for _, key := range keys {
+				if err := r.s3.PurgeObject(ctx, bucket, key); err != nil {
+					r.logger.Warn().Err(err).
+						Str("bucket", bucket).
+						Str("key", key).
+						Msg("Manifest reconciliation: failed to purge object from deleted bucket")
+					continue
+				}
+				purged++
+			}
+			continue
+		}
+
+		// Bucket exists in both the manifest and locally: reconcile at object level.
+		for _, key := range keys {
+			if purged >= maxPurgePerManifest {
+				r.logger.Info().
+					Int("purged", purged).
+					Msg("Manifest reconciliation: hit per-manifest purge cap")
+				return nil
+			}
+
+			if _, exists := senderKeys[key]; !exists {
+				if err := r.s3.PurgeObject(ctx, bucket, key); err != nil {
+					r.logger.Warn().Err(err).
+						Str("bucket", bucket).
+						Str("key", key).
+						Msg("Manifest reconciliation: failed to purge stale object")
+					continue
+				}
+				purged++
+			}
+		}
+	}
+
+	if purged > 0 {
+		r.logger.Info().
+			Int("purged", purged).
+			Str("from", msg.From).
+			Str("sender_name", senderName).
+			Msg("Manifest reconciliation: purged stale objects")
+	}
+
 	return nil
 }
 

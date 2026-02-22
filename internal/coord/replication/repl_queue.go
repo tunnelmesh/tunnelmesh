@@ -2,8 +2,11 @@ package replication
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // replQueueEntry represents a pending replication operation in the queue.
@@ -225,10 +228,18 @@ func (r *Replicator) drainReplicationQueueFinal() {
 func (r *Replicator) runAutoSyncWorker() {
 	defer r.wg.Done()
 
-	// Initial delay to let the cluster stabilize
+	// Initial delay to let the cluster stabilize, but wake early on on-demand trigger.
 	select {
 	case <-r.ctx.Done():
 		return
+	case <-r.manifestSyncCh:
+		r.runAutoSyncCycle()
+		// Drain any trigger that arrived during the cycle — the cycle already
+		// captured the latest state, so an immediately queued trigger is redundant.
+		select {
+		case <-r.manifestSyncCh:
+		default:
+		}
 	case <-time.After(2 * time.Minute):
 	}
 
@@ -241,13 +252,26 @@ func (r *Replicator) runAutoSyncWorker() {
 			return
 		case <-ticker.C:
 			r.runAutoSyncCycle()
+		case <-r.manifestSyncCh:
+			r.runAutoSyncCycle()
+			// Drain any trigger that arrived during the cycle.
+			select {
+			case <-r.manifestSyncCh:
+			default:
+			}
 		}
 	}
 }
 
-// runAutoSyncCycle enqueues all objects for replication.
-// The queue deduplicates, and ReplicateObject skips already-replicated chunks.
+// runAutoSyncCycle enqueues locally-owned objects for replication.
+// Only buckets owned by this coordinator are synced — replicated buckets
+// (owned by peer coordinators) are skipped to prevent ping-pong replication
+// where replicas re-replicate received objects back to the source.
 func (r *Replicator) runAutoSyncCycle() {
+	if r.preSyncHook != nil {
+		r.preSyncHook()
+	}
+
 	peers := r.GetPeers()
 	if len(peers) == 0 {
 		return
@@ -262,18 +286,98 @@ func (r *Replicator) runAutoSyncCycle() {
 		return
 	}
 
-	var total int
+	// Build peer node ID set for O(1) lookups. Bucket owners are stored as
+	// coordinator names (e.g. "coordinator-1"), not mesh IPs, so we need the
+	// name mapping to correctly identify replicated buckets.
+	peerNodeIDs := r.getPeerNodeIDs()
+
+	// Filter to locally-owned buckets only. On replicas, buckets imported via
+	// replication have their owner set to the source coordinator's node ID.
+	// We skip those to avoid re-replicating objects back to the source.
+	localKeys := make(map[string][]string, len(allKeys))
+	var skippedBuckets int
 	for bucket, keys := range allKeys {
+		owner := r.s3.GetBucketOwner(ctx, bucket)
+		if _, isPeerNode := peerNodeIDs[owner]; isPeerNode {
+			skippedBuckets++
+			continue
+		}
+		localKeys[bucket] = keys
+	}
+
+	var total int
+	for bucket, keys := range localKeys {
 		for _, key := range keys {
 			r.EnqueueReplication(bucket, key, "put")
 			total++
 		}
+		_ = bucket
 	}
 
-	if total > 0 {
+	if total > 0 || skippedBuckets > 0 {
 		r.logger.Info().
 			Int("objects", total).
 			Int("peers", len(peers)).
-			Msg("Auto-sync: enqueued all objects for replication")
+			Int("skipped_replica_buckets", skippedBuckets).
+			Msg("Auto-sync: enqueued locally-owned objects for replication")
 	}
+
+	// Send object manifest for reconciliation — replicas purge objects
+	// not in the manifest to recover from lost delete messages.
+	// Only includes locally-owned buckets: each coordinator is authoritative
+	// for its own buckets and should not send manifests for replicated ones.
+	r.sendObjectManifest(ctx, localKeys, peers)
+}
+
+// sendObjectManifest sends the set of live objects to each peer so they can
+// purge any local objects not in the manifest. This is fire-and-forget:
+// reconciliation is idempotent and will be retried on the next auto-sync cycle.
+//
+// Safety: we never send an empty manifest. During transient states (startup,
+// S3 not yet loaded) an empty manifest would cause replicas to purge all
+// their objects. Skipping is safe — the next cycle will send a full manifest.
+func (r *Replicator) sendObjectManifest(ctx context.Context, allKeys map[string][]string, peers []string) {
+	if len(allKeys) == 0 || len(peers) == 0 {
+		return
+	}
+
+	payload := ObjectManifestPayload{BucketKeys: allKeys}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		r.logger.Error().Err(err).Msg("Auto-sync: failed to marshal object manifest")
+		return
+	}
+
+	msg := &Message{
+		Version: ProtocolVersion,
+		Type:    MessageTypeObjectManifest,
+		ID:      uuid.New().String(),
+		From:    r.nodeID,
+		Payload: json.RawMessage(payloadJSON),
+	}
+
+	data, err := msg.Marshal()
+	if err != nil {
+		r.logger.Error().Err(err).Msg("Auto-sync: failed to marshal manifest message")
+		return
+	}
+
+	for _, peerID := range peers {
+		if err := r.acquireSendSlot(ctx); err != nil {
+			r.logger.Warn().Err(err).Msg("Auto-sync: context cancelled during manifest send")
+			return
+		}
+		sendErr := r.transport.SendToCoordinator(ctx, peerID, data)
+		r.releaseSendSlot()
+		if sendErr != nil {
+			r.logger.Warn().Err(sendErr).
+				Str("peer", peerID).
+				Msg("Auto-sync: failed to send object manifest")
+		}
+	}
+
+	r.logger.Debug().
+		Int("peers", len(peers)).
+		Int("manifest_bytes", len(payloadJSON)).
+		Msg("Auto-sync: sent object manifest for reconciliation")
 }

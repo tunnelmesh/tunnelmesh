@@ -913,6 +913,63 @@ func TestMetricsOnCorrectRegistry(t *testing.T) {
 	assert.True(t, found, "S3 request metrics should be on the custom registry")
 }
 
+// mockDeleteNotifier records calls to NotifyObjectDeleted.
+type mockDeleteNotifier struct {
+	calls []struct{ bucket, key string }
+}
+
+func (m *mockDeleteNotifier) NotifyObjectDeleted(bucket, key string) {
+	m.calls = append(m.calls, struct{ bucket, key string }{bucket, key})
+}
+
+func TestDeleteObject_NotifiesDeleteNotifier(t *testing.T) {
+	server, store := newTestServer(t)
+	notifier := &mockDeleteNotifier{}
+	server.SetDeleteNotifier(notifier)
+
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	_, err := store.PutObject(context.Background(), "my-bucket", "file.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodDelete, "/my-bucket/file.txt", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, notifier.calls, 1)
+	assert.Equal(t, "my-bucket", notifier.calls[0].bucket)
+	assert.Equal(t, "file.txt", notifier.calls[0].key)
+}
+
+func TestDeleteObject_WorksWithoutNotifier(t *testing.T) {
+	server, store := newTestServer(t)
+	// No notifier set — nil safety check
+
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	_, err := store.PutObject(context.Background(), "my-bucket", "file.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodDelete, "/my-bucket/file.txt", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+}
+
+func TestDeleteObject_NoNotifyOnError(t *testing.T) {
+	server, _ := newTestServer(t)
+	notifier := &mockDeleteNotifier{}
+	server.SetDeleteNotifier(notifier)
+
+	// Delete from non-existent bucket
+	req := httptest.NewRequest(http.MethodDelete, "/nonexistent/file.txt", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Empty(t, notifier.calls, "should not notify on error")
+}
+
 func TestSetMetricsWiresIntoServer(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
 	require.NoError(t, store.CreateBucket(context.Background(), "b", "alice", 2, nil))

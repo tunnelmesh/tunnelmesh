@@ -54,6 +54,10 @@ const (
 
 	// MessageTypeReplicateObjectMeta replicates object metadata to a peer
 	MessageTypeReplicateObjectMeta MessageType = "replicate_object_meta"
+
+	// MessageTypeObjectManifest sends a manifest of all live objects for reconciliation.
+	// Replicas purge local objects not present in the manifest to recover from lost deletes.
+	MessageTypeObjectManifest MessageType = "object_manifest"
 )
 
 // Message is the envelope for all replication protocol messages.
@@ -190,6 +194,13 @@ type ReplicateObjectMetaPayload struct {
 	MetaJSON    json.RawMessage `json:"meta_json"`
 	BucketOwner string          `json:"bucket_owner,omitempty"` // Original bucket owner for auto-created buckets
 	Versions    []VersionEntry  `json:"versions,omitempty"`     // Version history entries (replicated to all coordinators)
+}
+
+// ObjectManifestPayload contains the set of live objects on the sender.
+// Replicas should purge any local objects not in this manifest (except system bucket).
+type ObjectManifestPayload struct {
+	// BucketKeys maps bucket name → set of live object keys.
+	BucketKeys map[string][]string `json:"bucket_keys"`
 }
 
 // NewReplicateMessage creates a new replication message.

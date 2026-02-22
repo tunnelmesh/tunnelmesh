@@ -84,18 +84,19 @@ type RegisterRequest struct {
 
 // RegisterResponse is returned after successful registration.
 type RegisterResponse struct {
-	MeshIP        string   `json:"mesh_ip"`                  // Assigned mesh IP address
-	MeshCIDR      string   `json:"mesh_cidr"`                // Full mesh CIDR for routing
-	Domain        string   `json:"domain"`                   // Domain suffix (e.g., ".tunnelmesh")
-	Token         string   `json:"token"`                    // JWT token for relay authentication
-	TLSCert       string   `json:"tls_cert,omitempty"`       // PEM-encoded TLS certificate signed by mesh CA
-	TLSKey        string   `json:"tls_key,omitempty"`        // PEM-encoded TLS private key
-	CoordMeshIPs  []string `json:"coord_mesh_ips,omitempty"` // All coordinator mesh IPs for DNS round-robin
-	ServerVersion string   `json:"server_version,omitempty"` // Server version for compatibility check
-	PeerName      string   `json:"peer_name,omitempty"`      // Assigned peer name (may differ from request if renamed)
-	PeerID        string   `json:"peer_id,omitempty"`        // Derived peer ID for RBAC (SHA256(pubkey)[:8] hex)
-	IsAdmin       bool     `json:"is_admin,omitempty"`       // True if peer is in admin_peers list (coordinator services enabled)
-	Coordinators  []string `json:"coordinators,omitempty"`   // List of coordinator mesh IPs for immediate replication setup
+	MeshIP           string            `json:"mesh_ip"`                     // Assigned mesh IP address
+	MeshCIDR         string            `json:"mesh_cidr"`                   // Full mesh CIDR for routing
+	Domain           string            `json:"domain"`                      // Domain suffix (e.g., ".tunnelmesh")
+	Token            string            `json:"token"`                       // JWT token for relay authentication
+	TLSCert          string            `json:"tls_cert,omitempty"`          // PEM-encoded TLS certificate signed by mesh CA
+	TLSKey           string            `json:"tls_key,omitempty"`           // PEM-encoded TLS private key
+	CoordMeshIPs     []string          `json:"coord_mesh_ips,omitempty"`    // All coordinator mesh IPs for DNS round-robin
+	ServerVersion    string            `json:"server_version,omitempty"`    // Server version for compatibility check
+	PeerName         string            `json:"peer_name,omitempty"`         // Assigned peer name (may differ from request if renamed)
+	PeerID           string            `json:"peer_id,omitempty"`           // Derived peer ID for RBAC (SHA256(pubkey)[:8] hex)
+	IsAdmin          bool              `json:"is_admin,omitempty"`          // True if peer is in admin_peers list (coordinator services enabled)
+	Coordinators     []string          `json:"coordinators,omitempty"`      // List of coordinator mesh IPs for immediate replication setup
+	CoordinatorNames map[string]string `json:"coordinator_names,omitempty"` // Map of mesh IP → coordinator name for replication ownership
 }
 
 // PeerStats contains traffic statistics reported by peers.

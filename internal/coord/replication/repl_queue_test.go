@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -126,7 +127,7 @@ func TestDrainReplicationQueue_Put(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	// Add object on coord-a
 	chunks := []string{"hash1", "hash2"}
@@ -174,7 +175,7 @@ func TestDrainReplicationQueue_Delete(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	// Add object on coord-b to be deleted
 	_ = s3b.Put(context.Background(), "bucket1", "file.txt", []byte("data"), "text/plain", nil)
@@ -271,7 +272,7 @@ func TestDrainReplicationQueue_BoundedConcurrency(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = r.Stop() })
 
-	r.AddPeer("coord-peer")
+	r.AddPeer("coord-peer", "coord-peer")
 
 	// Enqueue 20 delete operations
 	for i := 0; i < 20; i++ {
@@ -320,7 +321,7 @@ func TestShutdownDrain(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	// Add object and enqueue
 	chunks := []string{"hash1"}
@@ -367,7 +368,7 @@ func TestRunReplicationQueueWorker_SignalWakeup(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	// Add object
 	chunks := []string{"hash1"}
@@ -410,7 +411,7 @@ func TestAutoSyncCycle(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	// Add multiple objects
 	for _, key := range []string{"file1.txt", "file2.txt"} {
@@ -484,7 +485,7 @@ func TestChunkPipelining_MultipleChunks(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	// Create object with 10 chunks
 	chunks := make([]string, 10)
@@ -539,7 +540,7 @@ func TestChunkPipelining_WindowOne(t *testing.T) {
 	require.NoError(t, rB.Start())
 	defer func() { _ = rB.Stop() }()
 
-	rA.AddPeer("coord-b")
+	rA.AddPeer("coord-b", "coord-b")
 
 	chunks := []string{"hash-a", "hash-b", "hash-c"}
 	chunkData := map[string][]byte{
@@ -606,8 +607,8 @@ func TestProcessQueuePut_ParallelPeerReplication(t *testing.T) {
 	require.NoError(t, rC.Start())
 	defer func() { _ = rC.Stop() }()
 
-	rA.AddPeer("coord-b")
-	rA.AddPeer("coord-c")
+	rA.AddPeer("coord-b", "coord-b")
+	rA.AddPeer("coord-c", "coord-c")
 
 	// Create object with 6 chunks so striping distributes across all coordinators
 	chunks := make([]string, 6)
@@ -676,8 +677,8 @@ func TestProcessQueuePut_ReEnqueuesOnPartialFailure(t *testing.T) {
 	defer func() { _ = rB.Stop() }()
 
 	// Add coord-b (reachable) and coord-c (no replicator = unreachable)
-	rA.AddPeer("coord-b")
-	rA.AddPeer("coord-c")
+	rA.AddPeer("coord-b", "coord-b")
+	rA.AddPeer("coord-c", "coord-c")
 
 	// Create object with 6 chunks for realistic striping
 	chunks := make([]string, 6)
@@ -712,4 +713,524 @@ func TestProcessQueuePut_ReEnqueuesOnPartialFailure(t *testing.T) {
 		}
 	}
 	assert.Greater(t, bCount, 0, "coord-b should have received some chunks despite coord-c failure")
+}
+
+func TestAutoSyncCycle_SendsManifest(t *testing.T) {
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-a",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    0,
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("coord-b", "coord-b")
+
+	// Add some objects
+	s3Store.addObjectWithChunks("bucket1", "file1.txt", []string{"h1"}, map[string][]byte{"h1": []byte("d1")})
+	s3Store.addObjectWithChunks("bucket1", "file2.txt", []string{"h2"}, map[string][]byte{"h2": []byte("d2")})
+	s3Store.addObjectWithChunks("bucket2", "doc.txt", []string{"h3"}, map[string][]byte{"h3": []byte("d3")})
+
+	// Run auto-sync cycle — this enqueues puts AND sends the manifest
+	r.runAutoSyncCycle()
+
+	// Check that the transport received a manifest message
+	transport.mu.Lock()
+	messages := transport.sentMessages
+	transport.mu.Unlock()
+
+	var foundManifest bool
+	for _, sent := range messages {
+		msg, err := UnmarshalMessage(sent.data)
+		if err != nil {
+			continue
+		}
+		if msg.Type == MessageTypeObjectManifest {
+			foundManifest = true
+			var payload ObjectManifestPayload
+			require.NoError(t, json.Unmarshal(msg.Payload, &payload))
+			assert.Contains(t, payload.BucketKeys, "bucket1")
+			assert.Contains(t, payload.BucketKeys, "bucket2")
+			assert.ElementsMatch(t, []string{"file1.txt", "file2.txt"}, payload.BucketKeys["bucket1"])
+			assert.ElementsMatch(t, []string{"doc.txt"}, payload.BucketKeys["bucket2"])
+			break
+		}
+	}
+	assert.True(t, foundManifest, "Auto-sync should send an object manifest to peers")
+}
+
+func TestAutoSyncCycle_EmptyStoreSkipsManifest(t *testing.T) {
+	// An empty object store (e.g. during startup before S3 loads) must NOT
+	// send a manifest — an empty manifest would cause replicas to purge everything.
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-a",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    0,
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("coord-b", "coord-b")
+
+	// No objects in the store — run auto-sync
+	r.runAutoSyncCycle()
+
+	// No manifest should be sent
+	transport.mu.Lock()
+	messages := transport.sentMessages
+	transport.mu.Unlock()
+
+	for _, sent := range messages {
+		msg, err := UnmarshalMessage(sent.data)
+		if err != nil {
+			continue
+		}
+		assert.NotEqual(t, MessageTypeObjectManifest, msg.Type,
+			"Empty store must not send manifest (could cause mass purge on replicas)")
+	}
+}
+
+func TestManifestReconciliation_SkipsBucketsNotOwnedBySender(t *testing.T) {
+	// In a multi-coordinator setup, coordinator A should not be able to
+	// purge objects from buckets owned by coordinator C on this node.
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-b",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    0,
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	// Register coord-a and coord-c as peers (mesh IP → name mapping)
+	r.AddPeer("10.0.0.1", "coord-a")
+	r.AddPeer("10.0.0.3", "coord-c")
+
+	// coord-b has objects from two different owners:
+	// - bucket-a owned by coord-a (replicated from coord-a)
+	// - bucket-c owned by coord-c (replicated from coord-c)
+	s3Store.addObjectWithChunks("bucket-a", "file1.txt", []string{"h1"}, map[string][]byte{"h1": []byte("d1")})
+	s3Store.addObjectWithChunks("bucket-c", "file1.txt", []string{"h2"}, map[string][]byte{"h2": []byte("d2")})
+	s3Store.bucketOwners = map[string]string{
+		"bucket-a": "coord-a",
+		"bucket-c": "coord-c",
+	}
+
+	// coord-a sends a manifest listing bucket-a (empty) and bucket-c (empty).
+	// Without ownership check, this would purge both. With the fix, only bucket-a
+	// objects should be purged because coord-a doesn't own bucket-c.
+	// Note: msg.From is a mesh IP (overridden by handleIncomingMessage in production)
+	payload := ObjectManifestPayload{
+		BucketKeys: map[string][]string{
+			"bucket-a": {}, // coord-a removed all objects from its bucket
+			"bucket-c": {}, // coord-a claims bucket-c is empty too (wrong!)
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	msg := &Message{
+		Version: ProtocolVersion,
+		Type:    MessageTypeObjectManifest,
+		ID:      "test-manifest",
+		From:    "10.0.0.1", // Sender's mesh IP (resolved to "coord-a" via peerNames)
+		Payload: json.RawMessage(payloadJSON),
+	}
+
+	err = r.handleObjectManifest(msg)
+	require.NoError(t, err)
+
+	// bucket-a/file1.txt should be purged (coord-a owns bucket-a, and file is not in manifest)
+	_, _, err = s3Store.Get(context.Background(), "bucket-a", "file1.txt")
+	assert.Error(t, err, "bucket-a/file1.txt should be purged (sender owns this bucket)")
+
+	// bucket-c/file1.txt should NOT be purged (coord-a doesn't own bucket-c)
+	_, _, err = s3Store.Get(context.Background(), "bucket-c", "file1.txt")
+	assert.NoError(t, err, "bucket-c/file1.txt should survive (sender doesn't own this bucket)")
+}
+
+func TestAutoSyncCycle_SkipsReplicatedBuckets(t *testing.T) {
+	tests := []struct {
+		name        string
+		nodeID      string
+		peerMeshIP  string
+		peerName    string
+		bucketOwner string // owner of the replicated bucket
+	}{
+		{
+			name:        "same_identifier",
+			nodeID:      "coord-b",
+			peerMeshIP:  "coord-a",
+			peerName:    "coord-a",
+			bucketOwner: "coord-a",
+		},
+		{
+			name:        "mesh_ip_vs_coordinator_name",
+			nodeID:      "coordinator-2",
+			peerMeshIP:  "10.0.0.1",
+			peerName:    "coordinator-1",
+			bucketOwner: "coordinator-1", // Owner is coordinator name, NOT mesh IP
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := newMockTransport()
+			s3Store := newMockS3Store()
+			registry := newMockChunkRegistry()
+
+			r := NewReplicator(Config{
+				NodeID:              tc.nodeID,
+				Transport:           transport,
+				S3Store:             s3Store,
+				ChunkRegistry:       registry,
+				Logger:              zerolog.Nop(),
+				ChunkPipelineWindow: 5,
+				AutoSyncInterval:    0,
+			})
+			t.Cleanup(func() { _ = r.Stop() })
+
+			r.AddPeer(tc.peerMeshIP, tc.peerName)
+
+			s3Store.addObjectWithChunks("local-bucket", "local.txt", []string{"h1"}, map[string][]byte{"h1": []byte("d1")})
+			s3Store.addObjectWithChunks("replicated-bucket", "remote.txt", []string{"h2"}, map[string][]byte{"h2": []byte("d2")})
+			s3Store.bucketOwners = map[string]string{
+				"local-bucket":      "alice",
+				"replicated-bucket": tc.bucketOwner,
+			}
+
+			r.runAutoSyncCycle()
+
+			transport.mu.Lock()
+			messages := transport.sentMessages
+			transport.mu.Unlock()
+
+			var manifestPayload ObjectManifestPayload
+			var foundManifest bool
+			for _, sent := range messages {
+				msg, err := UnmarshalMessage(sent.data)
+				if err != nil {
+					continue
+				}
+				if msg.Type == MessageTypeObjectManifest {
+					foundManifest = true
+					require.NoError(t, json.Unmarshal(msg.Payload, &manifestPayload))
+					break
+				}
+			}
+
+			require.True(t, foundManifest, "Should send manifest for locally-owned buckets")
+			assert.Contains(t, manifestPayload.BucketKeys, "local-bucket",
+				"Manifest should include locally-owned bucket")
+			assert.NotContains(t, manifestPayload.BucketKeys, "replicated-bucket",
+				"Manifest should NOT include replicated bucket (owned by peer)")
+		})
+	}
+}
+
+func TestManifestReconciliation_PurgesDeletedBuckets(t *testing.T) {
+	// After a file share (or any bucket) is deleted on the primary coordinator,
+	// the next manifest won't include that bucket at all. Replica coordinators
+	// must purge all local objects in buckets that are:
+	//   a) owned by the sender, AND
+	//   b) absent from the sender's manifest (= sender has deleted the bucket)
+	// This is the primary fix for inter-run object accumulation in s3bench.
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-b",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    0,
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("10.0.0.1", "coord-a")
+
+	// coord-b has two file-share buckets replicated from coord-a.
+	// coord-a then deletes "fs+deleted-share" but keeps "fs+active-share".
+	s3Store.addObjectWithChunks("fs+active-share", "doc1.txt", []string{"h1"}, map[string][]byte{"h1": []byte("d1")})
+	s3Store.addObjectWithChunks("fs+active-share", "doc2.txt", []string{"h2"}, map[string][]byte{"h2": []byte("d2")})
+	s3Store.addObjectWithChunks("fs+deleted-share", "doc1.txt", []string{"h3"}, map[string][]byte{"h3": []byte("d3")})
+	s3Store.addObjectWithChunks("fs+deleted-share", "doc2.txt", []string{"h4"}, map[string][]byte{"h4": []byte("d4")})
+	s3Store.bucketOwners = map[string]string{
+		"fs+active-share":  "coord-a",
+		"fs+deleted-share": "coord-a",
+	}
+
+	// coord-a sends a manifest that includes only fs+active-share.
+	// fs+deleted-share is absent because coord-a called ForceDeleteBucket on it.
+	payload := ObjectManifestPayload{
+		BucketKeys: map[string][]string{
+			"fs+active-share": {"doc1.txt", "doc2.txt"}, // still alive
+			// fs+deleted-share intentionally absent — coord-a deleted it
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	msg := &Message{
+		Version: ProtocolVersion,
+		Type:    MessageTypeObjectManifest,
+		ID:      "test-manifest-deleted",
+		From:    "10.0.0.1",
+		Payload: json.RawMessage(payloadJSON),
+	}
+
+	err = r.handleObjectManifest(msg)
+	require.NoError(t, err)
+
+	// fs+active-share objects must survive (they're in the manifest)
+	_, _, err = s3Store.Get(context.Background(), "fs+active-share", "doc1.txt")
+	assert.NoError(t, err, "active share doc1.txt should survive")
+	_, _, err = s3Store.Get(context.Background(), "fs+active-share", "doc2.txt")
+	assert.NoError(t, err, "active share doc2.txt should survive")
+
+	// fs+deleted-share objects must be purged (sender deleted the whole bucket)
+	_, _, err = s3Store.Get(context.Background(), "fs+deleted-share", "doc1.txt")
+	assert.Error(t, err, "deleted share doc1.txt must be purged")
+	_, _, err = s3Store.Get(context.Background(), "fs+deleted-share", "doc2.txt")
+	assert.Error(t, err, "deleted share doc2.txt must be purged")
+}
+
+func TestManifestReconciliation_UnknownSenderSkipsPurge(t *testing.T) {
+	// If the sender's mesh IP is not in our peerNames map (e.g. peer not yet
+	// registered), senderName is empty and GetBucketOwner returns a non-empty
+	// name, so the ownership check prevents any purge.
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+
+	r := NewReplicator(Config{
+		NodeID:    "coord-b",
+		Transport: transport,
+		S3Store:   s3Store,
+		Logger:    zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	// No peers registered → getPeerName returns ""
+	s3Store.addObjectWithChunks("bucket-a", "file.txt", []string{"h1"}, map[string][]byte{"h1": []byte("d1")})
+	s3Store.bucketOwners = map[string]string{"bucket-a": "coord-a"}
+
+	payload := ObjectManifestPayload{BucketKeys: map[string][]string{}} // empty manifest
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	msg := &Message{
+		Version: ProtocolVersion,
+		Type:    MessageTypeObjectManifest,
+		ID:      "test-unknown-sender",
+		From:    "10.0.0.99", // unknown IP
+		Payload: json.RawMessage(payloadJSON),
+	}
+
+	err = r.handleObjectManifest(msg)
+	require.NoError(t, err)
+
+	// Object must NOT be purged (sender is unknown, no ownership match)
+	_, _, err = s3Store.Get(context.Background(), "bucket-a", "file.txt")
+	assert.NoError(t, err, "object must survive when sender is unknown")
+}
+
+// TestTriggerManifestSync_NonBlocking verifies that TriggerManifestSync is
+// non-blocking and idempotent: multiple rapid calls produce at most one pending
+// signal in the buffered channel.
+func TestTriggerManifestSync_NonBlocking(t *testing.T) {
+	r := NewReplicator(Config{
+		NodeID:           "coord-a",
+		Transport:        newMockTransport(),
+		S3Store:          newMockS3Store(),
+		Logger:           zerolog.Nop(),
+		AutoSyncInterval: 0,
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	// Channel starts empty.
+	assert.Equal(t, 0, len(r.manifestSyncCh), "channel should start empty")
+
+	// First call queues a signal.
+	r.TriggerManifestSync()
+	assert.Equal(t, 1, len(r.manifestSyncCh), "one signal should be queued after first call")
+
+	// Second call must be a no-op (channel already full) and must not block.
+	done := make(chan struct{})
+	go func() {
+		r.TriggerManifestSync()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Good: returned without blocking.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("TriggerManifestSync blocked unexpectedly")
+	}
+
+	// Still only one pending signal.
+	assert.Equal(t, 1, len(r.manifestSyncCh), "channel should still hold exactly one signal")
+}
+
+// TestTriggerManifestSync_WorkerDrains verifies that the auto-sync worker picks
+// up the on-demand trigger and calls runAutoSyncCycle (evidenced by a manifest
+// message being sent to peers).
+func TestTriggerManifestSync_WorkerDrains(t *testing.T) {
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	// Use a very long ticker interval so only the on-demand path fires.
+	r := NewReplicator(Config{
+		NodeID:              "coord-a",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    24 * time.Hour, // effectively never ticks during test
+	})
+	require.NoError(t, r.Start())
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("coord-b", "coord-b")
+
+	// Put an object so the manifest is non-empty (empty manifests are suppressed).
+	s3Store.addObjectWithChunks("bucket1", "file.txt", []string{"h1"}, map[string][]byte{"h1": []byte("data")})
+
+	// Signal the on-demand sync — worker must wake and send manifest.
+	r.TriggerManifestSync()
+
+	// Wait for the manifest message to arrive (worker runs asynchronously).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		transport.mu.Lock()
+		msgs := transport.sentMessages
+		transport.mu.Unlock()
+
+		for _, sent := range msgs {
+			msg, err := UnmarshalMessage(sent.data)
+			if err != nil {
+				continue
+			}
+			if msg.Type == MessageTypeObjectManifest {
+				// Channel should be drained by the worker now.
+				assert.Equal(t, 0, len(r.manifestSyncCh), "worker should drain manifestSyncCh")
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("worker did not send manifest within 2 seconds of TriggerManifestSync")
+}
+
+// TestTriggerManifestSync_Deduplication verifies that two calls that both arrive
+// while the worker is busy processing the first result in exactly one cycle, not two.
+// It uses preSyncHook to pause the worker at a deterministic point, ensuring the
+// second TriggerManifestSync call races with an in-progress cycle (not a future one).
+func TestTriggerManifestSync_Deduplication(t *testing.T) {
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-a",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    24 * time.Hour,
+	})
+
+	// Hook: block the worker at the start of its first cycle until we release it.
+	// This guarantees the second TriggerManifestSync call arrives while the cycle
+	// is in progress and the channel is empty (worker already consumed the first signal).
+	workerStarted := make(chan struct{})
+	releaseCh := make(chan struct{})
+	r.preSyncHook = func() {
+		close(workerStarted) // signal: worker is inside the cycle, channel now empty
+		<-releaseCh          // block until test releases
+		r.preSyncHook = nil  // run hook only for the first cycle
+	}
+
+	require.NoError(t, r.Start())
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("coord-b", "coord-b")
+	s3Store.addObjectWithChunks("bucket1", "file.txt", []string{"h1"}, map[string][]byte{"h1": []byte("data")})
+
+	// First trigger: worker wakes from manifestSyncCh, enters the hook, and blocks.
+	r.TriggerManifestSync()
+	<-workerStarted // worker has read the channel; channel is now empty
+
+	// Second trigger: channel is empty, so this queues a real signal.
+	r.TriggerManifestSync()
+	assert.Equal(t, 1, len(r.manifestSyncCh), "second trigger queued while worker is busy")
+
+	// Release: worker finishes cycle 1 then drains the second signal (no cycle 2).
+	close(releaseCh)
+
+	// Wait for the manifest from cycle 1.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		transport.mu.Lock()
+		manifestCount := 0
+		for _, sent := range transport.sentMessages {
+			msg, err := UnmarshalMessage(sent.data)
+			if err != nil {
+				continue
+			}
+			if msg.Type == MessageTypeObjectManifest {
+				manifestCount++
+			}
+		}
+		transport.mu.Unlock()
+
+		if manifestCount >= 1 {
+			// Give the worker a moment to potentially fire a second time.
+			time.Sleep(100 * time.Millisecond)
+
+			transport.mu.Lock()
+			finalCount := 0
+			for _, sent := range transport.sentMessages {
+				msg, err := UnmarshalMessage(sent.data)
+				if err != nil {
+					continue
+				}
+				if msg.Type == MessageTypeObjectManifest {
+					finalCount++
+				}
+			}
+			transport.mu.Unlock()
+
+			assert.Equal(t, 1, finalCount,
+				"trigger queued during an in-progress cycle should be drained, not cause a second cycle")
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("worker did not send manifest within 2 seconds")
 }

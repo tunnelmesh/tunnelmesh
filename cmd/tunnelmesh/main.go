@@ -1091,7 +1091,11 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		// enabling immediate bidirectional replication.
 		if replicator := srv.GetReplicator(); replicator != nil && len(resp.Coordinators) > 0 {
 			for _, coordIP := range resp.Coordinators {
-				replicator.AddPeer(coordIP)
+				name := resp.CoordinatorNames[coordIP]
+				if name == "" {
+					name = coordIP // fallback for older servers
+				}
+				replicator.AddPeer(coordIP, name)
 			}
 			log.Info().
 				Int("peers", len(resp.Coordinators)).

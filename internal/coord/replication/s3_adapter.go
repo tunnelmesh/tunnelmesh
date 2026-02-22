@@ -254,6 +254,11 @@ func (a *S3StoreAdapter) ImportVersionHistory(ctx context.Context, bucket, key s
 	return count, chunksToCheck, nil
 }
 
+// GetBucketOwner returns the owner of a bucket (empty string if not found).
+func (a *S3StoreAdapter) GetBucketOwner(ctx context.Context, bucket string) string {
+	return a.store.GetBucketOwner(ctx, bucket)
+}
+
 // GetAllObjectKeys returns all object keys grouped by bucket.
 func (a *S3StoreAdapter) GetAllObjectKeys(ctx context.Context) (map[string][]string, error) {
 	result, err := a.store.GetAllObjectKeys(ctx)

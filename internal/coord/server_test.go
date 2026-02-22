@@ -1643,6 +1643,59 @@ func TestServer_SetCoordinatorID_OnInit(t *testing.T) {
 		"SetCoordinatorID should be called during server init with cfg.Name")
 }
 
+func TestHandleRegister_IncludesSelfInCoordinatorsList(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Simulate coordinator having its own mesh IP (normally set after join_mesh completes)
+	srv.SetCoordMeshIP("10.42.0.1")
+
+	// Register a coordinator peer (different name from this coordinator)
+	regReq := proto.RegisterRequest{
+		Name:          "coordinator-2",
+		PublicKey:     "SHA256:coord2key",
+		PublicIPs:     []string{"2.3.4.5"},
+		IsCoordinator: true,
+	}
+	body, _ := json.Marshal(regReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp proto.RegisterResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+
+	// Self (10.42.0.1 / "test-coord") must be included so coordinator-2 can populate peerNames
+	assert.Contains(t, resp.Coordinators, "10.42.0.1",
+		"registrar must include itself in Coordinators so registrant can resolve sender name")
+	assert.Equal(t, "test-coord", resp.CoordinatorNames["10.42.0.1"],
+		"registrar must include its own name so registrant can populate peerNames correctly")
+
+	// Self-registration guard: if same-name coordinator registers, self must NOT be included
+	// (would cause replication to self)
+	regSelf := proto.RegisterRequest{
+		Name:          "test-coord",
+		PublicKey:     "SHA256:selfkey",
+		IsCoordinator: true,
+	}
+	bodySelf, _ := json.Marshal(regSelf)
+	reqSelf := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(bodySelf))
+	reqSelf.Header.Set("Authorization", "Bearer test-token")
+	reqSelf.Header.Set("Content-Type", "application/json")
+	wSelf := httptest.NewRecorder()
+	srv.ServeHTTP(wSelf, reqSelf)
+
+	var respSelf proto.RegisterResponse
+	err = json.Unmarshal(wSelf.Body.Bytes(), &respSelf)
+	require.NoError(t, err)
+	assert.NotContains(t, respSelf.Coordinators, "10.42.0.1",
+		"self-registration must not include self to avoid replication loops")
+}
+
 func TestServer_RegistrationResponseCoordinatorPeers(t *testing.T) {
 	srv := newTestServerWithS3(t)
 
@@ -1656,7 +1709,7 @@ func TestServer_RegistrationResponseCoordinatorPeers(t *testing.T) {
 	// (mirrors the code in main.go after join_mesh registration)
 	respCoordinators := []string{"10.0.0.1", "10.0.0.2"}
 	for _, coordIP := range respCoordinators {
-		replicator.AddPeer(coordIP)
+		replicator.AddPeer(coordIP, coordIP)
 	}
 
 	// After: peers should be added
@@ -1665,6 +1718,6 @@ func TestServer_RegistrationResponseCoordinatorPeers(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, peers)
 
 	// AddPeer is idempotent — adding same peer again should not duplicate
-	replicator.AddPeer("10.0.0.1")
+	replicator.AddPeer("10.0.0.1", "10.0.0.1")
 	assert.Len(t, replicator.GetPeers(), 2, "duplicate AddPeer should be idempotent")
 }

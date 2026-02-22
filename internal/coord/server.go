@@ -921,7 +921,7 @@ func (s *Server) StartReplicator() error {
 	for name, info := range s.coordinators {
 		// Don't add self to replication targets
 		if name != s.cfg.Name {
-			s.replicator.AddPeer(info.peer.MeshIP)
+			s.replicator.AddPeer(info.peer.MeshIP, name)
 			log.Debug().
 				Str("peer", name).
 				Str("mesh_ip", info.peer.MeshIP).
@@ -1270,6 +1270,7 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 	s.fileShareMgr = s3.NewFileShareManager(store, systemStore, s.s3Authorizer)
 	s.s3Server.SetBucketRecoverer(s.fileShareMgr)
 	s.s3Server.SetRequestForwarder(s)
+	s.s3Server.SetDeleteNotifier(s)
 	log.Info().Int("shares", len(s.fileShareMgr.List())).Msg("file share manager initialized")
 
 	// Recover coordinator state from S3
@@ -1837,7 +1838,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Check peer name instead of mesh IP to avoid race condition with storeCoordIPs()
 		// which happens asynchronously after registration completes
 		if req.Name != s.cfg.Name {
-			s.replicator.AddPeer(meshIP)
+			s.replicator.AddPeer(meshIP, req.Name)
 			log.Debug().Str("peer", req.Name).Str("mesh_ip", meshIP).Msg("added coordinator to replication targets")
 		} else {
 			log.Debug().Str("peer", req.Name).Msg("skipping self-replication (coordinator registering itself)")
@@ -1948,25 +1949,44 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// If registering peer is a coordinator, include list of all known coordinators
 	// This enables immediate bidirectional replication without separate ListPeers() call
 	var coordinators []string
+	var coordinatorNames map[string]string
 	if peer.IsCoordinator {
 		for _, peerInfo := range s.peers {
 			if peerInfo.peer.IsCoordinator && peerInfo.peer.MeshIP != meshIP {
 				coordinators = append(coordinators, peerInfo.peer.MeshIP)
+				if coordinatorNames == nil {
+					coordinatorNames = make(map[string]string)
+				}
+				coordinatorNames[peerInfo.peer.MeshIP] = peerInfo.peer.Name
 			}
+		}
+		// Include self so the registering coordinator discovers THIS coordinator as a
+		// replication peer. Without this, getPeerName(msg.From) returns "" on the
+		// registrant and all manifest-based purges are silently skipped.
+		// Guards: skip if self-registering (would cause coordinator to replicate to itself),
+		// or if own mesh IP not yet known (SetCoordMeshIP not yet called).
+		if req.Name != s.cfg.Name && len(coordIPs) > 0 {
+			selfMeshIP := coordIPs[0] // Self is always first in GetCoordMeshIPs()
+			if coordinatorNames == nil {
+				coordinatorNames = make(map[string]string)
+			}
+			coordinators = append(coordinators, selfMeshIP)
+			coordinatorNames[selfMeshIP] = s.cfg.Name
 		}
 	}
 
 	resp := proto.RegisterResponse{
-		MeshIP:        meshIP,
-		MeshCIDR:      mesh.CIDR,
-		Domain:        mesh.DomainSuffix,
-		Token:         token,
-		CoordMeshIPs:  coordIPs, // All coordinator IPs for DNS round-robin
-		ServerVersion: s.version,
-		PeerName:      req.Name, // May differ from original request if renamed
-		PeerID:        peerID,
-		IsAdmin:       isAdmin,
-		Coordinators:  coordinators, // For immediate replication setup
+		MeshIP:           meshIP,
+		MeshCIDR:         mesh.CIDR,
+		Domain:           mesh.DomainSuffix,
+		Token:            token,
+		CoordMeshIPs:     coordIPs, // All coordinator IPs for DNS round-robin
+		ServerVersion:    s.version,
+		PeerName:         req.Name, // May differ from original request if renamed
+		PeerID:           peerID,
+		IsAdmin:          isAdmin,
+		Coordinators:     coordinators,     // For immediate replication setup
+		CoordinatorNames: coordinatorNames, // For replication ownership tracking
 	}
 
 	// Generate TLS certificate for the peer

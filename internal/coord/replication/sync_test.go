@@ -511,8 +511,8 @@ func TestRequestSyncFromAll(t *testing.T) {
 	}()
 
 	// Add some peers
-	replicator.AddPeer("10.42.0.2")
-	replicator.AddPeer("10.42.0.3")
+	replicator.AddPeer("10.42.0.2", "10.42.0.2")
+	replicator.AddPeer("10.42.0.3", "10.42.0.3")
 
 	// Request sync from all peers
 	ctx := context.Background()

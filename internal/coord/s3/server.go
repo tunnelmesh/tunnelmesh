@@ -105,11 +105,12 @@ type RequestForwarder interface {
 
 // Server provides an S3-compatible HTTP interface.
 type Server struct {
-	store      *Store
-	authorizer Authorizer
-	metrics    atomic.Pointer[S3Metrics]
-	recoverer  BucketRecoverer
-	forwarder  RequestForwarder
+	store       *Store
+	authorizer  Authorizer
+	metrics     atomic.Pointer[S3Metrics]
+	recoverer   BucketRecoverer
+	forwarder   RequestForwarder
+	delNotifier DeleteNotifier
 }
 
 // Authorizer is the interface for checking S3 permissions.
@@ -125,6 +126,12 @@ type Authorizer interface {
 	GetAllowedPrefixes(userID, bucket string) []string
 }
 
+// DeleteNotifier is called after an object is deleted via the S3 API.
+// The coordinator implements this to enqueue delete replication.
+type DeleteNotifier interface {
+	NotifyObjectDeleted(bucket, key string)
+}
+
 // BucketRecoverer can recreate missing buckets for existing shares.
 type BucketRecoverer interface {
 	EnsureBucketForShare(ctx context.Context, bucketName string) error
@@ -138,6 +145,11 @@ func (s *Server) SetBucketRecoverer(r BucketRecoverer) {
 // SetRequestForwarder sets the request forwarder for distributing requests across coordinators.
 func (s *Server) SetRequestForwarder(f RequestForwarder) {
 	s.forwarder = f
+}
+
+// SetDeleteNotifier sets the notifier called after objects are deleted via the S3 API.
+func (s *Server) SetDeleteNotifier(n DeleteNotifier) {
+	s.delNotifier = n
 }
 
 // SetMetrics atomically sets or replaces the metrics instance on the server.
@@ -629,6 +641,10 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, bucket, ke
 				s.writeError(rec, http.StatusInternalServerError, "InternalError", err.Error())
 			}
 			return
+		}
+
+		if s.delNotifier != nil {
+			s.delNotifier.NotifyObjectDeleted(bucket, key)
 		}
 
 		rec.WriteHeader(http.StatusNoContent)

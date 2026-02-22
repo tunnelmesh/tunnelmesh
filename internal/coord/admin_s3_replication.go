@@ -136,6 +136,14 @@ func (s *Server) forwardS3Request(w http.ResponseWriter, r *http.Request, target
 	proxy.ServeHTTP(w, r)
 }
 
+// NotifyObjectDeleted implements s3.DeleteNotifier. It enqueues a delete replication
+// so that replica coordinators remove the object.
+func (s *Server) NotifyObjectDeleted(bucket, key string) {
+	if s.replicator != nil {
+		s.replicator.EnqueueReplication(bucket, key, "delete")
+	}
+}
+
 // ForwardS3Request implements s3.RequestForwarder. It checks if the given bucket/key
 // should be handled by a different coordinator and forwards the request if so.
 // The port parameter specifies the target port (e.g. "9000" for S3 API, "" for default 443).

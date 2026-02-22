@@ -15,7 +15,8 @@ import (
 // orphanedBucketGracePeriod is the minimum age a bucket must reach before it
 // can be purged as orphaned. This prevents deleting buckets that were replicated
 // from another coordinator before the corresponding share config arrives.
-const orphanedBucketGracePeriod = 10 * time.Minute
+// 2 minutes is sufficient: file_shares.json replicates within seconds.
+const orphanedBucketGracePeriod = 2 * time.Minute
 
 // FileShareManager manages file shares backed by S3 buckets.
 type FileShareManager struct {

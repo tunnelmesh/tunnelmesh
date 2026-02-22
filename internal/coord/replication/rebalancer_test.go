@@ -53,7 +53,7 @@ func TestRebalancer_TopologyChange_ChunkRedistribution(t *testing.T) {
 	rb.runRebalanceCycle(context.Background())
 
 	// Now add a peer
-	replicator.AddPeer("coord2")
+	replicator.AddPeer("coord2", "coord2")
 
 	// Verify rebalanceObject can compute what needs moving
 	policy := NewStripingPolicy([]string{"coord1", "coord2"})
@@ -72,8 +72,8 @@ func TestRebalancer_CoordinatorLeaves(t *testing.T) {
 	rb, replicator, s3Store := newTestRebalancer(t)
 
 	// Start with 3 coordinators
-	replicator.AddPeer("coord2")
-	replicator.AddPeer("coord3")
+	replicator.AddPeer("coord2", "coord2")
+	replicator.AddPeer("coord3", "coord3")
 
 	chunks := []string{"chunk_a", "chunk_b", "chunk_c"}
 	chunkData := map[string][]byte{
@@ -121,7 +121,7 @@ func TestRebalancer_RateLimiting(t *testing.T) {
 func TestRebalancer_Idempotent(t *testing.T) {
 	rb, replicator, s3Store := newTestRebalancer(t)
 
-	replicator.AddPeer("coord2")
+	replicator.AddPeer("coord2", "coord2")
 
 	chunks := []string{"chunk_a"}
 	chunkData := map[string][]byte{
@@ -176,7 +176,7 @@ func TestRebalancer_StartStop(t *testing.T) {
 func TestRebalancer_ConcurrentWrites(t *testing.T) {
 	rb, replicator, s3Store := newTestRebalancer(t)
 
-	replicator.AddPeer("coord2")
+	replicator.AddPeer("coord2", "coord2")
 
 	// Initial object
 	chunks := []string{"chunk_a", "chunk_b"}
@@ -255,8 +255,8 @@ func TestRebalancer_EnqueuesObjectsAfterRebalance(t *testing.T) {
 	}
 
 	// Add coord2/coord3 — rebalancer should NOT delete any chunks
-	replicator.AddPeer("coord2")
-	replicator.AddPeer("coord3")
+	replicator.AddPeer("coord2", "coord2")
+	replicator.AddPeer("coord3", "coord3")
 
 	var callbackStats RebalancerStats
 	rb.OnCycleComplete = func(stats RebalancerStats) {
@@ -294,8 +294,8 @@ func TestRebalancer_ChunksAlwaysPreserved(t *testing.T) {
 	rb.runRebalanceCycle(context.Background())
 
 	// Add peers
-	replicator.AddPeer("coord2")
-	replicator.AddPeer("coord3")
+	replicator.AddPeer("coord2", "coord2")
+	replicator.AddPeer("coord3", "coord3")
 	rb.NotifyTopologyChange()
 	rb.runRebalanceCycle(context.Background())
 
@@ -321,8 +321,8 @@ func TestRebalancer_SharedChunksPreserved(t *testing.T) {
 	})
 
 	// 3 coordinators so RF=2 < 3
-	replicator.AddPeer("coord2")
-	replicator.AddPeer("coord3")
+	replicator.AddPeer("coord2", "coord2")
+	replicator.AddPeer("coord3", "coord3")
 
 	rb.NotifyTopologyChange()
 	rb.runRebalanceCycle(context.Background())
