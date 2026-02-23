@@ -69,6 +69,6 @@ wireguard:
 %{ endif ~}
 COORDCONF
 
-# Install as serve-mode service (no auth token required; service name = tunnelmesh-server)
+# Install coordinator service (serve mode; no TUNNELMESH_TOKEN required)
 echo "y" | /usr/local/bin/tunnelmesh service install --mode serve --config /etc/tunnelmesh/coordinator.yaml
 %{ endif ~}
