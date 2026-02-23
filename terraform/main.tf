@@ -68,7 +68,11 @@ locals {
   # Find the coordinator node (there should be exactly one if any nodes need it)
   coordinator_name = one([for name, cfg in var.peers : name if lookup(cfg, "coordinator", false)])
   # External API on configurable port (port 443 reserved for mesh-internal admin)
-  coordinator_url  = local.coordinator_name != null ? "https://${local.coordinator_name}.${var.domain}:${var.external_api_port}" : var.external_coordinator_url
+  coordinator_url = local.coordinator_name != null ? "https://${local.coordinator_name}.${var.domain}:${var.external_api_port}" : var.external_coordinator_url
+
+  # Monitoring requires at least 1 GB RAM; upgrade nodes that are below this threshold
+  monitoring_min_size = "s-1vcpu-1gb"
+  sub_1gb_sizes       = toset(["s-1vcpu-512mb-10gb"])
 }
 
 # Deploy all nodes using the tunnelmesh-node module
@@ -110,7 +114,13 @@ module "node" {
   wg_endpoint    = lookup(each.value, "wireguard", false) ? "${each.key}.${var.domain}:${lookup(each.value, "wg_port", var.default_wg_port)}" : ""
 
   # Droplet settings
-  droplet_size    = lookup(each.value, "size", var.default_droplet_size)
+  # Monitoring requires ≥1 GB RAM; upgrade sub-1 GB nodes automatically
+  droplet_size = (
+    lookup(each.value, "monitoring_enabled", false) &&
+    contains(local.sub_1gb_sizes, lookup(each.value, "size", var.default_droplet_size))
+    ? local.monitoring_min_size
+    : lookup(each.value, "size", var.default_droplet_size)
+  )
   ssh_key_ids     = local.ssh_key_ids
   ssh_tunnel_port = lookup(each.value, "ssh_port", var.default_ssh_port)
 
