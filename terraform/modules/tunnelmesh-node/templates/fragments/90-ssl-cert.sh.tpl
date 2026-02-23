@@ -1,7 +1,17 @@
 %{ if coordinator_enabled && ssl_enabled ~}
 # Wait for DNS propagation and obtain SSL certificate
 echo "Waiting for DNS propagation before SSL cert request..."
-sleep 60
+# Poll until the A record resolves to this droplet's public IP, or give up after 5 min
+MY_IP=$(curl -s http://ipv4.icanhazip.com)
+for i in $(seq 1 30); do
+    RESOLVED=$(dig +short A ${node_name}.${domain} @8.8.8.8 | tail -1)
+    if [ "$RESOLVED" = "$MY_IP" ]; then
+        echo "DNS propagated: ${node_name}.${domain} -> $MY_IP"
+        break
+    fi
+    echo "Waiting for DNS... attempt $i/30 (got '$RESOLVED', want '$MY_IP')"
+    sleep 10
+done
 
 # Try to get certificate
 certbot certonly --webroot -w /var/www/html \
