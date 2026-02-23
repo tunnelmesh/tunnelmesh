@@ -111,31 +111,11 @@ func (s *Server) updatePeerListingsAfterForward(bucket, key, targetIP string, r 
 		}
 	}
 
-	// Also persist to localListingIndex so forwarded entries survive background reloads.
-	// The Forwarded and SourceIP fields mark these as forwarded, distinguishing them
-	// from locally stored objects.
-	switch r.Method {
-	case http.MethodPut:
-		info := S3ObjectInfo{
-			Key:          key,
-			Size:         r.ContentLength,
-			LastModified: time.Now().UTC().Format(time.RFC3339),
-			ContentType:  r.Header.Get("Content-Type"),
-			Forwarded:    true,
-			ForwardedAt:  time.Now(),
-			SourceIP:     targetIP,
-		}
-		if info.ContentType == "" {
-			info.ContentType = "application/octet-stream"
-		}
-		if bucketMeta, err := s.s3Store.HeadBucket(r.Context(), bucket); err == nil && bucketMeta.Owner != "" {
-			info.Owner = s.getPeerName(bucketMeta.Owner)
-		}
-		s.updateListingIndex(bucket, key, &info, "put")
-
-	case http.MethodDelete:
-		s.updateListingIndex(bucket, key, nil, "delete")
-	}
+	// NOTE: Forwarded entries are NOT added to localListingIndex because:
+	// 1. localListingIndex should only contain locally stored files
+	// 2. When persisted to system store and loaded by other coordinators,
+	//    the SourceIP field would be overwritten with the wrong coordinator IP
+	// 3. Forwarded entries in peerListings have a 10-minute TTL for cleanup
 }
 
 // forwardS3Request proxies an S3 request to the target coordinator.
