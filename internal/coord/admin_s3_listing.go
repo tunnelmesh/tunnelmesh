@@ -566,6 +566,7 @@ func (s *Server) reconcileLocalIndex(ctx context.Context) {
 // mergeReconcileWithCurrent merges a filesystem scan result (ground truth) with the
 // current listing index. Incremental updates that arrived during the scan (detected
 // by Seq advancing past preSeq) are preserved so they aren't lost.
+// Forwarded entries are always preserved since they don't exist in filesystem scans.
 func mergeReconcileWithCurrent(scan, current *listingIndex, preSeq uint64) *listingIndex {
 	merged := &listingIndex{Buckets: make(map[string]*bucketListing)}
 	for k, v := range scan.Buckets {
@@ -578,7 +579,31 @@ func mergeReconcileWithCurrent(scan, current *listingIndex, preSeq uint64) *list
 
 	merged.Seq = current.Seq
 
-	// No incremental updates during scan — filesystem result is complete
+	// Always preserve forwarded entries from current index, regardless of Seq.
+	// Forwarded entries don't exist in filesystem scans but must be preserved
+	// for multi-coordinator object lookups.
+	for bucket, currentBL := range current.Buckets {
+		scanBL := merged.Buckets[bucket]
+		if scanBL == nil {
+			scanBL = &bucketListing{}
+			merged.Buckets[bucket] = scanBL
+		}
+
+		// Preserve all forwarded entries
+		for _, obj := range currentBL.Objects {
+			if obj.Forwarded {
+				scanBL.Objects = appendIfNotExists(scanBL.Objects, obj)
+			}
+		}
+		for _, obj := range currentBL.Recycled {
+			if obj.Forwarded {
+				scanBL.Recycled = appendIfNotExists(scanBL.Recycled, obj)
+			}
+		}
+	}
+
+	// If no incremental updates during scan, forwarded entries are already
+	// preserved above, so we're done
 	if current.Seq <= preSeq {
 		return merged
 	}
@@ -611,6 +636,17 @@ func appendMissing(dst, src []S3ObjectInfo) []S3ObjectInfo {
 		}
 	}
 	return dst
+}
+
+// appendIfNotExists appends obj to dst if no entry with the same key exists.
+// Used for preserving forwarded entries during reconciliation.
+func appendIfNotExists(dst []S3ObjectInfo, obj S3ObjectInfo) []S3ObjectInfo {
+	for _, existing := range dst {
+		if existing.Key == obj.Key {
+			return dst // Already exists, don't append
+		}
+	}
+	return append(dst, obj)
 }
 
 // listingIndexEqual compares two listing indexes for equality.
@@ -680,6 +716,7 @@ func upsertObjectList(objs []S3ObjectInfo, key string, info S3ObjectInfo) []S3Ob
 
 // countStaleListingEntries counts Objects entries in current that are absent from the filesystem scan.
 // Returns 0 if current is nil. Non-zero indicates phantom entries (missed deletion callbacks).
+// Forwarded entries are excluded since they're expected to not exist in filesystem scans.
 func countStaleListingEntries(current, filesystem *listingIndex) int {
 	if current == nil {
 		return 0
@@ -688,6 +725,10 @@ func countStaleListingEntries(current, filesystem *listingIndex) int {
 	for bucket, bl := range current.Buckets {
 		fsBL := filesystem.Buckets[bucket]
 		for _, obj := range bl.Objects {
+			// Skip forwarded entries - they're stored on other coordinators
+			if obj.Forwarded {
+				continue
+			}
 			if fsBL == nil || !objectKeyInList(fsBL.Objects, obj.Key) {
 				n++
 			}
