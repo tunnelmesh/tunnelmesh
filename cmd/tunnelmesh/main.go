@@ -2384,7 +2384,7 @@ func configureLinuxResolvers(dnsAddr, tunName string, suffixes []string) error {
 		}
 	}
 	// Fallback: drop-in file (no TUN name or no resolvectl)
-	return configureSystemdResolvedDropIn(ip, port, suffixes)
+	return configureSystemdResolvedDropIn("/etc/systemd/resolved.conf.d", ip, port, suffixes)
 }
 
 func configureSystemdResolvedLink(tunName, ip, port string, suffixes []string) error {
@@ -2402,8 +2402,7 @@ func configureSystemdResolvedLink(tunName, ip, port string, suffixes []string) e
 	return nil
 }
 
-func configureSystemdResolvedDropIn(ip, port string, suffixes []string) error {
-	confDir := "/etc/systemd/resolved.conf.d"
+func configureSystemdResolvedDropIn(confDir, ip, port string, suffixes []string) error {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		return fmt.Errorf("create resolved.conf.d: %w", err)
 	}
@@ -2422,6 +2421,10 @@ func configureSystemdResolvedDropIn(ip, port string, suffixes []string) error {
 }
 
 func removeLinuxResolvers(tunName string) error {
+	return removeLinuxResolversAt("/etc/systemd/resolved.conf.d", tunName)
+}
+
+func removeLinuxResolversAt(confDir, tunName string) error {
 	if _, err := exec.LookPath("resolvectl"); err == nil {
 		iface := tunName
 		if iface == "" {
@@ -2429,7 +2432,7 @@ func removeLinuxResolvers(tunName string) error {
 		}
 		_ = exec.Command("resolvectl", "revert", iface).Run()
 	}
-	confFile := "/etc/systemd/resolved.conf.d/tunnelmesh.conf"
+	confFile := filepath.Join(confDir, "tunnelmesh.conf")
 	if _, err := os.Stat(confFile); err == nil {
 		if err := os.Remove(confFile); err != nil {
 			return fmt.Errorf("remove tunnelmesh.conf: %w", err)
