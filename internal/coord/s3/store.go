@@ -2832,17 +2832,18 @@ func (s *Store) DeleteChunk(ctx context.Context, hash string) error {
 // marker is the key to start after (exclusive) for pagination.
 // Returns (objects, isTruncated, nextMarker, error).
 func (s *Store) ListObjects(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]ObjectMeta, bool, string, error) {
-	// Phase 1: Verify bucket exists under RLock, capture metaDir path
-	var metaDir string
+	// Hold RLock for the entire walk so concurrent deletes cannot call os.Remove
+	// on files that walkObjectMeta has open via os.ReadFile. On Windows,
+	// os.ReadFile opens files without FILE_SHARE_DELETE, causing os.Remove to
+	// fail with "being used by another process" if the file is concurrently open.
+	// Multiple concurrent ListObjects calls still run in parallel (RLock is shared).
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if _, err := s.getBucketMeta(bucket); err != nil {
-		s.mu.RUnlock()
 		return nil, false, "", err
 	}
-	metaDir = filepath.Join(s.bucketPath(bucket), "meta")
-	s.mu.RUnlock()
-
-	// Phase 2: Walk filesystem without lock (safe: writes use atomic temp+rename)
+	metaDir := filepath.Join(s.bucketPath(bucket), "meta")
 	return s.walkObjectMeta(metaDir, prefix, marker, maxKeys)
 }
 
