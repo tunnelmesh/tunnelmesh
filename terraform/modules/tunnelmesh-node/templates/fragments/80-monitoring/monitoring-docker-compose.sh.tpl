@@ -248,11 +248,11 @@ curl -sL "https://raw.githubusercontent.com/${github_owner}/tunnelmesh/main/moni
 
 # Download grafana dashboards via GitHub API
 echo "Downloading Grafana dashboards..."
-GITHUB_API_HEADERS=()
 if [ -n "$GITHUB_TOKEN" ]; then
-  GITHUB_API_HEADERS+=(-H "Authorization: token $GITHUB_TOKEN")
+  DASHBOARD_LIST=$(curl -sf -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
+else
+  DASHBOARD_LIST=$(curl -sf "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
 fi
-DASHBOARD_LIST=$(curl -sf "$${GITHUB_API_HEADERS[@]}" "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
 if echo "$DASHBOARD_LIST" | jq -e 'type == "array"' > /dev/null 2>&1; then
   echo "$DASHBOARD_LIST" | jq -r '.[] | select(.name | endswith(".json")) | .download_url' | \
     while read -r url; do
