@@ -226,6 +226,15 @@ func getServiceConfig() (*svc.ServiceConfig, error) {
 		log.Info().Str("path", configPath).Msg("generated config file from context")
 	}
 
+	// Use server from context, falling back to TUNNELMESH_SERVER env var.
+	// This allows provisioning scripts to set TUNNELMESH_SERVER before calling
+	// 'service install', which then bakes it into the service's env vars so the
+	// join command has it at runtime without it appearing in process listings.
+	server := ctx.Server
+	if server == "" {
+		server = os.Getenv("TUNNELMESH_SERVER")
+	}
+
 	return &svc.ServiceConfig{
 		Name:        ctx.ServiceName(),
 		DisplayName: fmt.Sprintf("TunnelMesh Peer (%s)", ctxName),
@@ -233,7 +242,7 @@ func getServiceConfig() (*svc.ServiceConfig, error) {
 		Mode:        mode,
 		ConfigPath:  configPath,
 		UserName:    serviceUser,
-		Server:      ctx.Server,
+		Server:      server,
 		AuthToken:   authToken,
 	}, nil
 }

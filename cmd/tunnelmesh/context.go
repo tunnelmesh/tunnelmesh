@@ -134,13 +134,20 @@ func runContextCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Resolve server URL: prefer config (CLI join sets Servers), fall back to env var.
+	// YAML files never set Servers (yaml:"-"), so env var is the normal provisioning path.
+	server := cfg.PrimaryServer()
+	if server == "" {
+		server = os.Getenv("TUNNELMESH_SERVER")
+	}
+
 	// Create context
 	ctx := context.Context{
 		Name:       name,
 		ConfigPath: contextConfigPath,
-		Server:     cfg.PrimaryServer(), // Use first server in list
-		Domain:     "",                  // Will be populated on join
-		MeshIP:     "",                  // Will be populated on join
+		Server:     server,
+		Domain:     "", // Will be populated on join
+		MeshIP:     "", // Will be populated on join
 		DNSListen:  cfg.DNS.Listen,
 	}
 
