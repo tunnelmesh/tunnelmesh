@@ -210,21 +210,21 @@ variable "monitoring_enabled" {
 }
 
 variable "prometheus_image_tag" {
-  description = "Prometheus Docker image tag (e.g. v3.2.1)"
+  description = "Prometheus Docker image tag (e.g. v3.9.1)"
   type        = string
-  default     = "v3.2.1"
+  default     = "v3.9.1"
 }
 
 variable "loki_image_tag" {
-  description = "Loki Docker image tag (e.g. 3.5.0)"
+  description = "Loki Docker image tag (e.g. 3.6.7)"
   type        = string
-  default     = "3.5.0"
+  default     = "3.6.7"
 }
 
 variable "grafana_image_tag" {
-  description = "Grafana Docker image tag (e.g. 11.6.0)"
+  description = "Grafana Docker image tag (e.g. 12.3.3)"
   type        = string
-  default     = "11.6.0"
+  default     = "12.3.3"
 }
 
 variable "loki_retention_days" {
