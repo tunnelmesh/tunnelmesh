@@ -52,6 +52,9 @@ func (p *Program) Start(s service.Service) error {
 		default:
 			err = fmt.Errorf("unknown mode: %s", p.Mode)
 		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Error().Err(err).Msg("service exited with error")
+		}
 		p.done <- err
 	}()
 
