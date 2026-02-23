@@ -331,9 +331,11 @@ func runAsService() {
 	}
 
 	// Create program with runner functions
+	// Both serve and join use runJoinFromService — the mode distinction is in the config file
 	prg := &svc.Program{
 		Mode:       mode,
 		ConfigPath: configPath,
+		RunServe:   runJoinFromService,
 		RunJoin:    runJoinFromService,
 	}
 
