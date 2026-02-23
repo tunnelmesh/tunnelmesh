@@ -328,7 +328,7 @@ func runContextDelete(cmd *cobra.Command, args []string) error {
 
 	// Remove DNS resolver entry if domain is set
 	if ctx.Domain != "" {
-		removeSystemResolver(ctx.Domain)
+		removeSystemResolver(ctx.Domain, "")
 	}
 
 	// Prompt to remove config/credentials
@@ -392,12 +392,12 @@ func runContextDelete(cmd *cobra.Command, args []string) error {
 func switchContextDNS(oldCtx, newCtx *context.Context) error {
 	// Remove old resolver
 	if oldCtx != nil && oldCtx.Domain != "" {
-		removeSystemResolver(oldCtx.Domain)
+		removeSystemResolver(oldCtx.Domain, "")
 	}
 
 	// Add new resolver
 	if newCtx != nil && newCtx.Domain != "" && newCtx.DNSListen != "" {
-		if err := configureSystemResolver(newCtx.Domain, newCtx.DNSListen); err != nil {
+		if err := configureSystemResolver(newCtx.Domain, newCtx.DNSListen, ""); err != nil {
 			return fmt.Errorf("configure DNS resolver for %s: %w", newCtx.Domain, err)
 		}
 	}
