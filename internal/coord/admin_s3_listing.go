@@ -710,7 +710,6 @@ func countStaleListingEntries(current, filesystem *listingIndex) int {
 	return n
 }
 
-// objectKeyInList returns true if any entry in objs has the given key.
 // removeFromObjectList returns a new slice with the entry matching key removed.
 func removeFromObjectList(objs []S3ObjectInfo, key string) ([]S3ObjectInfo, *S3ObjectInfo) {
 	var removed *S3ObjectInfo
