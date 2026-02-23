@@ -5,7 +5,7 @@
 // - accuracy: meters (~0 for manual, ~50000 for IP)
 // - city, region, country: location details
 
-const WORLD_PX = 2048; // world-map.png is 2048×2048
+const WORLD_PX = 4096; // world-map.png is 4096×4096 (@2x retina tiles, zoom 3)
 
 // Lazy-load the world map image (shared across all instances)
 const _worldImg = new Image();
@@ -261,7 +261,7 @@ class NodeMap {
             scale = Math.min((cw - 100) / spanX, (ch - 100) / spanY);
         }
 
-        scale = Math.min(scale, 128); // cap at zoom-10 equivalent
+        scale = Math.min(scale, 64); // cap at zoom-10 equivalent (2^(10-3)*256/4096)
         scale = Math.max(scale, ch / WORLD_PX); // don't zoom out past world view
 
         this._vp = { cx, cy, scale, cw, ch };
