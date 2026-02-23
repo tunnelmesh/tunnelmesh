@@ -144,17 +144,18 @@ func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op s
 	}
 }
 
-// removeListingBucket atomically removes an entire bucket from the local listing index.
-// Used by onBucketRemovedCallback when ForceDeleteBucket wipes a bucket directory.
-// O(1) bucket removal rather than per-key updates for bulk bucket deletions.
+// removeListingBucket atomically removes an entire bucket from the local listing index
+// and from peerListings. Used by onBucketRemovedCallback when ForceDeleteBucket wipes
+// a bucket directory. O(1) bucket removal rather than per-key updates for bulk bucket deletions.
 func (s *Server) removeListingBucket(bucket string) {
+	// Remove from localListingIndex
 	for {
 		old := s.localListingIndex.Load()
 		if old == nil {
-			return
+			break
 		}
 		if _, exists := old.Buckets[bucket]; !exists {
-			return
+			break
 		}
 		newIdx := &listingIndex{
 			Buckets: make(map[string]*bucketListing, len(old.Buckets)),
@@ -171,6 +172,37 @@ func (s *Server) removeListingBucket(bucket string) {
 			case s.listingIndexNotify <- struct{}{}:
 			default:
 			}
+			break
+		}
+		// CAS failed — concurrent update, retry
+	}
+
+	// Also remove from peerListings (optimistic forwarded entries)
+	for {
+		old := s.peerListings.Load()
+		if old == nil {
+			return
+		}
+		if _, exists := old.Objects[bucket]; !exists {
+			if _, exists := old.Recycled[bucket]; !exists {
+				return // Bucket not in peerListings
+			}
+		}
+		newPL := &peerListings{
+			Objects:  make(map[string][]S3ObjectInfo, len(old.Objects)),
+			Recycled: make(map[string][]S3ObjectInfo, len(old.Recycled)),
+		}
+		for b, objs := range old.Objects {
+			if b != bucket {
+				newPL.Objects[b] = objs
+			}
+		}
+		for b, objs := range old.Recycled {
+			if b != bucket {
+				newPL.Recycled[b] = objs
+			}
+		}
+		if s.peerListings.CompareAndSwap(old, newPL) {
 			return
 		}
 		// CAS failed — concurrent update, retry
