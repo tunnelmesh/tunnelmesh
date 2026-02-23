@@ -797,12 +797,16 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	if runtime.GOOS == "windows" {
 		retries = windowsFileRetries
 	}
+
+	// Capture callback before loop to ensure consistent access pattern
+	callback := s.onBucketRemovedCallback
+
 	for i := 0; i < retries; i++ {
 		removeErr = os.RemoveAll(bucketDir)
 		if removeErr == nil {
-			// Notify listing index of bucket removal (safe: callback uses atomic.Pointer, not s.mu)
-			if s.onBucketRemovedCallback != nil {
-				s.onBucketRemovedCallback(bucket)
+			// Notify listing index of bucket removal (no deadlock: callback uses atomic CAS, not s.mu)
+			if callback != nil {
+				callback(bucket)
 			}
 			return nil
 		}
@@ -2348,9 +2352,10 @@ func (s *Store) PurgeObject(ctx context.Context, bucket, key string) error {
 		s.statsLogicalBytes.Add(-meta.Size)
 	}
 
-	// Notify listing index before releasing the lock (safe: callback uses atomic.Pointer, not s.mu)
-	if s.onObjectRemovedCallback != nil {
-		s.onObjectRemovedCallback(bucket, key)
+	// Notify listing index before releasing the lock (no deadlock: callback uses atomic CAS, not s.mu)
+	callback := s.onObjectRemovedCallback
+	if callback != nil {
+		callback(bucket, key)
 	}
 
 	s.mu.Unlock()

@@ -690,8 +690,19 @@ func countStaleListingEntries(current, filesystem *listingIndex) int {
 	n := 0
 	for bucket, bl := range current.Buckets {
 		fsBL := filesystem.Buckets[bucket]
+		if fsBL == nil {
+			// Entire bucket missing from filesystem — all entries are stale
+			n += len(bl.Objects)
+			continue
+		}
+		// Build a set from filesystem objects for O(1) lookups
+		fsKeys := make(map[string]struct{}, len(fsBL.Objects))
+		for _, obj := range fsBL.Objects {
+			fsKeys[obj.Key] = struct{}{}
+		}
+		// Count current entries not in filesystem
 		for _, obj := range bl.Objects {
-			if fsBL == nil || !objectKeyInList(fsBL.Objects, obj.Key) {
+			if _, exists := fsKeys[obj.Key]; !exists {
 				n++
 			}
 		}
@@ -700,15 +711,6 @@ func countStaleListingEntries(current, filesystem *listingIndex) int {
 }
 
 // objectKeyInList returns true if any entry in objs has the given key.
-func objectKeyInList(objs []S3ObjectInfo, key string) bool {
-	for _, obj := range objs {
-		if obj.Key == key {
-			return true
-		}
-	}
-	return false
-}
-
 // removeFromObjectList returns a new slice with the entry matching key removed.
 func removeFromObjectList(objs []S3ObjectInfo, key string) ([]S3ObjectInfo, *S3ObjectInfo) {
 	var removed *S3ObjectInfo

@@ -419,6 +419,48 @@ func TestRecycledPurge_UpdatesListingIndex(t *testing.T) {
 	}
 }
 
+// TestPurgeAllRecycledInBucket_UpdatesListingIndex covers the per-bucket recycle-bin purge path:
+// put → delete (moves to Recycled) → PurgeAllRecycledInBucket → both Objects and Recycled empty for that bucket.
+// This is a different code path from PurgeAllRecycled (which calls purgeRecycledEntries).
+func TestPurgeAllRecycledInBucket_UpdatesListingIndex(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Wire the callback
+	srv.s3Store.SetOnObjectRemovedCallback(func(bucket, key string) {
+		srv.updateListingIndex(bucket, key, nil, "remove")
+	})
+
+	// Put and add to listing
+	_, err := srv.s3Store.PutObject(context.Background(), "test-bucket", "bucket-specific-purge.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
+	require.NoError(t, err)
+	info := S3ObjectInfo{Key: "bucket-specific-purge.txt", Size: 4, LastModified: time.Now().Format(time.RFC3339)}
+	srv.updateListingIndex("test-bucket", "bucket-specific-purge.txt", &info, "put")
+
+	// Delete (moves to recycled)
+	err = srv.s3Store.DeleteObject(context.Background(), "test-bucket", "bucket-specific-purge.txt")
+	require.NoError(t, err)
+	srv.updateListingIndex("test-bucket", "bucket-specific-purge.txt", nil, "delete")
+
+	// Verify in Recycled
+	idx := srv.localListingIndex.Load()
+	bl := idx.Buckets["test-bucket"]
+	require.NotNil(t, bl)
+	assert.Empty(t, bl.Objects, "object should have moved out of Objects")
+	assert.Len(t, bl.Recycled, 1, "object should be in Recycled")
+
+	// Purge recycle bin for this specific bucket (different code path than PurgeAllRecycled)
+	err = srv.s3Store.PurgeAllRecycledInBucket(context.Background(), "test-bucket")
+	require.NoError(t, err)
+
+	// Both Objects and Recycled should be empty
+	idx2 := srv.localListingIndex.Load()
+	require.NotNil(t, idx2)
+	if bl2 := idx2.Buckets["test-bucket"]; bl2 != nil {
+		assert.Empty(t, bl2.Objects, "Objects should be empty after bucket-specific purge")
+		assert.Empty(t, bl2.Recycled, "Recycled should be empty after bucket-specific purge")
+	}
+}
+
 // TestReconcileLocalIndex_StaleEntriesMetric verifies that countStaleListingEntries
 // correctly detects phantom entries (in current but absent from filesystem scan).
 func TestReconcileLocalIndex_StaleEntriesMetric(t *testing.T) {
