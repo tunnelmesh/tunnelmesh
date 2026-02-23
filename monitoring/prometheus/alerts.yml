@@ -102,6 +102,19 @@ groups:
           summary: "S3 storage quota approaching limit"
           description: "S3 storage is {{ $value }}% full (warning at 75%)"
 
+      # Data: S3 listing index has phantom entries (missed deletion callback)
+      # Fires when reconcile finds entries in the listing that don't exist on disk.
+      # Should be 0 in steady state; non-zero means a deletion path is missing a callback.
+      - alert: S3ListingIndexStale
+        expr: tunnelmesh_s3_listing_stale_entries > 0
+        for: 2m
+        labels:
+          severity: warning
+          category: data
+        annotations:
+          summary: "S3 listing index has phantom entries"
+          description: "{{ $value }} object(s) in the listing index don't exist on disk — object browser may show files that return 404. Check for missed deletion callbacks."
+
       # Data: Elevated S3 error rate
       # Threshold: 0.1/s (6/min) indicates intermittent issues; 3min duration filters transient spikes
       - alert: S3ElevatedErrors
@@ -219,6 +232,19 @@ groups:
         annotations:
           summary: "S3 storage quota critical"
           description: "S3 storage is {{ $value }}% full (critical at 85%)"
+
+      # Data: S3 listing index severely out of sync (hundreds of phantom entries)
+      # Sustained high drift across multiple reconcile cycles (2+ minutes at >100 entries)
+      # indicates a bulk deletion path (e.g. file share) is not updating the listing.
+      - alert: S3ListingIndexHighDrift
+        expr: tunnelmesh_s3_listing_stale_entries > 100
+        for: 2m
+        labels:
+          severity: critical
+          category: data
+        annotations:
+          summary: "S3 listing index severely out of sync"
+          description: "{{ $value }} phantom entries in listing index — users see hundreds of files that return 404. Likely a ForceDeleteBucket or replication delete not updating the listing."
 
       # Data: High S3 error rate
       # Threshold: >10% error rate indicates service degradation; 2min duration confirms persistent issue

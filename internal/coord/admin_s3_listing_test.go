@@ -1,6 +1,8 @@
 package coord
 
 import (
+	"bytes"
+	"context"
 	"testing"
 	"time"
 
@@ -222,4 +224,233 @@ func TestUpdateListingIndex_DeleteDeduplicatesRecycled(t *testing.T) {
 	// Should have exactly one recycled entry (dedup by key)
 	assert.Len(t, bl.Recycled, 1, "recycled list should be deduplicated")
 	assert.Equal(t, "file.txt", bl.Recycled[0].Key)
+}
+
+// --- Regression tests for listing index sync ---
+
+// TestUpdateListingIndex_RemoveOp verifies that the "remove" op clears entries
+// from both Objects and Recycled in one atomic update.
+func TestUpdateListingIndex_RemoveOp(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Sub-test 1: put → remove clears Objects
+	info := S3ObjectInfo{Key: "a.txt", Size: 10, LastModified: "2024-01-01T00:00:00Z"}
+	srv.updateListingIndex("bkt", "a.txt", &info, "put")
+	srv.updateListingIndex("bkt", "a.txt", nil, "remove")
+
+	idx := srv.localListingIndex.Load()
+	require.NotNil(t, idx)
+	bl := idx.Buckets["bkt"]
+	if bl != nil {
+		assert.Empty(t, bl.Objects, "remove should clear from Objects")
+		assert.Empty(t, bl.Recycled, "remove should leave Recycled empty")
+	}
+
+	// Sub-test 2: put → delete → remove clears Recycled too
+	srv2 := newTestServerWithListingIndex(t)
+	info2 := S3ObjectInfo{Key: "b.txt", Size: 20, LastModified: "2024-01-01T00:00:00Z"}
+	srv2.updateListingIndex("bkt", "b.txt", &info2, "put")
+	srv2.updateListingIndex("bkt", "b.txt", nil, "delete") // moves to Recycled
+	srv2.updateListingIndex("bkt", "b.txt", nil, "remove") // clears from Recycled
+
+	idx2 := srv2.localListingIndex.Load()
+	require.NotNil(t, idx2)
+	bl2 := idx2.Buckets["bkt"]
+	if bl2 != nil {
+		assert.Empty(t, bl2.Objects, "remove should leave Objects empty")
+		assert.Empty(t, bl2.Recycled, "remove should clear from Recycled")
+	}
+}
+
+// TestPurgeObject_UpdatesListingIndex verifies that calling store.PurgeObject
+// immediately removes the entry from the listing index via onObjectRemovedCallback.
+func TestPurgeObject_UpdatesListingIndex(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Wire the callback (mirrors server.go initialization)
+	srv.s3Store.SetOnObjectRemovedCallback(func(bucket, key string) {
+		srv.updateListingIndex(bucket, key, nil, "remove")
+	})
+
+	// Put via the store to create the object on disk
+	_, err := srv.s3Store.PutObject(context.Background(), "test-bucket", "purge-me.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
+	require.NoError(t, err)
+
+	// Add to listing index to simulate what the HTTP handler does
+	info := S3ObjectInfo{Key: "purge-me.txt", Size: 4, LastModified: time.Now().Format(time.RFC3339)}
+	srv.updateListingIndex("test-bucket", "purge-me.txt", &info, "put")
+
+	// Verify it appears in the listing
+	idx := srv.localListingIndex.Load()
+	require.NotNil(t, idx)
+	bl := idx.Buckets["test-bucket"]
+	require.NotNil(t, bl)
+	found := false
+	for _, obj := range bl.Objects {
+		if obj.Key == "purge-me.txt" {
+			found = true
+		}
+	}
+	require.True(t, found, "object should be in listing before purge")
+
+	// PurgeObject simulates what replication delete does
+	err = srv.s3Store.PurgeObject(context.Background(), "test-bucket", "purge-me.txt")
+	require.NoError(t, err)
+
+	// Entry should be gone from the listing immediately
+	idx2 := srv.localListingIndex.Load()
+	require.NotNil(t, idx2)
+	bl2 := idx2.Buckets["test-bucket"]
+	if bl2 != nil {
+		for _, obj := range bl2.Objects {
+			assert.NotEqual(t, "purge-me.txt", obj.Key, "purged object should be removed from listing")
+		}
+		for _, obj := range bl2.Recycled {
+			assert.NotEqual(t, "purge-me.txt", obj.Key, "purged object should not be in recycled list")
+		}
+	}
+}
+
+// TestForceDeleteBucket_UpdatesListingIndex verifies that ForceDeleteBucket
+// immediately removes the entire bucket from the listing index.
+func TestForceDeleteBucket_UpdatesListingIndex(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Wire the callback
+	srv.s3Store.SetOnBucketRemovedCallback(func(bucket string) {
+		srv.removeListingBucket(bucket)
+	})
+
+	// Put 3 objects and add them to the listing
+	for i, key := range []string{"a.txt", "b.txt", "c.txt"} {
+		_, err := srv.s3Store.PutObject(context.Background(), "test-bucket", key, bytes.NewReader([]byte("x")), 1, "text/plain", nil)
+		require.NoError(t, err)
+		info := S3ObjectInfo{Key: key, Size: int64(i + 1), LastModified: time.Now().Format(time.RFC3339)}
+		srv.updateListingIndex("test-bucket", key, &info, "put")
+	}
+
+	// Verify all 3 appear in the listing
+	idx := srv.localListingIndex.Load()
+	require.NotNil(t, idx)
+	require.NotNil(t, idx.Buckets["test-bucket"])
+	assert.Len(t, idx.Buckets["test-bucket"].Objects, 3, "all 3 objects should be in listing before delete")
+
+	// ForceDeleteBucket wipes the entire bucket
+	err := srv.s3Store.ForceDeleteBucket(context.Background(), "test-bucket")
+	require.NoError(t, err)
+
+	// Entire bucket should be absent from the listing
+	idx2 := srv.localListingIndex.Load()
+	require.NotNil(t, idx2)
+	_, exists := idx2.Buckets["test-bucket"]
+	assert.False(t, exists, "bucket should be removed from listing after ForceDeleteBucket")
+}
+
+// TestReplicationDelete_UpdatesListingIndex simulates the replication path:
+// an object is added to both the store and the listing index, then PurgeObject
+// is called (as applyReplication does for delete ops) — the listing must clear immediately.
+func TestReplicationDelete_UpdatesListingIndex(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Wire the callback (same as server.go initialization)
+	srv.s3Store.SetOnObjectRemovedCallback(func(bucket, key string) {
+		srv.updateListingIndex(bucket, key, nil, "remove")
+	})
+
+	// Simulate replication arrival: object appears on disk
+	_, err := srv.s3Store.PutObject(context.Background(), "test-bucket", "replicated.txt", bytes.NewReader([]byte("hello")), 5, "text/plain", nil)
+	require.NoError(t, err)
+
+	// Listing index updated (as reconcileLocalIndex or updateListingIndex would do)
+	info := S3ObjectInfo{Key: "replicated.txt", Size: 5, LastModified: time.Now().Format(time.RFC3339)}
+	srv.updateListingIndex("test-bucket", "replicated.txt", &info, "put")
+
+	// Simulate replication delete: remote peer deleted the object
+	err = srv.s3Store.PurgeObject(context.Background(), "test-bucket", "replicated.txt")
+	require.NoError(t, err)
+
+	// Listing must be clean — no phantom entry
+	idx := srv.localListingIndex.Load()
+	require.NotNil(t, idx)
+	if bl := idx.Buckets["test-bucket"]; bl != nil {
+		for _, obj := range bl.Objects {
+			assert.NotEqual(t, "replicated.txt", obj.Key, "deleted object should not remain in listing")
+		}
+	}
+}
+
+// TestRecycledPurge_UpdatesListingIndex covers the recycle-bin GC path:
+// put → delete (moves to Recycled) → PurgeAllRecycled → both Objects and Recycled empty.
+func TestRecycledPurge_UpdatesListingIndex(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Wire the callback
+	srv.s3Store.SetOnObjectRemovedCallback(func(bucket, key string) {
+		srv.updateListingIndex(bucket, key, nil, "remove")
+	})
+
+	// Put and add to listing
+	_, err := srv.s3Store.PutObject(context.Background(), "test-bucket", "will-purge.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
+	require.NoError(t, err)
+	info := S3ObjectInfo{Key: "will-purge.txt", Size: 4, LastModified: time.Now().Format(time.RFC3339)}
+	srv.updateListingIndex("test-bucket", "will-purge.txt", &info, "put")
+
+	// Delete (moves to recycled)
+	err = srv.s3Store.DeleteObject(context.Background(), "test-bucket", "will-purge.txt")
+	require.NoError(t, err)
+	srv.updateListingIndex("test-bucket", "will-purge.txt", nil, "delete")
+
+	// Verify in Recycled
+	idx := srv.localListingIndex.Load()
+	bl := idx.Buckets["test-bucket"]
+	require.NotNil(t, bl)
+	assert.Empty(t, bl.Objects, "object should have moved out of Objects")
+	assert.Len(t, bl.Recycled, 1, "object should be in Recycled")
+
+	// GC purge removes from recycle bin
+	srv.s3Store.PurgeAllRecycled(context.Background())
+
+	// Both Objects and Recycled should be empty
+	idx2 := srv.localListingIndex.Load()
+	require.NotNil(t, idx2)
+	if bl2 := idx2.Buckets["test-bucket"]; bl2 != nil {
+		assert.Empty(t, bl2.Objects, "Objects should be empty after purge")
+		assert.Empty(t, bl2.Recycled, "Recycled should be empty after purge")
+	}
+}
+
+// TestReconcileLocalIndex_StaleEntriesMetric verifies that countStaleListingEntries
+// correctly detects phantom entries (in current but absent from filesystem scan).
+func TestReconcileLocalIndex_StaleEntriesMetric(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Inject a stale entry that does NOT exist on disk
+	stale := S3ObjectInfo{Key: "phantom.txt", Size: 999, LastModified: "2024-01-01T00:00:00Z"}
+	srv.updateListingIndex("test-bucket", "phantom.txt", &stale, "put")
+
+	// countStaleListingEntries should detect the phantom entry
+	current := srv.localListingIndex.Load()
+	emptyFilesystem := &listingIndex{Buckets: make(map[string]*bucketListing)}
+	count := countStaleListingEntries(current, emptyFilesystem)
+	assert.Greater(t, count, 0, "should detect stale entry before reconcile")
+
+	// countStaleListingEntries returns 0 for nil current index
+	assert.Equal(t, 0, countStaleListingEntries(nil, emptyFilesystem), "nil current should return 0")
+
+	// Reconcile scans the actual filesystem — phantom.txt doesn't exist on disk
+	srv.reconcileLocalIndex(context.Background())
+
+	// After reconcile, phantom entry should be removed
+	after := srv.localListingIndex.Load()
+	require.NotNil(t, after)
+	if bl := after.Buckets["test-bucket"]; bl != nil {
+		for _, obj := range bl.Objects {
+			assert.NotEqual(t, "phantom.txt", obj.Key, "stale entry should be removed by reconcile")
+		}
+	}
+
+	// After reconcile with a filesystem that matches, count should be 0
+	cleanFilesystem := &listingIndex{Buckets: make(map[string]*bucketListing)}
+	afterCount := countStaleListingEntries(after, cleanFilesystem)
+	assert.Equal(t, 0, afterCount, "no stale entries after reconcile clears phantom")
 }

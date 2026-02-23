@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
+	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 )
 
 // listingIndex is published by each coordinator to the system store.
@@ -71,6 +72,7 @@ func mergeObjectListings(local, remote []S3ObjectInfo) []S3ObjectInfo {
 //   - op = "delete": remove from objects, add to recycled (with DeletedAt)
 //   - op = "undelete": remove from recycled, add to objects
 //   - op = "purge": remove from recycled (permanent deletion by GC)
+//   - op = "remove": hard delete — remove from both objects and recycled (replication deletes, PurgeObject)
 func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op string) {
 	for {
 		old := s.localListingIndex.Load()
@@ -121,6 +123,11 @@ func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op s
 		case "purge":
 			// Permanent deletion from recycle bin - remove from recycled list
 			newBL.Recycled, _ = removeFromObjectList(newBL.Recycled, key)
+
+		case "remove":
+			// Hard delete: remove from both live objects and recycled list
+			newBL.Objects, _ = removeFromObjectList(newBL.Objects, key)
+			newBL.Recycled, _ = removeFromObjectList(newBL.Recycled, key)
 		}
 
 		newIdx.Buckets[bucket] = &newBL
@@ -139,6 +146,39 @@ func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op s
 	select {
 	case s.listingIndexNotify <- struct{}{}:
 	default:
+	}
+}
+
+// removeListingBucket atomically removes an entire bucket from the local listing index.
+// Used by onBucketRemovedCallback when ForceDeleteBucket wipes a bucket directory.
+// O(1) bucket removal rather than per-key updates for bulk bucket deletions.
+func (s *Server) removeListingBucket(bucket string) {
+	for {
+		old := s.localListingIndex.Load()
+		if old == nil {
+			return
+		}
+		if _, exists := old.Buckets[bucket]; !exists {
+			return
+		}
+		newIdx := &listingIndex{
+			Buckets: make(map[string]*bucketListing, len(old.Buckets)),
+			Seq:     old.Seq + 1,
+		}
+		for b, bl := range old.Buckets {
+			if b != bucket {
+				newIdx.Buckets[b] = bl
+			}
+		}
+		if s.localListingIndex.CompareAndSwap(old, newIdx) {
+			s.listingIndexDirty.Store(true)
+			select {
+			case s.listingIndexNotify <- struct{}{}:
+			default:
+			}
+			return
+		}
+		// CAS failed — concurrent update, retry
 	}
 }
 
@@ -467,6 +507,17 @@ func (s *Server) reconcileLocalIndex(ctx context.Context) {
 		}
 	}
 
+	// Measure and report listing index drift (entries in current that are absent from filesystem).
+	// This should be 0 in steady state; non-zero indicates a missed deletion callback.
+	current := s.localListingIndex.Load()
+	stale := countStaleListingEntries(current, newIdx)
+	if m := s3.GetS3Metrics(); m != nil {
+		m.ListingIndexStaleEntries.Set(float64(stale))
+		if stale > 0 {
+			m.ListingIndexStaleCleaned.Add(float64(stale))
+		}
+	}
+
 	// Merge filesystem scan (ground truth) with any concurrent incremental
 	// updates that arrived during the scan. Use CAS to avoid lost updates.
 	for {
@@ -601,6 +652,34 @@ func upsertObjectList(objs []S3ObjectInfo, key string, info S3ObjectInfo) []S3Ob
 		result = append(result, info)
 	}
 	return result
+}
+
+// countStaleListingEntries counts Objects entries in current that are absent from the filesystem scan.
+// Returns 0 if current is nil. Non-zero indicates phantom entries (missed deletion callbacks).
+func countStaleListingEntries(current, filesystem *listingIndex) int {
+	if current == nil {
+		return 0
+	}
+	n := 0
+	for bucket, bl := range current.Buckets {
+		fsBL := filesystem.Buckets[bucket]
+		for _, obj := range bl.Objects {
+			if fsBL == nil || !objectKeyInList(fsBL.Objects, obj.Key) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// objectKeyInList returns true if any entry in objs has the given key.
+func objectKeyInList(objs []S3ObjectInfo, key string) bool {
+	for _, obj := range objs {
+		if obj.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // removeFromObjectList returns a new slice with the entry matching key removed.

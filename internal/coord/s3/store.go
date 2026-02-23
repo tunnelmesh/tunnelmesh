@@ -212,7 +212,8 @@ type Store struct {
 	replicator              ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
 	coordinatorID           string                   // Local coordinator ID for version vectors (optional)
 	logger                  zerolog.Logger           // Structured logger
-	onPurgeCallback         func(bucket, key string) // Called when recycled entry is permanently deleted
+	onObjectRemovedCallback func(bucket, key string) // Called when an object is permanently removed from disk
+	onBucketRemovedCallback func(bucket string)      // Called when an entire bucket is removed from disk
 	defaultObjectExpiryDays int                      // Days until objects expire (0 = never)
 	defaultShareExpiryDays  int                      // Days until file shares expire (0 = never)
 	recyclebinRetentionDays int                      // Days to retain recycled objects before purging (0 = never purge)
@@ -429,12 +430,21 @@ func (s *Store) SetLogger(logger zerolog.Logger) {
 	s.logger = logger
 }
 
-// SetOnPurgeCallback sets a callback that is invoked when a recycled entry is permanently deleted.
-// The callback receives the bucket name and object key that was purged.
-func (s *Store) SetOnPurgeCallback(callback func(bucket, key string)) {
+// SetOnObjectRemovedCallback sets a callback invoked when an object is permanently removed from disk.
+// This covers both PurgeObject (replication deletes, hard-delete path) and purgeRecycledEntries (GC).
+// The callback receives the bucket name and object key that was removed.
+func (s *Store) SetOnObjectRemovedCallback(cb func(bucket, key string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.onPurgeCallback = callback
+	s.onObjectRemovedCallback = cb
+}
+
+// SetOnBucketRemovedCallback sets a callback invoked when an entire bucket is removed from disk.
+// This covers ForceDeleteBucket (file share deletion, orphaned bucket GC).
+func (s *Store) SetOnBucketRemovedCallback(cb func(bucket string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onBucketRemovedCallback = cb
 }
 
 // SetDefaultObjectExpiryDays sets the default expiry for new objects in days.
@@ -790,6 +800,10 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	for i := 0; i < retries; i++ {
 		removeErr = os.RemoveAll(bucketDir)
 		if removeErr == nil {
+			// Notify listing index of bucket removal (safe: callback uses atomic.Pointer, not s.mu)
+			if s.onBucketRemovedCallback != nil {
+				s.onBucketRemovedCallback(bucket)
+			}
 			return nil
 		}
 		if i < retries-1 {
@@ -2334,6 +2348,11 @@ func (s *Store) PurgeObject(ctx context.Context, bucket, key string) error {
 		s.statsLogicalBytes.Add(-meta.Size)
 	}
 
+	// Notify listing index before releasing the lock (safe: callback uses atomic.Pointer, not s.mu)
+	if s.onObjectRemovedCallback != nil {
+		s.onObjectRemovedCallback(bucket, key)
+	}
+
 	s.mu.Unlock()
 
 	// Phase 2: Delete unreferenced chunks WITHOUT holding the lock.
@@ -2502,9 +2521,9 @@ func (s *Store) purgeRecycledEntries(ctx context.Context, cutoff *time.Time) int
 				continue
 			}
 
-			// Notify callback for listing index update
-			if s.onPurgeCallback != nil {
-				s.onPurgeCallback(bucket.Name, entry.OriginalKey)
+			// Notify listing index of permanent removal
+			if s.onObjectRemovedCallback != nil {
+				s.onObjectRemovedCallback(bucket.Name, entry.OriginalKey)
 			}
 
 			purgedCount++
