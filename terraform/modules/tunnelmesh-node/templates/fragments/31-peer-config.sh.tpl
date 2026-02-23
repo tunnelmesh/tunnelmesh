@@ -52,7 +52,10 @@ PEERCONF
 
 # Create default context pointing to config file, then install service
 # Context name "default" → service name "tunnelmesh" (required by service start in next step)
+# TUNNELMESH_SERVER must be exported so service install can embed it in the service environment;
+# PeerConfig.Servers is yaml:"-" so the server URL cannot be read from the config file.
 export TUNNELMESH_TOKEN="${auth_token}"
+export TUNNELMESH_SERVER="${peer_server}"
 /usr/local/bin/tunnelmesh context create default --config /etc/tunnelmesh/peer.yaml
 echo "y" | /usr/local/bin/tunnelmesh service install --context default
 %{ endif ~}
