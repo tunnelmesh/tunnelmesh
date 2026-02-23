@@ -345,8 +345,8 @@ services:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3100/ready"]
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 15s
+      retries: 12
+      start_period: 60s
 
   grafana:
     image: grafana/grafana:${grafana_image_tag}
