@@ -2406,6 +2406,7 @@ func (s *Store) PurgeAllRecycledInBucket(ctx context.Context, bucket string) err
 	var allChunksToCheck []string
 
 	s.mu.Lock()
+	callback := s.onObjectRemovedCallback
 
 	rbDir := s.recyclebinPath(bucket)
 	entries, err := os.ReadDir(rbDir)
@@ -2446,6 +2447,12 @@ func (s *Store) PurgeAllRecycledInBucket(ctx context.Context, bucket string) err
 		if err := removeWithRetry(entryPath); err != nil {
 			continue
 		}
+
+		// Notify listing index (safe: already under s.mu lock)
+		if callback != nil {
+			callback(bucket, entry.OriginalKey)
+		}
+
 		s.statsRecycledBytes.Add(-entry.Meta.Size)
 	}
 
@@ -2464,6 +2471,11 @@ func (s *Store) PurgeAllRecycledInBucket(ctx context.Context, bucket string) err
 func (s *Store) purgeRecycledEntries(ctx context.Context, cutoff *time.Time) int {
 	purgedCount := 0
 	var allChunksToCheck []string
+
+	// Read callback under lock to avoid data race
+	s.mu.RLock()
+	callback := s.onObjectRemovedCallback
+	s.mu.RUnlock()
 
 	buckets, err := s.ListBuckets(ctx)
 	if err != nil {
@@ -2522,8 +2534,8 @@ func (s *Store) purgeRecycledEntries(ctx context.Context, cutoff *time.Time) int
 			}
 
 			// Notify listing index of permanent removal
-			if s.onObjectRemovedCallback != nil {
-				s.onObjectRemovedCallback(bucket.Name, entry.OriginalKey)
+			if callback != nil {
+				callback(bucket.Name, entry.OriginalKey)
 			}
 
 			purgedCount++
