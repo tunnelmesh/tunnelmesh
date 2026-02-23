@@ -220,18 +220,6 @@ variable "monitoring_enabled" {
   default     = false
 }
 
-variable "prometheus_version" {
-  description = "Prometheus version to install"
-  type        = string
-  default     = "3.8.0"
-}
-
-variable "loki_version" {
-  description = "Loki version to install"
-  type        = string
-  default     = "3.6.3"
-}
-
 variable "loki_retention_days" {
   description = "Loki log retention in days"
   type        = number
