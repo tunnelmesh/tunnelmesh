@@ -178,32 +178,61 @@ func (s *Server) removeListingBucket(bucket string) {
 }
 
 // findObjectSourceIP returns the SourceIP of the first peer listing entry
-// matching the given bucket/key. Returns "" if not found.
+// matching the given bucket/key. Checks both peerListings (optimistic entries)
+// and localListingIndex (persisted forwarded entries). Returns "" if not found.
 func (s *Server) findObjectSourceIP(bucket, key string) string {
+	// Check peerListings first (optimistic in-memory entries)
 	pl := s.peerListings.Load()
-	if pl == nil {
-		return ""
-	}
-	for _, obj := range pl.Objects[bucket] {
-		if obj.Key == key && obj.SourceIP != "" {
-			return obj.SourceIP
+	if pl != nil {
+		for _, obj := range pl.Objects[bucket] {
+			if obj.Key == key && obj.SourceIP != "" {
+				return obj.SourceIP
+			}
 		}
 	}
+
+	// Also check localListingIndex for persisted forwarded entries
+	local := s.localListingIndex.Load()
+	if local != nil {
+		if bl := local.Buckets[bucket]; bl != nil {
+			for _, obj := range bl.Objects {
+				if obj.Key == key && obj.Forwarded && obj.SourceIP != "" {
+					return obj.SourceIP
+				}
+			}
+		}
+	}
+
 	return ""
 }
 
 // findRecycledObjectSourceIP returns the SourceIP of the first peer recycled
-// listing entry matching the given bucket/key. Returns "" if not found.
+// listing entry matching the given bucket/key. Checks both peerListings
+// (optimistic entries) and localListingIndex (persisted forwarded entries).
+// Returns "" if not found.
 func (s *Server) findRecycledObjectSourceIP(bucket, key string) string {
+	// Check peerListings first (optimistic in-memory entries)
 	pl := s.peerListings.Load()
-	if pl == nil {
-		return ""
-	}
-	for _, obj := range pl.Recycled[bucket] {
-		if obj.Key == key && obj.SourceIP != "" {
-			return obj.SourceIP
+	if pl != nil {
+		for _, obj := range pl.Recycled[bucket] {
+			if obj.Key == key && obj.SourceIP != "" {
+				return obj.SourceIP
+			}
 		}
 	}
+
+	// Also check localListingIndex for persisted forwarded entries
+	local := s.localListingIndex.Load()
+	if local != nil {
+		if bl := local.Buckets[bucket]; bl != nil {
+			for _, obj := range bl.Recycled {
+				if obj.Key == key && obj.Forwarded && obj.SourceIP != "" {
+					return obj.SourceIP
+				}
+			}
+		}
+	}
+
 	return ""
 }
 

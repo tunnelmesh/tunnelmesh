@@ -56,6 +56,7 @@ func (d *discardResponseWriter) WriteHeader(code int)        { d.status = code }
 // updatePeerListingsAfterForward immediately updates the peerListings atomic pointer
 // after a successful forwarded write, so the listing handler shows the object without
 // waiting for the background indexer to persist and reload.
+// It also persists the entry to localListingIndex so it survives background reloads.
 func (s *Server) updatePeerListingsAfterForward(bucket, key, targetIP string, r *http.Request) {
 	for {
 		old := s.peerListings.Load()
@@ -108,6 +109,32 @@ func (s *Server) updatePeerListingsAfterForward(bucket, key, targetIP string, r 
 		if s.peerListings.CompareAndSwap(old, newPL) {
 			break
 		}
+	}
+
+	// Also persist to localListingIndex so forwarded entries survive background reloads.
+	// The Forwarded and SourceIP fields mark these as forwarded, distinguishing them
+	// from locally stored objects.
+	switch r.Method {
+	case http.MethodPut:
+		info := S3ObjectInfo{
+			Key:          key,
+			Size:         r.ContentLength,
+			LastModified: time.Now().UTC().Format(time.RFC3339),
+			ContentType:  r.Header.Get("Content-Type"),
+			Forwarded:    true,
+			ForwardedAt:  time.Now(),
+			SourceIP:     targetIP,
+		}
+		if info.ContentType == "" {
+			info.ContentType = "application/octet-stream"
+		}
+		if bucketMeta, err := s.s3Store.HeadBucket(r.Context(), bucket); err == nil && bucketMeta.Owner != "" {
+			info.Owner = s.getPeerName(bucketMeta.Owner)
+		}
+		s.updateListingIndex(bucket, key, &info, "put")
+
+	case http.MethodDelete:
+		s.updateListingIndex(bucket, key, nil, "delete")
 	}
 }
 
