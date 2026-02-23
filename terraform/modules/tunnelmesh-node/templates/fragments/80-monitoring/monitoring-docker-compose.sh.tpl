@@ -341,12 +341,6 @@ services:
     volumes:
       - /opt/monitoring/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3100/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 60s
 
   grafana:
     image: grafana/grafana:${grafana_image_tag}
@@ -367,8 +361,6 @@ services:
     depends_on:
       prometheus:
         condition: service_healthy
-      loki:
-        condition: service_healthy
 
 volumes:
   prometheus-data:
@@ -380,3 +372,17 @@ COMPOSEEOF
 echo "Starting monitoring stack..."
 docker compose -f /opt/monitoring/docker-compose.yml --project-name tunnelmesh-monitoring up -d
 echo "Monitoring stack started"
+
+# Wait for Loki to be ready (grafana/loki image has no shell or wget, so check from host)
+echo "Waiting for Loki to become ready..."
+for i in $(seq 1 36); do
+  if curl -sf http://127.0.0.1:3100/ready > /dev/null 2>&1; then
+    echo "Loki is ready"
+    break
+  fi
+  if [ "$i" -eq 36 ]; then
+    echo "Error: Loki did not become ready after 3 minutes"
+    exit 1
+  fi
+  sleep 5
+done
