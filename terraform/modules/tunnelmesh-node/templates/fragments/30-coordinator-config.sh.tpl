@@ -87,7 +87,6 @@ wireguard:
 %{ endif ~}
 COORDCONF
 
-# Create context and install service
-/usr/local/bin/tunnelmesh context create ${node_name} --config /etc/tunnelmesh/coordinator.yaml
-/usr/local/bin/tunnelmesh service install --context ${node_name}
+# Install coordinator service (serve mode; no TUNNELMESH_TOKEN required)
+echo "y" | /usr/local/bin/tunnelmesh service install --mode serve --config /etc/tunnelmesh/coordinator.yaml
 %{ endif ~}
