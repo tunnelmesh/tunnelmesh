@@ -1,11 +1,15 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
+	"github.com/tunnelmesh/tunnelmesh/internal/mesh"
 )
 
 func TestNormalizeServerURL(t *testing.T) {
@@ -386,4 +390,70 @@ func TestEnsureCoordinatorConfig(t *testing.T) {
 			assert.Equal(t, tt.expectedListen, cfg.Coordinator.Listen)
 		})
 	}
+}
+
+// TestConfigureLinuxResolvers_InvalidAddr verifies that a malformed DNS address
+// (missing port) returns an error before any system calls are made.
+func TestConfigureLinuxResolvers_InvalidAddr(t *testing.T) {
+	err := configureLinuxResolvers("127.0.0.1", "tun-mesh", mesh.AllSuffixes())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid DNS address")
+}
+
+// TestConfigureSystemdResolvedDropIn verifies that the drop-in config file is
+// written with all three mesh suffixes in a single file using the ~suffix format.
+func TestConfigureSystemdResolvedDropIn(t *testing.T) {
+	dir := t.TempDir()
+
+	err := configureSystemdResolvedDropIn(dir, "127.0.0.1", "5353", mesh.AllSuffixes())
+	require.NoError(t, err)
+
+	confFile := filepath.Join(dir, "tunnelmesh.conf")
+	data, err := os.ReadFile(confFile)
+	require.NoError(t, err)
+
+	content := string(data)
+	assert.Contains(t, content, "[Resolve]")
+	assert.Contains(t, content, "DNS=127.0.0.1:5353")
+
+	// All three suffixes must be in a single Domains= line (not separate files).
+	// Each suffix must use ~suffix format (leading dot stripped, ~ prepended).
+	domainsLine := ""
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "Domains=") {
+			domainsLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, domainsLine, "Domains= line missing from drop-in config")
+
+	for _, suffix := range mesh.AllSuffixes() {
+		expected := "~" + strings.TrimPrefix(suffix, ".")
+		assert.Contains(t, domainsLine, expected, "expected domain %s in Domains= line", expected)
+	}
+
+	// Verify no leading dot (invalid resolvectl format) sneaked through.
+	assert.NotContains(t, domainsLine, "~.")
+}
+
+// TestRemoveLinuxResolversAt_FileExists verifies that the drop-in file is removed
+// when it exists.
+func TestRemoveLinuxResolversAt_FileExists(t *testing.T) {
+	dir := t.TempDir()
+	confFile := filepath.Join(dir, "tunnelmesh.conf")
+	require.NoError(t, os.WriteFile(confFile, []byte("[Resolve]\n"), 0o644))
+
+	err := removeLinuxResolversAt(dir, "tun-mesh")
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(confFile)
+	assert.True(t, os.IsNotExist(statErr), "drop-in file should be removed")
+}
+
+// TestRemoveLinuxResolversAt_NoFile verifies that removeLinuxResolversAt is a
+// no-op (no error) when no drop-in file exists.
+func TestRemoveLinuxResolversAt_NoFile(t *testing.T) {
+	dir := t.TempDir()
+	err := removeLinuxResolversAt(dir, "tun-mesh")
+	require.NoError(t, err)
 }

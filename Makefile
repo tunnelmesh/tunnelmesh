@@ -2,7 +2,7 @@
         dev-server dev-peer gen-keys release release-all push-release \
         docker-build docker-up docker-down docker-logs docker-clean docker-test \
         ghcr-login ghcr-build ghcr-push deploy deploy-plan deploy-destroy deploy-taint-coordinator \
-        deploy-update deploy-update-node \
+        deploy-update deploy-update-node deploy-token \
         service-install service-uninstall service-start service-stop service-status
 
 # Build variables
@@ -248,6 +248,9 @@ GHCR_TAG ?= $(COMMIT)
 # Terraform targets
 TF_DIR = terraform
 
+deploy-token:
+	@cd $(TF_DIR) && terraform output -raw auth_token
+
 deploy-init:
 	cd $(TF_DIR) && terraform init
 
@@ -260,6 +263,12 @@ deploy:
 	@echo ""
 	@echo "=== Deployment Complete ==="
 	@cd $(TF_DIR) && terraform output -json nodes | jq -r 'to_entries[] | "\(.key): \(.value.ip) - \(.value.hostname)"'
+	@echo ""
+	@echo "=== Join Command ==="
+	@TOKEN=$$(cd $(TF_DIR) && terraform output -raw auth_token); \
+	URL=$$(cd $(TF_DIR) && terraform output -raw coordinator_url | sed 's|https://||'); \
+	PORT=$$(cd $(TF_DIR) && terraform output -raw external_api_port 2>/dev/null || echo 8443); \
+	echo "sudo env TUNNELMESH_TOKEN=$$TOKEN tunnelmesh join $$URL:$$PORT"
 
 # Update tunnelmesh binary on all deployed nodes using built-in update command
 # Usage: make deploy-update [BINARY_VERSION=latest]
@@ -418,3 +427,4 @@ help:
 	@echo "  deploy-taint-coordinator - Taint coordinator droplet for recreation"
 	@echo "  deploy-update          - Update tunnelmesh on all nodes (BINARY_VERSION=latest)"
 	@echo "  deploy-update-node     - Update single node (NODE=name BINARY_VERSION=latest)"
+	@echo "  deploy-token           - Print the mesh auth token"

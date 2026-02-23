@@ -69,6 +69,11 @@ wireguard:
 %{ endif ~}
 COORDCONF
 
-# Install as serve-mode service (no auth token required; service name = tunnelmesh-server)
+# Write auth token to service environment file (auth_token cannot be stored in YAML)
+mkdir -p /etc/sysconfig
+echo "TUNNELMESH_TOKEN=${auth_token}" > /etc/sysconfig/tunnelmesh-server
+chmod 600 /etc/sysconfig/tunnelmesh-server
+
+# Install coordinator service (serve mode)
 echo "y" | /usr/local/bin/tunnelmesh service install --mode serve --config /etc/tunnelmesh/coordinator.yaml
 %{ endif ~}

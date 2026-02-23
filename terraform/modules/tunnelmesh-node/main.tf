@@ -82,17 +82,21 @@ locals {
     # Auto-update settings
     auto_update_enabled  = var.auto_update_enabled
     auto_update_schedule = var.auto_update_schedule
+
+    # Admin access
+    admin_peers = var.admin_peers
   }
 
   # Monitoring-specific variables
   monitoring_vars = merge(local.common_vars, {
     prometheus_url            = var.monitoring_enabled ? "http://localhost:9090" : ""
     grafana_url               = var.monitoring_enabled ? "http://localhost:3000" : ""
-    prometheus_version        = var.prometheus_version
-    loki_version              = var.loki_version
     prometheus_retention_days = var.prometheus_retention_days
     loki_retention_days       = var.loki_retention_days
     loki_enabled              = var.monitoring_enabled
+    prometheus_image_tag      = var.prometheus_image_tag
+    loki_image_tag            = var.loki_image_tag
+    grafana_image_tag         = var.grafana_image_tag
   })
 }
 
@@ -131,11 +135,7 @@ resource "digitalocean_droplet" "node" {
     templatefile("${path.module}/templates/fragments/70-service-install.sh.tpl", local.common_vars),
 
     # Monitoring (coordinator only, when enabled)
-    var.coordinator_enabled && var.monitoring_enabled ? templatefile("${path.module}/templates/fragments/80-monitoring/monitoring-common.sh.tpl", local.monitoring_vars) : "",
-    var.coordinator_enabled && var.monitoring_enabled ? templatefile("${path.module}/templates/fragments/80-monitoring/prometheus.sh.tpl", local.monitoring_vars) : "",
-    var.coordinator_enabled && var.monitoring_enabled ? templatefile("${path.module}/templates/fragments/80-monitoring/sd-generator.sh.tpl", local.monitoring_vars) : "",
-    var.coordinator_enabled && var.monitoring_enabled ? templatefile("${path.module}/templates/fragments/80-monitoring/loki.sh.tpl", local.monitoring_vars) : "",
-    var.coordinator_enabled && var.monitoring_enabled ? templatefile("${path.module}/templates/fragments/80-monitoring/grafana.sh.tpl", local.monitoring_vars) : "",
+    var.coordinator_enabled && var.monitoring_enabled ? templatefile("${path.module}/templates/fragments/80-monitoring/monitoring-docker-compose.sh.tpl", local.monitoring_vars) : "",
 
     # SSL certificate (after services are running)
     var.coordinator_enabled && var.ssl_enabled ? templatefile("${path.module}/templates/fragments/90-ssl-cert.sh.tpl", local.common_vars) : "",

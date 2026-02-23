@@ -331,9 +331,11 @@ func runAsService() {
 	}
 
 	// Create program with runner functions
+	// Both serve and join use runJoinFromService — the mode distinction is in the config file
 	prg := &svc.Program{
 		Mode:       mode,
 		ConfigPath: configPath,
+		RunServe:   runJoinFromService,
 		RunJoin:    runJoinFromService,
 	}
 
@@ -1690,7 +1692,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	log.Info().Str("listen", cfg.DNS.Listen).Msg("DNS server started")
 
 	// Configure system resolver
-	if err := configureSystemResolver(resp.Domain, cfg.DNS.Listen); err != nil {
+	if err := configureSystemResolver(resp.Domain, cfg.DNS.Listen, cfg.TUN.Name); err != nil {
 		log.Warn().Err(err).Msg("failed to configure system resolver")
 	} else {
 		dnsConfigured = true
@@ -1857,7 +1859,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 
 	// Clean up system resolver
 	if dnsConfigured {
-		removeSystemResolver(resp.Domain)
+		removeSystemResolver(resp.Domain, cfg.TUN.Name)
 	}
 
 	// Stop WireGuard device
@@ -2244,15 +2246,19 @@ func setupServiceLogging() {
 
 // configureSystemResolver sets up the system to resolve all mesh domains via our DNS server.
 // Configures all supported suffixes: .tunnelmesh, .tm, .mesh
-func configureSystemResolver(_, dnsAddr string) error {
-	// Extract port from address
+func configureSystemResolver(_, dnsAddr, tunName string) error {
+	// Linux: one combined call for all suffixes to avoid overwriting
+	if runtime.GOOS == "linux" {
+		return configureLinuxResolvers(dnsAddr, tunName, mesh.AllSuffixes())
+	}
+
+	// Extract port from address (used by darwin/windows per-domain calls)
 	parts := strings.Split(dnsAddr, ":")
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid DNS address: %s", dnsAddr)
 	}
 	port := parts[1]
 
-	// Configure all supported domain suffixes
 	for _, suffix := range mesh.AllSuffixes() {
 		domain := strings.TrimPrefix(suffix, ".")
 
@@ -2260,8 +2266,6 @@ func configureSystemResolver(_, dnsAddr string) error {
 		switch runtime.GOOS {
 		case "darwin":
 			err = configureDarwinResolver(domain, port)
-		case "linux":
-			err = configureLinuxResolver(domain, dnsAddr)
 		case "windows":
 			err = configureWindowsResolver(domain, dnsAddr)
 		default:
@@ -2276,8 +2280,14 @@ func configureSystemResolver(_, dnsAddr string) error {
 }
 
 // removeSystemResolver removes the system resolver configuration for all mesh domains.
-func removeSystemResolver(_ string) {
-	// Remove all supported domain suffixes
+func removeSystemResolver(_, tunName string) {
+	if runtime.GOOS == "linux" {
+		if err := removeLinuxResolvers(tunName); err != nil {
+			log.Warn().Err(err).Msg("failed to remove Linux resolver")
+		}
+		return
+	}
+
 	for _, suffix := range mesh.AllSuffixes() {
 		domain := strings.TrimPrefix(suffix, ".")
 
@@ -2285,8 +2295,6 @@ func removeSystemResolver(_ string) {
 		switch runtime.GOOS {
 		case "darwin":
 			err = removeDarwinResolver(domain)
-		case "linux":
-			err = removeLinuxResolver(domain)
 		case "windows":
 			err = removeWindowsResolver(domain)
 		}
@@ -2363,120 +2371,75 @@ func removeDarwinResolver(domain string) error {
 	return nil
 }
 
-func configureLinuxResolver(domain, dnsAddr string) error {
+func configureLinuxResolvers(dnsAddr, tunName string, suffixes []string) error {
 	parts := strings.Split(dnsAddr, ":")
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid DNS address: %s", dnsAddr)
 	}
-	ip := parts[0]
-	port := parts[1]
+	ip, port := parts[0], parts[1]
 
-	// Try systemd-resolved first (most common on modern Linux)
-	if _, err := exec.LookPath("resolvectl"); err == nil {
-		return configureSystemdResolved(domain, ip, port)
-	}
-
-	// Fallback: create a config file for systemd-resolved
-	confDir := "/etc/systemd/resolved.conf.d"
-	if _, err := os.Stat("/etc/systemd/resolved.conf"); err == nil {
-		return configureSystemdResolvedFile(domain, ip, port, confDir)
-	}
-
-	log.Warn().
-		Str("domain", domain).
-		Str("dns", dnsAddr).
-		Msg("could not auto-configure DNS; manually add DNS server or use: dig @127.0.0.1 -p PORT hostname.mesh")
-	return nil
-}
-
-func configureSystemdResolved(domain, ip, port string) error {
-	log.Info().Msg("configuring systemd-resolved (requires sudo)...")
-
-	// Use resolvectl to set DNS for the mesh domain
-	// Note: This sets a global DNS that only handles .mesh
-	cmd := exec.Command("sudo", "resolvectl", "dns", "lo", ip+":"+port)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("resolvectl dns failed: %w", err)
-	}
-
-	cmd = exec.Command("sudo", "resolvectl", "domain", "lo", "~"+domain)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("resolvectl domain failed: %w", err)
-	}
-
-	log.Info().Str("domain", domain).Msg("systemd-resolved configured")
-	return nil
-}
-
-func configureSystemdResolvedFile(domain, ip, port, confDir string) error {
-	log.Info().Msg("configuring systemd-resolved via config file (requires sudo)...")
-
-	content := fmt.Sprintf(`# TunnelMesh DNS configuration
-[Resolve]
-DNS=%s:%s
-Domains=~%s
-`, ip, port, domain)
-
-	confFile := filepath.Join(confDir, "tunnelmesh.conf")
-
-	// Create directory
-	cmd := exec.Command("sudo", "mkdir", "-p", confDir)
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("mkdir failed: %w", err)
-	}
-
-	// Write config
-	cmd = exec.Command("sudo", "tee", confFile)
-	cmd.Stdin = strings.NewReader(content)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("write config failed: %w", err)
-	}
-
-	// Restart systemd-resolved
-	cmd = exec.Command("sudo", "systemctl", "restart", "systemd-resolved")
-	cmd.Stderr = os.Stderr
-	_ = cmd.Run() // Ignore error, might not need restart
-
-	log.Info().Str("file", confFile).Msg("systemd-resolved configured")
-	return nil
-}
-
-func removeLinuxResolver(_ string) error {
-	// Try resolvectl first
-	if _, err := exec.LookPath("resolvectl"); err == nil {
-		cmd := exec.Command("sudo", "resolvectl", "revert", "lo")
-		cmd.Stdin = os.Stdin
-		cmd.Stderr = os.Stderr
-		_ = cmd.Run() // Ignore errors
-	}
-
-	// Remove config file if it exists
-	confFile := "/etc/systemd/resolved.conf.d/tunnelmesh.conf"
-	if _, err := os.Stat(confFile); err == nil {
-		cmd := exec.Command("sudo", "rm", "-f", confFile)
-		cmd.Stdin = os.Stdin
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("remove config failed: %w", err)
+	if tunName != "" {
+		if _, err := exec.LookPath("resolvectl"); err == nil {
+			return configureSystemdResolvedLink(tunName, ip, port, suffixes)
 		}
-
-		// Restart systemd-resolved
-		cmd = exec.Command("sudo", "systemctl", "restart", "systemd-resolved")
-		cmd.Stderr = os.Stderr
-		_ = cmd.Run()
-
-		log.Info().Msg("systemd-resolved configuration removed")
 	}
+	// Fallback: drop-in file (no TUN name or no resolvectl)
+	return configureSystemdResolvedDropIn("/etc/systemd/resolved.conf.d", ip, port, suffixes)
+}
 
+func configureSystemdResolvedLink(tunName, ip, port string, suffixes []string) error {
+	if out, err := exec.Command("resolvectl", "dns", tunName, ip+":"+port).CombinedOutput(); err != nil {
+		return fmt.Errorf("resolvectl dns: %w: %s", err, out)
+	}
+	args := []string{"domain", tunName}
+	for _, s := range suffixes {
+		args = append(args, "~"+strings.TrimPrefix(s, "."))
+	}
+	if out, err := exec.Command("resolvectl", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("resolvectl domain: %w: %s", err, out)
+	}
+	log.Info().Str("iface", tunName).Msg("systemd-resolved configured via resolvectl")
+	return nil
+}
+
+func configureSystemdResolvedDropIn(confDir, ip, port string, suffixes []string) error {
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		return fmt.Errorf("create resolved.conf.d: %w", err)
+	}
+	var domains []string
+	for _, s := range suffixes {
+		domains = append(domains, "~"+strings.TrimPrefix(s, "."))
+	}
+	content := fmt.Sprintf("[Resolve]\nDNS=%s:%s\nDomains=%s\n", ip, port, strings.Join(domains, " "))
+	confFile := filepath.Join(confDir, "tunnelmesh.conf")
+	if err := os.WriteFile(confFile, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write tunnelmesh.conf: %w", err)
+	}
+	_ = exec.Command("systemctl", "kill", "--signal=SIGHUP", "systemd-resolved").Run()
+	log.Info().Str("file", confFile).Msg("systemd-resolved configured via drop-in")
+	return nil
+}
+
+func removeLinuxResolvers(tunName string) error {
+	return removeLinuxResolversAt("/etc/systemd/resolved.conf.d", tunName)
+}
+
+func removeLinuxResolversAt(confDir, tunName string) error {
+	if _, err := exec.LookPath("resolvectl"); err == nil {
+		iface := tunName
+		if iface == "" {
+			iface = "tun-mesh" // best-effort for context deletion path
+		}
+		_ = exec.Command("resolvectl", "revert", iface).Run()
+	}
+	confFile := filepath.Join(confDir, "tunnelmesh.conf")
+	if _, err := os.Stat(confFile); err == nil {
+		if err := os.Remove(confFile); err != nil {
+			return fmt.Errorf("remove tunnelmesh.conf: %w", err)
+		}
+		_ = exec.Command("systemctl", "kill", "--signal=SIGHUP", "systemd-resolved").Run()
+	}
+	log.Info().Msg("systemd-resolved configuration removed")
 	return nil
 }
 
