@@ -35,6 +35,7 @@ class NodeMap {
         this._selectedPeer = null;
         this._selectedPeerData = null;
         this._onlinePeersWithLocation = new Map(); // peerName → { lat, lng, exitNode }
+        this._onPageShow = null;
 
         // Viewport state
         this._vp = { cx: WORLD_PX / 2, cy: WORLD_PX / 2, scale: 1, cw: 0, ch: 0 };
@@ -69,6 +70,12 @@ class NodeMap {
         // Render once image is ready (may already be cached)
         _worldImg.onload = () => this._render();
         if (_worldImg.complete) this._render();
+
+        // Re-render after bfcache restore (canvas is cleared and ctx transform is reset)
+        this._onPageShow = (e) => {
+            if (e.persisted) this._onResize();
+        };
+        window.addEventListener('pageshow', this._onPageShow);
 
         this._initialized = true;
     }
@@ -204,6 +211,10 @@ class NodeMap {
         if (this._ro) {
             this._ro.disconnect();
             this._ro = null;
+        }
+        if (this._onPageShow) {
+            window.removeEventListener('pageshow', this._onPageShow);
+            this._onPageShow = null;
         }
         if (this._canvas?.parentNode) {
             this._canvas.parentNode.removeChild(this._canvas);
