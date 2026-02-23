@@ -162,7 +162,7 @@ peers = {
 # ============================================================================
 # DEFAULT SETTINGS
 # ============================================================================
-# These can be overridden per-node in the nodes map above
+# These can be overridden per-node in the peers map above
 
 # DigitalOcean region (nyc1, nyc3, sfo2, sfo3, ams3, sgp1, lon1, fra1, tor1, blr1, syd1)
 # default_region = "ams3"

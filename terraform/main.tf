@@ -5,7 +5,7 @@
 #
 # Example configurations in terraform.tfvars:
 #
-# nodes = {
+# peers = {
 #   # All-in-one: coordinator + peer + wireguard
 #   "tunnelmesh" = {
 #     coordinator = true

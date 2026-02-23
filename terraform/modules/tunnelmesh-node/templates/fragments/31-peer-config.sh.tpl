@@ -18,15 +18,12 @@ allow_exit_traffic: true
 %{ endif ~}
 
 %{ if location_latitude != null && location_longitude != null ~}
-# Manual location override
-location:
+# Manual geolocation override
+geolocation:
   latitude: ${location_latitude}
   longitude: ${location_longitude}
 %{ if location_city != "" ~}
   city: "${location_city}"
-%{ endif ~}
-%{ if location_country != "" ~}
-  country: "${location_country}"
 %{ endif ~}
 %{ endif ~}
 
@@ -37,7 +34,6 @@ tun:
 
 # DNS resolver
 dns:
-  enabled: true
   listen: "127.0.0.1:5353"
 
 %{ if wireguard_enabled ~}
