@@ -91,6 +91,9 @@ locals {
     prometheus_retention_days = var.prometheus_retention_days
     loki_retention_days       = var.loki_retention_days
     loki_enabled              = var.monitoring_enabled
+    prometheus_image_tag      = var.prometheus_image_tag
+    loki_image_tag            = var.loki_image_tag
+    grafana_image_tag         = var.grafana_image_tag
   })
 }
 
