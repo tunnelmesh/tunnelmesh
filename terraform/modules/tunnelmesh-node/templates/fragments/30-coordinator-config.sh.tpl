@@ -2,14 +2,9 @@
 # === COORDINATOR PEER CONFIGURATION ===
 cat > /etc/tunnelmesh/coordinator.yaml <<'COORDCONF'
 name: "${node_name}"
-servers: []  # First coordinator (standalone)
-auth_token: "${auth_token}"
 %{ if peer_enabled ~}
 ssh_port: ${ssh_tunnel_port}
 private_key: /etc/tunnelmesh/peer.key
-%{ endif ~}
-%{ if length(admin_peers) > 0 ~}
-admin_peers: [${join(", ", [for p in admin_peers : "\"${p}\""])}]
 %{ endif ~}
 
 # Enable coordinator services
@@ -17,24 +12,15 @@ coordinator:
   enabled: true
   listen: ":${coordinator_port}"
   memberlist_seeds: []  # Standalone coordinator (TODO: add clustering support)
-
-  admin:
-    enabled: true
-%{ if peer_enabled ~}
-    port: 443  # Mesh-internal admin on port 443 (nginx uses 8443 for external API)
+  locations: ${locations_enabled}
+%{ if length(admin_peers) > 0 ~}
+  admin_peers: [${join(", ", [for p in admin_peers : "\"${p}\""])}]
 %{ endif ~}
 %{ if monitoring_enabled ~}
-    monitoring:
-      prometheus_url: "${prometheus_url}"
-      grafana_url: "${grafana_url}"
+  monitoring:
+    prometheus_url: "${prometheus_url}"
+    grafana_url: "${grafana_url}"
 %{ endif ~}
-    # Admin accessible at https://this.tunnelmesh/ from mesh peers
-
-  relay:
-    enabled: ${relay_enabled}
-    pair_timeout: "90s"
-
-  locations: ${locations_enabled}
 
 %{ if peer_enabled ~}
 # TUN interface (coordinator is also a peer)
@@ -44,7 +30,6 @@ tun:
 
 # DNS resolver
 dns:
-  enabled: true
   listen: "127.0.0.1:5353"
 %{ endif ~}
 
@@ -58,15 +43,12 @@ allow_exit_traffic: true
 %{ endif ~}
 
 %{ if location_latitude != null && location_longitude != null ~}
-# Manual location override
-location:
+# Manual geolocation override
+geolocation:
   latitude: ${location_latitude}
   longitude: ${location_longitude}
 %{ if location_city != "" ~}
   city: "${location_city}"
-%{ endif ~}
-%{ if location_country != "" ~}
-  country: "${location_country}"
 %{ endif ~}
 %{ endif ~}
 
@@ -87,7 +69,6 @@ wireguard:
 %{ endif ~}
 COORDCONF
 
-# Create context and install service
-/usr/local/bin/tunnelmesh context create ${node_name} --config /etc/tunnelmesh/coordinator.yaml
-/usr/local/bin/tunnelmesh service install --context ${node_name}
+# Install as serve-mode service (no auth token required; service name = tunnelmesh-server)
+echo "y" | /usr/local/bin/tunnelmesh service install --mode serve --config /etc/tunnelmesh/coordinator.yaml
 %{ endif ~}

@@ -20,7 +20,7 @@ variable "auth_token" {
 }
 
 variable "admin_peers" {
-  description = "List of peer names that should be granted admin role"
+  description = "List of peer names or peer IDs (SHA256 of SSH key, first 8 bytes = 16 hex chars) granted the admins group"
   type        = list(string)
   default     = []
 }
@@ -62,12 +62,6 @@ variable "external_api_port" {
   description = "HTTPS port for external API (nginx). Port 443 is reserved for mesh-internal admin."
   type        = number
   default     = 8443
-}
-
-variable "relay_enabled" {
-  description = "Enable relay server on coordinator"
-  type        = bool
-  default     = true
 }
 
 variable "locations_enabled" {
@@ -124,11 +118,6 @@ variable "location_city" {
   default     = ""
 }
 
-variable "location_country" {
-  description = "Country name for this node location"
-  type        = string
-  default     = ""
-}
 
 # --- WireGuard Settings ---
 

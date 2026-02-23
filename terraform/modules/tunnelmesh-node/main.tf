@@ -52,7 +52,6 @@ locals {
     # Coordinator settings
     coordinator_port  = var.coordinator_port
     external_api_port = var.external_api_port
-    relay_enabled     = var.relay_enabled
     auth_token        = var.auth_token
     locations_enabled = var.locations_enabled
 
@@ -68,7 +67,6 @@ locals {
     location_latitude  = var.location_latitude
     location_longitude = var.location_longitude
     location_city      = var.location_city
-    location_country   = var.location_country
 
     # WireGuard settings
     wg_listen_port = var.wg_listen_port

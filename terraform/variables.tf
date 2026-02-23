@@ -22,7 +22,7 @@ variable "auth_token" {
 }
 
 variable "admin_peers" {
-  description = "List of peer names that should be granted admin role (e.g., [\"honker\", \"oldie\"])"
+  description = "List of peer names or peer IDs granted admin role (e.g., [\"honker\", \"abc123def456...\"]). Peer IDs (SHA256 of SSH key, first 16 hex chars) are preferred for security."
   type        = list(string)
   default     = []
 }

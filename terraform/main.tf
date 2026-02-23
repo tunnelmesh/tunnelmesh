@@ -5,7 +5,7 @@
 #
 # Example configurations in terraform.tfvars:
 #
-# nodes = {
+# peers = {
 #   # All-in-one: coordinator + peer + wireguard
 #   "tunnelmesh" = {
 #     coordinator = true
@@ -104,7 +104,6 @@ module "node" {
   location_latitude  = try(each.value.location.latitude, null)
   location_longitude = try(each.value.location.longitude, null)
   location_city      = try(each.value.location.city, "")
-  location_country   = try(each.value.location.country, "")
 
   # WireGuard settings
   wg_listen_port = lookup(each.value, "wg_port", var.default_wg_port)

@@ -2,9 +2,6 @@
 # === PEER-ONLY CONFIGURATION ===
 cat > /etc/tunnelmesh/peer.yaml <<'PEERCONF'
 name: "${node_name}"
-servers:
-  - "${peer_server}"
-auth_token: "${auth_token}"
 ssh_port: ${ssh_tunnel_port}
 private_key: /etc/tunnelmesh/peer.key
 
@@ -18,15 +15,12 @@ allow_exit_traffic: true
 %{ endif ~}
 
 %{ if location_latitude != null && location_longitude != null ~}
-# Manual location override
-location:
+# Manual geolocation override
+geolocation:
   latitude: ${location_latitude}
   longitude: ${location_longitude}
 %{ if location_city != "" ~}
   city: "${location_city}"
-%{ endif ~}
-%{ if location_country != "" ~}
-  country: "${location_country}"
 %{ endif ~}
 %{ endif ~}
 
@@ -37,7 +31,6 @@ tun:
 
 # DNS resolver
 dns:
-  enabled: true
   listen: "127.0.0.1:5353"
 
 %{ if wireguard_enabled ~}
@@ -50,7 +43,13 @@ wireguard:
 %{ endif ~}
 PEERCONF
 
-# Create context and install service
-/usr/local/bin/tunnelmesh context create ${node_name} --config /etc/tunnelmesh/peer.yaml
-/usr/local/bin/tunnelmesh service install --context ${node_name}
+# TUNNELMESH_SERVER is read by 'service install' and baked into the service's env vars
+# so it is available to the join command at runtime without appearing in process listings.
+# TUNNELMESH_TOKEN is consumed by 'service install' for join mode (not stored anywhere).
+export TUNNELMESH_SERVER="${peer_server}"
+export TUNNELMESH_TOKEN="${auth_token}"
+
+# Context name "default" gives service name "tunnelmesh" (matches service start below)
+/usr/local/bin/tunnelmesh context create default --config /etc/tunnelmesh/peer.yaml
+echo "y" | /usr/local/bin/tunnelmesh service install --context default
 %{ endif ~}
