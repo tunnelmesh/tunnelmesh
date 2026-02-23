@@ -9,6 +9,19 @@ apt-get -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef
 # Install base dependencies
 apt-get install -y -q curl wget jq fail2ban
 
+# Install Docker CE (enables Docker socket integration + monitoring stack)
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+systemctl enable docker
+systemctl start docker
+
 # Configure fail2ban for SSH protection
 cat > /etc/fail2ban/jail.local <<'FAIL2BAN'
 [DEFAULT]
