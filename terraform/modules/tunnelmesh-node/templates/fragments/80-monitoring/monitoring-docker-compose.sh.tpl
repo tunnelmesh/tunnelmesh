@@ -181,8 +181,8 @@ ALERTS
 
 # Write loki config (retention expressed in hours)
 # NOTE: This heredoc is intentionally unquoted (<<LOKICONFIG not <<'LOKICONFIG')
-# so Terraform can substitute ${loki_retention_days * 24}h. Any future values
-# containing $ or %{ must either be escaped or moved to a quoted heredoc section.
+# so Terraform can substitute $${loki_retention_days * 24}h. Any future values
+# containing $ or %%{ must either be escaped or moved to a quoted heredoc section.
 # http_listen_address binds Loki to localhost only. With network_mode: host,
 # this is equivalent to the old systemd setup — Loki is reachable from the host
 # at 127.0.0.1:3100 (via nginx proxy) but not from the external network.
