@@ -208,15 +208,16 @@ type Store struct {
 	dataDir                 string
 	cas                     *CAS // Content-addressable storage for chunks
 	quota                   *QuotaManager
-	chunkRegistry           ChunkRegistryInterface // Optional distributed chunk ownership tracking
-	replicator              ReplicatorInterface    // Optional replicator for fetching remote chunks (Phase 5)
-	coordinatorID           string                 // Local coordinator ID for version vectors (optional)
-	logger                  zerolog.Logger         // Structured logger
-	defaultObjectExpiryDays int                    // Days until objects expire (0 = never)
-	defaultShareExpiryDays  int                    // Days until file shares expire (0 = never)
-	recyclebinRetentionDays int                    // Days to retain recycled objects before purging (0 = never purge)
-	versionRetentionDays    int                    // Days to retain object versions (0 = forever)
-	maxVersionsPerObject    int                    // Max versions to keep per object (0 = unlimited)
+	chunkRegistry           ChunkRegistryInterface   // Optional distributed chunk ownership tracking
+	replicator              ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
+	coordinatorID           string                   // Local coordinator ID for version vectors (optional)
+	logger                  zerolog.Logger           // Structured logger
+	onPurgeCallback         func(bucket, key string) // Called when recycled entry is permanently deleted
+	defaultObjectExpiryDays int                      // Days until objects expire (0 = never)
+	defaultShareExpiryDays  int                      // Days until file shares expire (0 = never)
+	recyclebinRetentionDays int                      // Days to retain recycled objects before purging (0 = never purge)
+	versionRetentionDays    int                      // Days to retain object versions (0 = forever)
+	maxVersionsPerObject    int                      // Max versions to keep per object (0 = unlimited)
 	versionRetentionPolicy  VersionRetentionPolicy
 	erasureCodingSemaphore  chan struct{}  // Limits concurrent erasure coding operations (memory safety)
 	bgWg                    sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
@@ -426,6 +427,14 @@ func (s *Store) SetLogger(logger zerolog.Logger) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logger = logger
+}
+
+// SetOnPurgeCallback sets a callback that is invoked when a recycled entry is permanently deleted.
+// The callback receives the bucket name and object key that was purged.
+func (s *Store) SetOnPurgeCallback(callback func(bucket, key string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onPurgeCallback = callback
 }
 
 // SetDefaultObjectExpiryDays sets the default expiry for new objects in days.
@@ -2491,6 +2500,11 @@ func (s *Store) purgeRecycledEntries(ctx context.Context, cutoff *time.Time) int
 			// Remove the recyclebin entry (retry on Windows where file handles may be held)
 			if err := removeWithRetry(entryPath); err != nil {
 				continue
+			}
+
+			// Notify callback for listing index update
+			if s.onPurgeCallback != nil {
+				s.onPurgeCallback(bucket.Name, entry.OriginalKey)
 			}
 
 			purgedCount++

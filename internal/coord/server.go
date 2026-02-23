@@ -1196,6 +1196,11 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 		MonthlyMonths: cfg.Coordinator.S3.VersionRetention.MonthlyMonths,
 	})
 
+	// Set callback to update listing index when recycled entries are purged
+	store.SetOnPurgeCallback(func(bucket, key string) {
+		s.updateListingIndex(bucket, key, nil, "purge")
+	})
+
 	// Create authorizer with group support
 	s.s3Authorizer = auth.NewAuthorizerWithGroups()
 

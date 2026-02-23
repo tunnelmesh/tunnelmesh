@@ -70,6 +70,7 @@ func mergeObjectListings(local, remote []S3ObjectInfo) []S3ObjectInfo {
 //   - op = "put": upsert entry in objects list
 //   - op = "delete": remove from objects, add to recycled (with DeletedAt)
 //   - op = "undelete": remove from recycled, add to objects
+//   - op = "purge": remove from recycled (permanent deletion by GC)
 func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op string) {
 	for {
 		old := s.localListingIndex.Load()
@@ -116,6 +117,10 @@ func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op s
 				restored.DeletedAt = ""
 				newBL.Objects = append(newBL.Objects, restored)
 			}
+
+		case "purge":
+			// Permanent deletion from recycle bin - remove from recycled list
+			newBL.Recycled, _ = removeFromObjectList(newBL.Recycled, key)
 		}
 
 		newIdx.Buckets[bucket] = &newBL
