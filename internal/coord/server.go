@@ -1196,6 +1196,17 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 		MonthlyMonths: cfg.Coordinator.S3.VersionRetention.MonthlyMonths,
 	})
 
+	// Single callback handles both PurgeObject (replication deletes) and purgeRecycledEntries (GC).
+	// "remove" op clears from both Objects and Recycled in one atomic update.
+	store.SetOnObjectRemovedCallback(func(bucket, key string) {
+		s.updateListingIndex(bucket, key, nil, "remove")
+	})
+
+	// Callback for ForceDeleteBucket (file share deletion, orphaned bucket GC).
+	store.SetOnBucketRemovedCallback(func(bucket string) {
+		s.removeListingBucket(bucket)
+	})
+
 	// Create authorizer with group support
 	s.s3Authorizer = auth.NewAuthorizerWithGroups()
 

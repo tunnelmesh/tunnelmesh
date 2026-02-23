@@ -56,6 +56,7 @@ func (d *discardResponseWriter) WriteHeader(code int)        { d.status = code }
 // updatePeerListingsAfterForward immediately updates the peerListings atomic pointer
 // after a successful forwarded write, so the listing handler shows the object without
 // waiting for the background indexer to persist and reload.
+// It also persists the entry to localListingIndex so it survives background reloads.
 func (s *Server) updatePeerListingsAfterForward(bucket, key, targetIP string, r *http.Request) {
 	for {
 		old := s.peerListings.Load()
@@ -109,6 +110,12 @@ func (s *Server) updatePeerListingsAfterForward(bucket, key, targetIP string, r 
 			break
 		}
 	}
+
+	// NOTE: Forwarded entries are NOT added to localListingIndex because:
+	// 1. localListingIndex should only contain locally stored files
+	// 2. When persisted to system store and loaded by other coordinators,
+	//    the SourceIP field would be overwritten with the wrong coordinator IP
+	// 3. Forwarded entries in peerListings have a 10-minute TTL for cleanup
 }
 
 // forwardS3Request proxies an S3 request to the target coordinator.

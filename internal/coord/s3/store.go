@@ -208,15 +208,17 @@ type Store struct {
 	dataDir                 string
 	cas                     *CAS // Content-addressable storage for chunks
 	quota                   *QuotaManager
-	chunkRegistry           ChunkRegistryInterface // Optional distributed chunk ownership tracking
-	replicator              ReplicatorInterface    // Optional replicator for fetching remote chunks (Phase 5)
-	coordinatorID           string                 // Local coordinator ID for version vectors (optional)
-	logger                  zerolog.Logger         // Structured logger
-	defaultObjectExpiryDays int                    // Days until objects expire (0 = never)
-	defaultShareExpiryDays  int                    // Days until file shares expire (0 = never)
-	recyclebinRetentionDays int                    // Days to retain recycled objects before purging (0 = never purge)
-	versionRetentionDays    int                    // Days to retain object versions (0 = forever)
-	maxVersionsPerObject    int                    // Max versions to keep per object (0 = unlimited)
+	chunkRegistry           ChunkRegistryInterface   // Optional distributed chunk ownership tracking
+	replicator              ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
+	coordinatorID           string                   // Local coordinator ID for version vectors (optional)
+	logger                  zerolog.Logger           // Structured logger
+	onObjectRemovedCallback func(bucket, key string) // Called when an object is permanently removed from disk
+	onBucketRemovedCallback func(bucket string)      // Called when an entire bucket is removed from disk
+	defaultObjectExpiryDays int                      // Days until objects expire (0 = never)
+	defaultShareExpiryDays  int                      // Days until file shares expire (0 = never)
+	recyclebinRetentionDays int                      // Days to retain recycled objects before purging (0 = never purge)
+	versionRetentionDays    int                      // Days to retain object versions (0 = forever)
+	maxVersionsPerObject    int                      // Max versions to keep per object (0 = unlimited)
 	versionRetentionPolicy  VersionRetentionPolicy
 	erasureCodingSemaphore  chan struct{}  // Limits concurrent erasure coding operations (memory safety)
 	bgWg                    sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
@@ -426,6 +428,23 @@ func (s *Store) SetLogger(logger zerolog.Logger) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logger = logger
+}
+
+// SetOnObjectRemovedCallback sets a callback invoked when an object is permanently removed from disk.
+// This covers both PurgeObject (replication deletes, hard-delete path) and purgeRecycledEntries (GC).
+// The callback receives the bucket name and object key that was removed.
+func (s *Store) SetOnObjectRemovedCallback(cb func(bucket, key string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onObjectRemovedCallback = cb
+}
+
+// SetOnBucketRemovedCallback sets a callback invoked when an entire bucket is removed from disk.
+// This covers ForceDeleteBucket (file share deletion, orphaned bucket GC).
+func (s *Store) SetOnBucketRemovedCallback(cb func(bucket string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onBucketRemovedCallback = cb
 }
 
 // SetDefaultObjectExpiryDays sets the default expiry for new objects in days.
@@ -778,9 +797,17 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	if runtime.GOOS == "windows" {
 		retries = windowsFileRetries
 	}
+
+	// Capture callback before loop to ensure consistent access pattern
+	callback := s.onBucketRemovedCallback
+
 	for i := 0; i < retries; i++ {
 		removeErr = os.RemoveAll(bucketDir)
 		if removeErr == nil {
+			// Notify listing index of bucket removal (no deadlock: callback uses atomic CAS, not s.mu)
+			if callback != nil {
+				callback(bucket)
+			}
 			return nil
 		}
 		if i < retries-1 {
@@ -2325,6 +2352,12 @@ func (s *Store) PurgeObject(ctx context.Context, bucket, key string) error {
 		s.statsLogicalBytes.Add(-meta.Size)
 	}
 
+	// Notify listing index before releasing the lock (no deadlock: callback uses atomic CAS, not s.mu)
+	callback := s.onObjectRemovedCallback
+	if callback != nil {
+		callback(bucket, key)
+	}
+
 	s.mu.Unlock()
 
 	// Phase 2: Delete unreferenced chunks WITHOUT holding the lock.
@@ -2378,6 +2411,7 @@ func (s *Store) PurgeAllRecycledInBucket(ctx context.Context, bucket string) err
 	var allChunksToCheck []string
 
 	s.mu.Lock()
+	callback := s.onObjectRemovedCallback
 
 	rbDir := s.recyclebinPath(bucket)
 	entries, err := os.ReadDir(rbDir)
@@ -2418,6 +2452,12 @@ func (s *Store) PurgeAllRecycledInBucket(ctx context.Context, bucket string) err
 		if err := removeWithRetry(entryPath); err != nil {
 			continue
 		}
+
+		// Notify listing index (safe: already under s.mu lock)
+		if callback != nil {
+			callback(bucket, entry.OriginalKey)
+		}
+
 		s.statsRecycledBytes.Add(-entry.Meta.Size)
 	}
 
@@ -2436,6 +2476,11 @@ func (s *Store) PurgeAllRecycledInBucket(ctx context.Context, bucket string) err
 func (s *Store) purgeRecycledEntries(ctx context.Context, cutoff *time.Time) int {
 	purgedCount := 0
 	var allChunksToCheck []string
+
+	// Read callback under lock to avoid data race
+	s.mu.RLock()
+	callback := s.onObjectRemovedCallback
+	s.mu.RUnlock()
 
 	buckets, err := s.ListBuckets(ctx)
 	if err != nil {
@@ -2491,6 +2536,11 @@ func (s *Store) purgeRecycledEntries(ctx context.Context, cutoff *time.Time) int
 			// Remove the recyclebin entry (retry on Windows where file handles may be held)
 			if err := removeWithRetry(entryPath); err != nil {
 				continue
+			}
+
+			// Notify listing index of permanent removal
+			if callback != nil {
+				callback(bucket.Name, entry.OriginalKey)
 			}
 
 			purgedCount++

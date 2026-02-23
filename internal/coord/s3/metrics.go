@@ -59,6 +59,10 @@ type S3Metrics struct {
 	RebalanceChunksMovedTotal     prometheus.Counter // tunnelmesh_s3_rebalance_chunks_moved_total
 	RebalanceObjectsEnqueuedTotal prometheus.Counter // tunnelmesh_s3_rebalance_objects_enqueued_total
 	RebalanceBytesTransferred     prometheus.Counter // tunnelmesh_s3_rebalance_bytes_transferred_total
+
+	// Listing index drift metrics
+	ListingIndexStaleEntries prometheus.Gauge   // tunnelmesh_s3_listing_stale_entries (0 in steady state)
+	ListingIndexStaleCleaned prometheus.Counter // tunnelmesh_s3_listing_stale_cleaned_total
 }
 
 // InitS3Metrics initializes all S3 metrics on the given registry.
@@ -206,6 +210,16 @@ func InitS3Metrics(registry prometheus.Registerer) *S3Metrics {
 			RebalanceBytesTransferred: promauto.With(registry).NewCounter(prometheus.CounterOpts{
 				Name: "tunnelmesh_s3_rebalance_bytes_transferred_total",
 				Help: "Total bytes transferred during rebalance operations",
+			}),
+
+			// Listing index drift metrics
+			ListingIndexStaleEntries: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
+				Name: "tunnelmesh_s3_listing_stale_entries",
+				Help: "Objects in listing index that don't exist on disk (phantom entries). Should be 0 in steady state.",
+			}),
+			ListingIndexStaleCleaned: promauto.With(registry).NewCounter(prometheus.CounterOpts{
+				Name: "tunnelmesh_s3_listing_stale_cleaned_total",
+				Help: "Total phantom listing entries removed by reconcile scans",
 			}),
 		}
 		s3MetricsPtr.Store(m)
