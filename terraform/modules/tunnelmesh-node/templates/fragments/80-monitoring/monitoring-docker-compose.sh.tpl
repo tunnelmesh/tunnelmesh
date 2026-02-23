@@ -180,6 +180,9 @@ groups:
 ALERTS
 
 # Write loki config (retention expressed in hours)
+# NOTE: This heredoc is intentionally unquoted (<<LOKICONFIG not <<'LOKICONFIG')
+# so Terraform can substitute ${loki_retention_days * 24}h. Any future values
+# containing $ or %{ must either be escaped or moved to a quoted heredoc section.
 # http_listen_address binds Loki to localhost only. With network_mode: host,
 # this is equivalent to the old systemd setup — Loki is reachable from the host
 # at 127.0.0.1:3100 (via nginx proxy) but not from the external network.
@@ -245,7 +248,11 @@ curl -sL "https://raw.githubusercontent.com/${github_owner}/tunnelmesh/main/moni
 
 # Download grafana dashboards via GitHub API
 echo "Downloading Grafana dashboards..."
-DASHBOARD_LIST=$(curl -sf "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
+GITHUB_API_HEADERS=()
+if [ -n "$GITHUB_TOKEN" ]; then
+  GITHUB_API_HEADERS+=(-H "Authorization: token $GITHUB_TOKEN")
+fi
+DASHBOARD_LIST=$(curl -sf "$${GITHUB_API_HEADERS[@]}" "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
 if echo "$DASHBOARD_LIST" | jq -e 'type == "array"' > /dev/null 2>&1; then
   echo "$DASHBOARD_LIST" | jq -r '.[] | select(.name | endswith(".json")) | .download_url' | \
     while read -r url; do
@@ -271,6 +278,12 @@ chmod +x /opt/monitoring/sd-generator
 
 # Create initial empty targets file
 echo "[]" > /opt/monitoring/targets/peers.json
+
+# Write sd-generator env file (auth token kept out of docker-compose.yml)
+cat > /opt/monitoring/sd-generator.env <<SDENV
+AUTH_TOKEN=${auth_token}
+SDENV
+chmod 600 /opt/monitoring/sd-generator.env
 
 # Write docker-compose.yml
 cat > /opt/monitoring/docker-compose.yml <<COMPOSEEOF
@@ -302,14 +315,17 @@ services:
     image: alpine:3.23
     network_mode: host
     restart: unless-stopped
+    user: "nobody"
+    read_only: true
     entrypoint: ["/app/sd-generator"]
     environment:
       - COORD_SERVER_URL=http://127.0.0.1:${coordinator_port}
-      - AUTH_TOKEN=${auth_token}
       - POLL_INTERVAL=30s
       - OUTPUT_FILE=/targets/peers.json
       - METRICS_PORT=9443
       - TLS_SKIP_VERIFY=true
+    env_file:
+      - /opt/monitoring/sd-generator.env
     volumes:
       - /opt/monitoring/sd-generator:/app/sd-generator:ro
       - /opt/monitoring/targets:/targets
@@ -343,7 +359,6 @@ services:
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-      - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/tunnelmesh.json
     volumes:
       - /opt/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

@@ -2855,8 +2855,10 @@ func (s *Store) listObjectsUnsafe(bucket, prefix, marker string, maxKeys int) ([
 }
 
 // walkObjectMeta walks the metadata directory and returns objects matching
-// the prefix/marker/maxKeys filters. Does not require any lock — relies on
-// atomic file operations (temp+rename) for consistency during concurrent writes.
+// the prefix/marker/maxKeys filters. Caller must hold at least s.mu.RLock —
+// os.ReadFile opens files without FILE_SHARE_DELETE on Windows, so a concurrent
+// DeleteObject holding the write lock would fail to os.Remove a file that this
+// walk has open. Atomic temp+rename writes remain safe under RLock.
 func (s *Store) walkObjectMeta(metaDir, prefix, marker string, maxKeys int) ([]ObjectMeta, bool, string, error) {
 	var objects []ObjectMeta
 	passedMarker := marker == "" // If no marker, we've already passed it
