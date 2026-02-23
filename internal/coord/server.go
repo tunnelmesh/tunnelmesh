@@ -341,6 +341,10 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 		log.Info().Msg("WireGuard client management enabled")
 	}
 
+	// Initialize relay manager early so recoverCoordinatorState (called from
+	// initS3Storage) can restore the WireGuard concentrator assignment.
+	srv.relay = newRelayManager(ctx)
+
 	// Initialize S3 storage (always enabled, must be before IP allocator)
 	if err := srv.initS3Storage(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("initialize S3 storage: %w", err)
