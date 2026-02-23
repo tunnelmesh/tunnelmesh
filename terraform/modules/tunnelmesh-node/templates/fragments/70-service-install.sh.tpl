@@ -1,6 +1,6 @@
 # Start the tunnelmesh service
 %{ if coordinator_enabled ~}
-/usr/local/bin/tunnelmesh service start --name tunnelmesh-server
+systemctl start tunnelmesh-server
 %{ else ~}
-/usr/local/bin/tunnelmesh service start --name tunnelmesh
+systemctl start tunnelmesh
 %{ endif ~}
