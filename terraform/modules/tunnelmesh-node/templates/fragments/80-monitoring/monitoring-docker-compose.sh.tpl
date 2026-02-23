@@ -180,6 +180,9 @@ groups:
 ALERTS
 
 # Write loki config (retention expressed in hours)
+# http_listen_address binds Loki to localhost only. With network_mode: host,
+# this is equivalent to the old systemd setup — Loki is reachable from the host
+# at 127.0.0.1:3100 (via nginx proxy) but not from the external network.
 cat > /opt/monitoring/loki/local-config.yaml <<LOKICONFIG
 auth_enabled: false
 
@@ -242,13 +245,17 @@ curl -sL "https://raw.githubusercontent.com/${github_owner}/tunnelmesh/main/moni
 
 # Download grafana dashboards via GitHub API
 echo "Downloading Grafana dashboards..."
-curl -sL "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards" | \
-  jq -r '.[] | select(.name | endswith(".json")) | .download_url' | \
-  while read -r url; do
-    filename=$(basename "$url")
-    echo "  Downloading $filename"
-    curl -sL "$url" -o "/opt/monitoring/grafana/dashboards/$filename"
-  done
+DASHBOARD_LIST=$(curl -sf "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
+if echo "$DASHBOARD_LIST" | jq -e 'type == "array"' > /dev/null 2>&1; then
+  echo "$DASHBOARD_LIST" | jq -r '.[] | select(.name | endswith(".json")) | .download_url' | \
+    while read -r url; do
+      filename=$(basename "$url")
+      echo "  Downloading $filename"
+      curl -sL "$url" -o "/opt/monitoring/grafana/dashboards/$filename"
+    done
+else
+  echo "Warning: GitHub API did not return a valid dashboard list, skipping dashboard download"
+fi
 
 # Download SD generator binary from GitHub releases
 echo "Downloading TunnelMesh Prometheus SD Generator..."
@@ -269,7 +276,7 @@ echo "[]" > /opt/monitoring/targets/peers.json
 cat > /opt/monitoring/docker-compose.yml <<COMPOSEEOF
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:${prometheus_image_tag}
     network_mode: host
     restart: unless-stopped
     command:
@@ -284,9 +291,15 @@ services:
       - /opt/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - /opt/monitoring/targets:/etc/prometheus/targets:ro
       - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/prometheus/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   sd-generator:
-    image: alpine:latest
+    image: alpine:3.21
     network_mode: host
     restart: unless-stopped
     entrypoint: ["/app/sd-generator"]
@@ -301,19 +314,26 @@ services:
       - /opt/monitoring/sd-generator:/app/sd-generator:ro
       - /opt/monitoring/targets:/targets
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:${loki_image_tag}
     network_mode: host
     restart: unless-stopped
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - /opt/monitoring/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:${grafana_image_tag}
     network_mode: host
     restart: unless-stopped
     environment:
@@ -330,8 +350,10 @@ services:
       - /opt/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
-      - prometheus
-      - loki
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
 
 volumes:
   prometheus-data:

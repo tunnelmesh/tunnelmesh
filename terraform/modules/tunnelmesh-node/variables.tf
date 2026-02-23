@@ -220,6 +220,24 @@ variable "monitoring_enabled" {
   default     = false
 }
 
+variable "prometheus_image_tag" {
+  description = "Prometheus Docker image tag (e.g. v3.2.1)"
+  type        = string
+  default     = "v3.2.1"
+}
+
+variable "loki_image_tag" {
+  description = "Loki Docker image tag (e.g. 3.5.0)"
+  type        = string
+  default     = "3.5.0"
+}
+
+variable "grafana_image_tag" {
+  description = "Grafana Docker image tag (e.g. 11.6.0)"
+  type        = string
+  default     = "11.6.0"
+}
+
 variable "loki_retention_days" {
   description = "Loki log retention in days"
   type        = number
