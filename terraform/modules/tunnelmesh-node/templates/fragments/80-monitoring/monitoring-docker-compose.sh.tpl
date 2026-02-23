@@ -299,7 +299,7 @@ services:
       start_period: 10s
 
   sd-generator:
-    image: alpine:3.21
+    image: alpine:3.23
     network_mode: host
     restart: unless-stopped
     entrypoint: ["/app/sd-generator"]
