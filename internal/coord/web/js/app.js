@@ -2164,6 +2164,16 @@ function initTabs() {
     if (tabName && ['app', 'data', 'mesh'].includes(tabName)) {
         switchTab(tabName, { skipHistory: true });
     }
+
+    // Handle browser back/forward navigation
+    window.addEventListener('popstate', () => {
+        const popHash = window.location.hash.slice(1);
+        const popParams = new URLSearchParams(popHash);
+        const popTab = popParams.get('tab');
+        if (popTab && ['app', 'data', 'mesh'].includes(popTab)) {
+            switchTab(popTab, { skipHistory: true });
+        }
+    });
 }
 
 /**

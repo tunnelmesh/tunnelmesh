@@ -283,59 +283,12 @@ main > section {
 
 .map-container {
     height: 350px;
-    background: #1a1a2e;
+    background: #0d0e11;
+    position: relative;
+    overflow: hidden;
 }
 
-/* Leaflet map background — matches CartoDB Dark Matter ocean colour so
-   sub-pixel gaps between tiles are invisible in all browsers */
-.leaflet-container {
-    background: #0d0e11 !important;
-}
-
-/* Fix tile seams */
-.leaflet-tile {
-    outline: none !important;
-    border: none !important;
-}
-
-.leaflet-tile-pane {
-    /* Force GPU layer for entire tile pane */
-    transform: translateZ(0);
-}
-
-.leaflet-tile-container {
-    backface-visibility: hidden;
-}
-
-.leaflet-tile-container img {
-    /* Prevent image edges from showing gaps */
-    display: block;
-}
-
-/* Leaflet control styling for dark theme */
-.leaflet-control-zoom a {
-    background: var(--color-bg-secondary) !important;
-    color: var(--color-text-primary) !important;
-    border-color: var(--color-border-primary) !important;
-}
-
-.leaflet-control-zoom a:hover {
-    background: var(--color-bg-tertiary) !important;
-}
-
-.leaflet-control-attribution {
-    background: rgb(13 17 23 / 0.8) !important;
-    color: var(--color-text-secondary) !important;
-}
-
-.leaflet-control-attribution a {
-    color: var(--color-accent-blue) !important;
-}
-
-/* Make map markers show pointer cursor on hover */
-.leaflet-interactive {
-    cursor: pointer;
-}
+/* canvas fills container via JS sizing */
 
 @media (max-width: 900px) {
     .map-container {
