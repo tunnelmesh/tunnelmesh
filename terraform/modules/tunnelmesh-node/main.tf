@@ -84,6 +84,9 @@ locals {
     # Auto-update settings
     auto_update_enabled  = var.auto_update_enabled
     auto_update_schedule = var.auto_update_schedule
+
+    # Admin access
+    admin_peers = var.admin_peers
   }
 
   # Monitoring-specific variables
