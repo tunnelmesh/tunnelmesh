@@ -642,18 +642,17 @@ function updateLokiExploreLink() {
 }
 
 async function fetchLogs() {
-    if (!state.lokiEnabled || !state.lokiDatasourceId) return;
+    if (!state.lokiEnabled || !state.lokiDatasourceUid) return;
 
     try {
         const peerCount = Math.max(state.currentPeers.length, 1);
         const limit = 25 * peerCount;
-        // Use seconds for start/end — Loki query_range accepts Unix seconds
+        // Unix seconds — Loki query_range start/end use seconds, not nanoseconds
         const nowSec = Math.floor(Date.now() / 1000);
         const oneHourAgoSec = nowSec - 3600;
 
         const query = encodeURIComponent('{job="tunnelmesh"}');
-        // Use the numeric-ID proxy path which is more reliably supported across Grafana versions
-        const url = `/grafana/api/datasources/proxy/${state.lokiDatasourceId}/loki/api/v1/query_range?query=${query}&start=${oneHourAgoSec}&end=${nowSec}&limit=${limit}&direction=backward`;
+        const url = `/grafana/api/datasources/uid/${state.lokiDatasourceUid}/resources/loki/api/v1/query_range?query=${query}&start=${oneHourAgoSec}&end=${nowSec}&limit=${limit}&direction=backward`;
 
         const resp = await fetch(url);
         if (!resp.ok) {
@@ -1556,7 +1555,7 @@ function renderPeersMgmtTable() {
             <td>${p.last_seen ? formatLastSeen(p.last_seen) : '-'}</td>
             <td>${p.is_service ? 'Never' : p.expires_at ? formatExpiry(p.expires_at) : '-'}</td>
             <td><span class="status-badge ${p.expired ? 'expired' : 'active'}">${p.expired ? 'Expired' : 'Active'}</span></td>
-            <td><button class="btn-small btn-secondary" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Groups</button></td>
+            <td><button class="btn-small btn-primary" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Groups</button></td>
         </tr>
     `;
         })
