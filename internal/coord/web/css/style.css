@@ -2619,15 +2619,6 @@ a.logs-container {
     max-width: 350px;
 }
 
-/* Peer groups cell — inline text + Manage button */
-.peer-groups-cell {
-    white-space: nowrap;
-}
-
-.peer-groups-cell span {
-    margin-right: 0.5rem;
-}
-
 /* Manage Groups modal list */
 .manage-groups-list {
     border: 1px solid var(--color-border-primary);

@@ -1547,13 +1547,11 @@ function renderPeersMgmtTable() {
             return `
         <tr>
             <td>${escapeHtml(p.name || '-')}</td>
-            <td class="peer-groups-cell">
-                <span>${groupsDisplay}</span>
-                <button class="btn-small" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Manage</button>
-            </td>
+            <td>${groupsDisplay}</td>
             <td>${p.last_seen ? formatLastSeen(p.last_seen) : '-'}</td>
             <td>${p.is_service ? 'Never' : p.expires_at ? formatExpiry(p.expires_at) : '-'}</td>
             <td><span class="status-badge ${p.expired ? 'expired' : 'active'}">${p.expired ? 'Expired' : 'Active'}</span></td>
+            <td><button class="btn-small" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Groups</button></td>
         </tr>
     `;
         })
