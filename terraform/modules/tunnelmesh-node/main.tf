@@ -51,6 +51,7 @@ locals {
 
     # Peer settings
     peer_server     = local.peer_server
+    coord_url       = var.peer_server_url  # External coordinator URL (empty on primary coordinator)
     ssh_tunnel_port = var.ssh_tunnel_port
 
     # Exit node settings
@@ -120,6 +121,9 @@ resource "digitalocean_droplet" "node" {
 
     # Sysctl (IP forwarding)
     templatefile("${path.module}/templates/fragments/60-sysctl.sh.tpl", local.common_vars),
+
+    # Wait for primary coordinator before starting service (skipped on the primary itself)
+    templatefile("${path.module}/templates/fragments/65-wait-for-coordinator.sh.tpl", local.common_vars),
 
     # Service start
     templatefile("${path.module}/templates/fragments/70-service-install.sh.tpl", local.common_vars),
