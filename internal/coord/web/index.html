@@ -43,11 +43,11 @@
 
     <nav id="main-tabs">
         <div class="tab-container">
-            <button class="tab active" data-tab="app">App</button>
+            <button class="tab" data-tab="app">App</button>
             <span class="tab-separator">|</span>
             <button class="tab" data-tab="data">Data</button>
             <span class="tab-separator">|</span>
-            <button class="tab" data-tab="mesh">Mesh</button>
+            <button class="tab active" data-tab="mesh">Mesh</button>
         </div>
     </nav>
 
@@ -436,7 +436,6 @@
                     <thead>
                         <tr>
                             <th>Name</th>
-                            <th>Type</th>
                             <th>Groups</th>
                             <th>Last Seen</th>
                             <th>Expires</th>
@@ -604,6 +603,26 @@
                         <input type="text" id="group-description" placeholder="Optional description">
                     </div>
                     <button class="btn-primary" onclick="createGroup()">Create Group</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Manage Peer Groups Modal -->
+        <div id="manage-groups-modal" class="modal" style="display: none;">
+            <div class="modal-content modal-small">
+                <div class="modal-header">
+                    <h3 id="manage-groups-title">Groups</h3>
+                    <button class="modal-close" onclick="closeManageGroupsModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="manage-groups-list" class="manage-groups-list"></div>
+                    <div class="form-group manage-groups-add-group">
+                        <label for="manage-groups-select">Add to group</label>
+                        <div class="manage-groups-add-row">
+                            <select id="manage-groups-select"></select>
+                            <button class="btn-primary" onclick="addPeerToSelectedGroup()">Add</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

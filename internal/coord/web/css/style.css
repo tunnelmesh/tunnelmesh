@@ -2619,6 +2619,49 @@ a.logs-container {
     max-width: 350px;
 }
 
+/* Peer groups cell — inline text + Manage button */
+.peer-groups-cell {
+    white-space: nowrap;
+}
+
+.peer-groups-cell span {
+    margin-right: 0.5rem;
+}
+
+/* Manage Groups modal list */
+.manage-groups-list {
+    border: 1px solid var(--color-border-primary);
+    margin-bottom: 1rem;
+}
+
+.manage-groups-empty {
+    padding: 0.5rem 0.75rem;
+    margin: 0;
+}
+
+.manage-group-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.375rem 0.75rem;
+    font-size: 0.875rem;
+}
+
+.manage-group-row + .manage-group-row {
+    border-top: 1px solid var(--color-border-primary);
+}
+
+.manage-group-builtin {
+    font-size: 0.75rem;
+}
+
+/* Add-to-group row: select fills remaining space, button stays fixed */
+.manage-groups-add-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
 .form-actions {
     display: flex;
     gap: 0.5rem;
