@@ -11,10 +11,11 @@ terraform {
 }
 
 locals {
-  # Server URL for peer mode
-  # If coordinator is also enabled, peer connects to localhost
-  # Otherwise, use the provided peer_server_url
-  peer_server = var.coordinator_enabled ? "http://127.0.0.1:${var.coordinator_port}" : var.peer_server_url
+  # Server URL for peer mode:
+  # - Primary coordinator (coordinator_enabled=true, peer_server_url=""): join localhost to bootstrap
+  # - Secondary coordinators (coordinator_enabled=true, peer_server_url set): join the primary coordinator
+  # - Pure peers (coordinator_enabled=false): join the provided coordinator URL
+  peer_server = (var.coordinator_enabled && var.peer_server_url == "") ? "http://127.0.0.1:${var.coordinator_port}" : var.peer_server_url
 
   # Determine which services to run
   run_coordinator = var.coordinator_enabled
@@ -51,6 +52,7 @@ locals {
 
     # Peer settings
     peer_server     = local.peer_server
+    coord_url       = var.peer_server_url  # External coordinator URL (empty on primary coordinator)
     ssh_tunnel_port = var.ssh_tunnel_port
 
     # Exit node settings
@@ -67,7 +69,9 @@ locals {
     binary_version = var.binary_version
 
     # SSL settings
-    ssl_email = local.ssl_email
+    ssl_email            = local.ssl_email
+    zerossl_eab_kid      = var.zerossl_eab_kid
+    zerossl_eab_hmac_key = var.zerossl_eab_hmac_key
 
     # Auto-update settings
     auto_update_enabled  = var.auto_update_enabled
@@ -120,6 +124,9 @@ resource "digitalocean_droplet" "node" {
 
     # Sysctl (IP forwarding)
     templatefile("${path.module}/templates/fragments/60-sysctl.sh.tpl", local.common_vars),
+
+    # Wait for primary coordinator before starting service (skipped on the primary itself)
+    templatefile("${path.module}/templates/fragments/65-wait-for-coordinator.sh.tpl", local.common_vars),
 
     # Service start
     templatefile("${path.module}/templates/fragments/70-service-install.sh.tpl", local.common_vars),

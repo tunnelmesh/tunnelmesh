@@ -13,14 +13,28 @@ for i in $(seq 1 30); do
     sleep 10
 done
 
-# Try to get certificate
+%{ if zerossl_eab_kid != "" ~}
+# Use ZeroSSL (avoids Let's Encrypt rate limits)
+certbot certonly --webroot -w /var/www/html \
+    -d ${node_name}.${domain} \
+    --non-interactive --agree-tos \
+    --email ${ssl_email} \
+    --server https://acme.zerossl.com/v2/DV90 \
+    --eab-kid "${zerossl_eab_kid}" \
+    --eab-hmac-key "${zerossl_eab_hmac_key}" || {
+    echo "Certbot (ZeroSSL) failed, will retry on next boot or manually"
+    exit 0
+}
+%{ else ~}
+# Use Let's Encrypt
 certbot certonly --webroot -w /var/www/html \
     -d ${node_name}.${domain} \
     --non-interactive --agree-tos \
     --email ${ssl_email} || {
-    echo "Certbot failed, will retry on next boot or manually"
+    echo "Certbot (Let's Encrypt) failed, will retry on next boot or manually"
     exit 0
 }
+%{ endif ~}
 
 # Switch to full SSL config
 ln -sf /etc/nginx/sites-available/tunnelmesh /etc/nginx/sites-enabled/tunnelmesh

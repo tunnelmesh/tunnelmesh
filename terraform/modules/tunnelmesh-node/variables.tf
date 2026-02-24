@@ -162,9 +162,23 @@ variable "ssl_enabled" {
 }
 
 variable "ssl_email" {
-  description = "Email for Let's Encrypt certificate notifications"
+  description = "Email for SSL certificate notifications"
   type        = string
   default     = ""
+}
+
+variable "zerossl_eab_kid" {
+  description = "ZeroSSL EAB Key ID. When set, ZeroSSL is used instead of Let's Encrypt."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "zerossl_eab_hmac_key" {
+  description = "ZeroSSL EAB HMAC Key."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 # --- Auto-Update Settings ---
