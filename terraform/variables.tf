@@ -74,7 +74,7 @@ variable "default_region" {
 variable "default_droplet_size" {
   description = "Default droplet size"
   type        = string
-  default     = "s-1vcpu-1gb-35gb" # $6/month — 512MB is too small for cloud-init (OOM during apt)
+  default     = "s-1vcpu-1gb-35gb" # $6/month
 }
 
 variable "default_ssh_port" {
