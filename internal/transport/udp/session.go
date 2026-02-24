@@ -73,7 +73,7 @@ func NewSession(cfg SessionConfig) *Session {
 		cfg.WindowSize = DefaultWindowSize
 	}
 	if cfg.RecvBufSize == 0 {
-		cfg.RecvBufSize = 64 // Default receive channel buffer
+		cfg.RecvBufSize = DefaultRecvBufSize
 	}
 
 	return &Session{

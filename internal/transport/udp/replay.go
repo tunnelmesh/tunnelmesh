@@ -14,7 +14,9 @@ type ReplayWindow struct {
 const (
 	// DefaultWindowSize is the default replay window size (2048 packets)
 	DefaultWindowSize = 2048
-	bitsPerWord       = 64
+	// DefaultRecvBufSize is the default receive channel buffer size (512 packets ~700KB at MTU 1400)
+	DefaultRecvBufSize = 512
+	bitsPerWord        = 64
 )
 
 // NewReplayWindow creates a new replay window with the given size.
