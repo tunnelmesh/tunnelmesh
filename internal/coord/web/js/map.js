@@ -257,7 +257,7 @@ class NodeMap {
             scale = ch / WORLD_PX;
         } else if (pts.length === 1) {
             [cx, cy] = pts[0];
-            scale = Math.min(cw, ch) / 10;
+            scale = 2; // single node: show at country level
         } else {
             const xs = pts.map((p) => p[0]);
             const ys = pts.map((p) => p[1]);
@@ -272,7 +272,7 @@ class NodeMap {
             scale = Math.min((cw - 100) / spanX, (ch - 100) / spanY);
         }
 
-        scale = Math.min(scale, 64); // cap at zoom-10 equivalent (2^(10-3)*256/4096)
+        scale = Math.min(scale, 4); // cap at zoom-5 equivalent; higher values upscale the raster image causing blurriness
         scale = Math.max(scale, ch / WORLD_PX); // don't zoom out past world view
 
         this._vp = { cx, cy, scale, cw, ch };
