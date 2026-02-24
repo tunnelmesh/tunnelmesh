@@ -237,12 +237,12 @@ func (m *Manager) ListContainers(ctx context.Context) ([]ContainerInfo, error) {
 				mu.Lock()
 				containers[index].StartedAt = inspected.StartedAt
 				containers[index].UptimeSeconds = calculateUptime(inspected.StartedAt)
-				containers[index].DiskBytes = inspected.DiskBytes
+				// DiskBytes preserved from ListContainers (Size: true); inspect no longer fetches size
 				if stats != nil {
 					containers[index].CPUPercent = stats.CPUPercent
 					containers[index].MemoryBytes = stats.MemoryBytes
 					containers[index].MemoryPercent = stats.MemoryPercent
-					// DiskBytes already set from inspected data above (more accurate than stats)
+					// DiskBytes already set from ListContainers (Size: true), not overwritten here
 
 					// Record stats to Prometheus
 					m.recordStats(*stats, &containers[index])

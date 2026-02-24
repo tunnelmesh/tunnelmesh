@@ -129,6 +129,8 @@ func (m *Manager) collectAndPersistStats(ctx context.Context, s3Store *s3.System
 			ContainerInfo: *fullInfo,
 		}
 
+		// Use DiskBytes from the list call (Size: true), not from per-container inspect.
+		containerSnapshot.DiskBytes = container.DiskBytes
 		if fullInfo.State == "running" {
 			// Use timeout per container to prevent hung stats calls from blocking entire collection
 			statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -144,8 +146,8 @@ func (m *Manager) collectAndPersistStats(ctx context.Context, s3Store *s3.System
 				containerSnapshot.MemoryBytes = stats.MemoryBytes
 				containerSnapshot.MemoryLimit = stats.MemoryLimit
 				containerSnapshot.MemoryPercent = stats.MemoryPercent
-				containerSnapshot.DiskBytes = stats.DiskBytes
 				containerSnapshot.PIDs = stats.PIDs
+				// DiskBytes already set from container.DiskBytes (list call), not overwritten here
 			}
 		}
 
