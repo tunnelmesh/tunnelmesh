@@ -2373,16 +2373,3 @@ function s3ToggleView() {
     if (TM.s3explorer) TM.s3explorer.toggleView();
 }
 window.s3ToggleView = s3ToggleView;
-
-function toggleTheme() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) {
-        document.documentElement.removeAttribute('data-theme');
-        localStorage.setItem('tunnelmesh-theme', 'dark');
-    } else {
-        document.documentElement.setAttribute('data-theme', 'light');
-        localStorage.setItem('tunnelmesh-theme', 'light');
-    }
-    window.dispatchEvent(new Event('resize'));
-}
-window.toggleTheme = toggleTheme;
