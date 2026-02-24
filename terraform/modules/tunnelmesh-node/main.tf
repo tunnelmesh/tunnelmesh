@@ -244,12 +244,13 @@ resource "digitalocean_record" "node" {
 resource "null_resource" "monitoring_files" {
   count = var.coordinator_enabled && var.monitoring_enabled ? 1 : 0
 
-  # Re-run when source files change or the droplet is recreated
+  # Re-run when source files change, the droplet is recreated, or Grafana config changes
   triggers = {
     droplet_id      = digitalocean_droplet.node.id
     datasource_hash = filemd5("${path.module}/../../../monitoring/grafana/provisioning/datasources/datasource.yml")
     dashboard_hash  = filemd5("${path.module}/../../../monitoring/grafana/provisioning/dashboards/dashboard.yml")
     tunnelmesh_hash = filemd5("${path.module}/../../../monitoring/grafana/dashboards/tunnelmesh.json")
+    grafana_role    = "editor" # Bump to force re-run when Grafana auth config changes
   }
 
   connection {
@@ -281,9 +282,11 @@ resource "null_resource" "monitoring_files" {
     destination = "/opt/monitoring/grafana/dashboards/tunnelmesh.json"
   }
 
-  # Restart Grafana to pick up provisioning files
+  # Ensure Grafana has Editor role for anonymous users (fixes Explore + datasource API access)
+  # Also handles existing deployments that were provisioned with the old Viewer role.
   provisioner "remote-exec" {
     inline = [
+      "sed -i 's/GF_AUTH_ANONYMOUS_ORG_ROLE=.*/GF_AUTH_ANONYMOUS_ORG_ROLE=Editor/' /opt/monitoring/docker-compose.yml",
       "docker compose -f /opt/monitoring/docker-compose.yml --project-name tunnelmesh-monitoring restart grafana"
     ]
   }
