@@ -149,6 +149,14 @@ func (s *Session) LastReceive() time.Time {
 	return s.lastRecv
 }
 
+// UpdateLastReceive updates the last-received timestamp to now.
+// Called when a keepalive packet is received to prevent session timeout.
+func (s *Session) UpdateLastReceive() {
+	s.mu.Lock()
+	s.lastRecv = time.Now()
+	s.mu.Unlock()
+}
+
 // PeerName returns the peer name.
 func (s *Session) PeerName() string {
 	return s.peerName

@@ -599,6 +599,7 @@ func (t *Transport) handleKeepalive(header *PacketHeader, remoteAddr *net.UDPAdd
 
 	if ok {
 		session.UpdateRemoteAddrIfChanged(remoteAddr)
+		session.UpdateLastReceive()
 	}
 }
 
