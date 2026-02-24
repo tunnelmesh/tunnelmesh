@@ -10,9 +10,9 @@
     --color-text-primary: #e8eaf0;
     --color-text-secondary: rgb(232 234 240 / 0.58);
 
-    /* Accent — website teal replaces GitHub blue */
-    --color-accent: #00d4b4;
-    --color-accent-blue: #00d4b4;
+    /* Accent — sky blue */
+    --color-accent: #60a5fa;
+    --color-accent-blue: #60a5fa;
     --color-accent-green: #3fb950;
     --color-accent-red: #f85149;
     --color-accent-orange: #d29922;
@@ -22,17 +22,17 @@
     --color-warning: #d29922;
     --color-success: #3fb950;
 
-    /* Button colors — teal primary instead of GitHub green */
-    --color-btn-primary: #008a78;
-    --color-btn-primary-hover: #00a896;
+    /* Button colors — blue primary */
+    --color-btn-primary: #2563eb;
+    --color-btn-primary-hover: #3b82f6;
     --color-btn-danger: #f85149;
 
-    /* Focus ring — teal */
-    --color-focus-ring: rgb(0 212 180 / 0.3);
+    /* Focus ring — sky blue */
+    --color-focus-ring: rgb(96 165 250 / 0.3);
 
-    /* Card hover — teal tint */
-    --color-card-hover-bg: rgb(0 212 180 / 0.06);
-    --color-card-hover-border: #00d4b4;
+    /* Card hover — sky blue tint */
+    --color-card-hover-bg: rgb(96 165 250 / 0.06);
+    --color-card-hover-border: #60a5fa;
 
     /* Design tokens - unified styling */
     --panel-border-radius: 0px;
@@ -43,13 +43,43 @@
     /* Visualizer colors - for canvas/D3 use */
     --viz-peer-online: #3fb950;
     --viz-peer-offline: #f85149;
-    --viz-peer-coordinator: #00d4b4;
-    --viz-edge-online: rgb(0 212 180 / 0.4);
+    --viz-peer-coordinator: #60a5fa;
+    --viz-edge-online: rgb(96 165 250 / 0.4);
     --viz-edge-offline: rgb(248 81 73 / 0.3);
     --viz-label-text: #e8eaf0;
 
     /* Font stacks */
     --font-mono: ui-monospace, sfmono-regular, 'SF Mono', menlo, consolas, 'Courier New', monospace;
+}
+
+[data-theme="light"] {
+    --color-bg-primary: #f6f8fa;
+    --color-bg-secondary: #eef1f5;
+    --color-bg-tertiary: #e1e6ed;
+    --color-border-primary: #c8d0db;
+    --color-border-secondary: #eef1f5;
+    --color-text-primary: #0a0f1e;
+    --color-text-secondary: rgb(10 15 30 / 0.58);
+    --color-accent: #2563eb;
+    --color-accent-blue: #2563eb;
+    --color-accent-green: #16a34a;
+    --color-accent-red: #dc2626;
+    --color-accent-orange: #ca8a04;
+    --color-danger: #dc2626;
+    --color-warning: #ca8a04;
+    --color-success: #16a34a;
+    --color-btn-primary: #2563eb;
+    --color-btn-primary-hover: #1d4ed8;
+    --color-btn-danger: #dc2626;
+    --color-focus-ring: rgb(37 99 235 / 0.3);
+    --color-card-hover-bg: rgb(37 99 235 / 0.06);
+    --color-card-hover-border: #2563eb;
+    --viz-peer-online: #16a34a;
+    --viz-peer-offline: #dc2626;
+    --viz-peer-coordinator: #2563eb;
+    --viz-edge-online: rgb(37 99 235 / 0.4);
+    --viz-edge-offline: rgb(220 38 38 / 0.3);
+    --viz-label-text: #0a0f1e;
 }
 
 * {
@@ -185,6 +215,30 @@ header h1 a {
     gap: 1.5rem;
     flex-wrap: wrap;
 }
+
+.theme-toggle-btn {
+    background: none;
+    border: 1px solid var(--color-border-primary);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    padding: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s ease, border-color 0.15s ease;
+    flex-shrink: 0;
+}
+
+.theme-toggle-btn:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent-blue);
+}
+
+/* CSS handles icon switching — no JS classList needed */
+[data-theme="light"] .theme-icon-dark { display: none; }
+[data-theme="light"] .theme-icon-light { display: block; }
+.theme-icon-light { display: none; }
+.theme-icon-dark { display: block; }
 
 .stat {
     display: flex;
@@ -424,6 +478,10 @@ main {
     padding: 0;
     border: 1px solid var(--color-border-primary);
     margin-bottom: 1.5rem;
+}
+
+#s3-section {
+    border-top: 1px solid var(--color-border-primary);
 }
 
 #peers-section h2, #dns-section h2, #filter-section h2,
@@ -1526,7 +1584,6 @@ a.logs-container {
 /* Volume capacity bar */
 #s3-volume-bar {
     padding: 6px 1rem;
-    border-bottom: 1px solid var(--color-border-primary);
     background: var(--color-bg-secondary);
     display: flex;
     flex-direction: column;

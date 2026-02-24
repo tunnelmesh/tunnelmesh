@@ -851,7 +851,7 @@
         }
     }
 
-    async function getObject(bucket, key) {
+    async function _getObject(bucket, key) {
         const resp = await fetch(`/api/s3/buckets/${encodeURIComponent(bucket)}/objects/${encodeURIComponent(key)}`);
         if (!resp.ok) throw new Error(`Failed to get object: ${resp.status}`);
         return {
@@ -994,12 +994,7 @@
         }
         const v = state.volume;
         const pct = v.total_bytes > 0 ? ((v.used_bytes / v.total_bytes) * 100).toFixed(1) : 0;
-        const color =
-            pct >= 95
-                ? 'var(--color-danger)'
-                : pct >= 80
-                  ? 'var(--color-warning)'
-                  : 'var(--color-success)';
+        const color = pct >= 95 ? 'var(--color-danger)' : pct >= 80 ? 'var(--color-warning)' : 'var(--color-success)';
         if (!bar) {
             bar = document.createElement('div');
             bar.id = 's3-volume-bar';
@@ -1189,7 +1184,7 @@
 
         // Toggle actions column visibility (only show for bucket list if admin)
         const actionsCol = document.querySelector('.s3-col-actions');
-        const isAdmin = window.TM && window.TM.panel && window.TM.panel.isAdmin();
+        const isAdmin = window.TM?.panel?.isAdmin();
         if (actionsCol) {
             actionsCol.style.display = !state.currentBucket && isAdmin ? '' : 'none';
         }
