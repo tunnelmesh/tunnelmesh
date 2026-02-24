@@ -1249,7 +1249,7 @@ func TestAdminDashboard_ServesAtAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
 	assert.Contains(t, body, "<html")
-	assert.Contains(t, body, "TunnelMesh")
+	assert.Contains(t, body, "tunnelmesh")
 }
 
 func TestAdminDashboard_StaticAssets(t *testing.T) {

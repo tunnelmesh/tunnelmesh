@@ -10,7 +10,7 @@
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-blue?logo=dependabot)](https://github.com/tunnelmesh/tunnelmesh/network/updates)
 [![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-brightgreen)](https://github.com/tunnelmesh/tunnelmesh/network/dependencies)
 
-A peer-to-peer mesh networking tool that creates encrypted tunnels between nodes. TunnelMesh enables direct, secure
+A peer-to-peer mesh networking tool that creates encrypted tunnels between nodes. tunnelmesh enables direct, secure
 communication between peers in a distributed topology without requiring a traditional VPN or centralized traffic
 routing.
 
@@ -130,7 +130,7 @@ When you run `tunnelmesh join`, the mesh CA certificate is automatically fetched
 your system trust store. This allows HTTPS connections to mesh services without browser warnings.
 
 > [!NOTE]
-> TunnelMesh separates **network functionality** (no admin required) from **configuration operations**
+> tunnelmesh separates **network functionality** (no admin required) from **configuration operations**
 > (admin only). Most features work without admin access - you only need admin rights to configure
 > and manage the mesh.
 
@@ -163,7 +163,7 @@ See the [Admin Guide](https://read.tunnelmesh.io) for complete details.
 
 ## Configuration
 
-TunnelMesh uses a unified configuration model where all nodes are peers. Coordinators are simply peers with `coordinator.enabled: true` that provide discovery and admin services.
+tunnelmesh uses a unified configuration model where all nodes are peers. Coordinators are simply peers with `coordinator.enabled: true` that provide discovery and admin services.
 
 Generate configs with `tunnelmesh init --peer` or see the full [peer.yaml.example](peer.yaml.example) for all options.
 
@@ -224,7 +224,7 @@ dns:
 
 ### Transport Layer
 
-TunnelMesh supports multiple transport types with automatic negotiation and fallback:
+tunnelmesh supports multiple transport types with automatic negotiation and fallback:
 
 | Transport | Description | Use Case |
 | ----------- | ------------- | ---------- |
@@ -284,7 +284,7 @@ Or in config:
 exit_peer: "exit-peer-name"
 ```
 
-TunnelMesh automatically configures:
+tunnelmesh automatically configures:
 
 - **Exit node**: IP forwarding and NAT/masquerade rules
 - **Client**: Default routes (0.0.0.0/1 and 128.0.0.0/1) through the TUN interface
@@ -331,7 +331,7 @@ The tool searches for config files in the following order:
 
 ### Token Storage and Management
 
-TunnelMesh authentication tokens are passed via the `TUNNELMESH_TOKEN` environment variable, never via CLI flags
+tunnelmesh authentication tokens are passed via the `TUNNELMESH_TOKEN` environment variable, never via CLI flags
 or config files (for security). Follow these best practices for production deployments:
 
 #### Environment Variables
@@ -480,7 +480,7 @@ See the **[CLI Reference](https://read.tunnelmesh.io)** for complete documentati
 
 ## Docker Deployment
 
-Run TunnelMesh in containers for development, testing, or production. The docker-compose setup includes **scalable coordinators** for testing chunk-level replication between multiple coordinator nodes. See the **[Docker Deployment Guide](https://read.tunnelmesh.io)** for complete documentation.
+Run tunnelmesh in containers for development, testing, or production. The docker-compose setup includes **scalable coordinators** for testing chunk-level replication between multiple coordinator nodes. See the **[Docker Deployment Guide](https://read.tunnelmesh.io)** for complete documentation.
 
 ```bash
 cd docker
