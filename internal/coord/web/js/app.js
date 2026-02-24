@@ -610,7 +610,9 @@ async function checkLokiAvailable() {
         const testResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/resources/loki/api/v1/labels`);
         if (testResp.ok) {
             state.lokiEnabled = true;
-            document.getElementById('logs-section').style.display = 'block';
+            if (!TM.panel || TM.panel.canView('logs')) {
+                document.getElementById('logs-section').style.display = 'block';
+            }
             updateLokiExploreLink();
             fetchLogs();
             setInterval(fetchLogs, POLL_INTERVAL_MS);
@@ -1219,6 +1221,13 @@ function registerBuiltinPanels() {
             collapsible: true,
             resizable: true,
             sortOrder: 50,
+            // Loki availability controls section visibility — keep hidden until confirmed
+            onShow: () => {
+                if (!state.lokiEnabled) {
+                    const section = document.getElementById('logs-section');
+                    if (section) section.style.display = 'none';
+                }
+            },
         },
         {
             id: 'filter',
@@ -1551,7 +1560,7 @@ function renderPeersMgmtTable() {
             <td>${p.last_seen ? formatLastSeen(p.last_seen) : '-'}</td>
             <td>${p.is_service ? 'Never' : p.expires_at ? formatExpiry(p.expires_at) : '-'}</td>
             <td><span class="status-badge ${p.expired ? 'expired' : 'active'}">${p.expired ? 'Expired' : 'Active'}</span></td>
-            <td><button class="btn-small" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Groups</button></td>
+            <td><button class="btn-small btn-secondary" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Groups</button></td>
         </tr>
     `;
         })
