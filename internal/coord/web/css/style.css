@@ -169,6 +169,11 @@ header h1 {
     color: var(--color-text-primary);
 }
 
+header h1 a {
+    color: inherit;
+    text-decoration: none;
+}
+
 #server-info {
     display: flex;
     gap: 1.5rem;

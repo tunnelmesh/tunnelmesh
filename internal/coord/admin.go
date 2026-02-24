@@ -441,7 +441,7 @@ const defaultLandingPage = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="5;url=/admin/">
-<title>TunnelMesh</title>
+<title>tunnelmesh</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
@@ -458,7 +458,7 @@ a:hover{background:#58a6ff;color:#0d1117;border-color:#58a6ff}
 <body>
 <div class="grid"><svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><defs><pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0v40" fill="none" stroke="#58a6ff" stroke-width=".5"/></pattern></defs><rect width="100%" height="100%" fill="url(#g)"/></svg></div>
 <div class="container">
-<h1>TunnelMesh</h1>
+<h1>tunnelmesh</h1>
 <p>Welcome to your secured mesh network</p>
 <a href="/admin/">Enter Dashboard</a>
 <div class="meta">Redirecting in 5 seconds&hellip;</div>
