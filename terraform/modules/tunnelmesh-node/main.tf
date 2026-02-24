@@ -7,6 +7,10 @@ terraform {
       source  = "digitalocean/digitalocean"
       version = "~> 2.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -233,4 +237,53 @@ resource "digitalocean_record" "node" {
   name   = var.name
   value  = digitalocean_reserved_ip.node.ip_address
   ttl    = 300
+}
+
+# Copy Grafana provisioning files to the server after cloud-init completes.
+# This replaces the unreliable GitHub curl downloads in the cloud-init script.
+resource "null_resource" "monitoring_files" {
+  count = var.coordinator_enabled && var.monitoring_enabled ? 1 : 0
+
+  # Re-run when source files change or the droplet is recreated
+  triggers = {
+    droplet_id      = digitalocean_droplet.node.id
+    datasource_hash = filemd5("${path.module}/../../../monitoring/grafana/provisioning/datasources/datasource.yml")
+    dashboard_hash  = filemd5("${path.module}/../../../monitoring/grafana/provisioning/dashboards/dashboard.yml")
+    tunnelmesh_hash = filemd5("${path.module}/../../../monitoring/grafana/dashboards/tunnelmesh.json")
+  }
+
+  connection {
+    type        = "ssh"
+    user        = "root"
+    host        = digitalocean_reserved_ip.node.ip_address
+    private_key = var.ssh_private_key_path != "" ? file(var.ssh_private_key_path) : null
+    timeout     = "10m"
+  }
+
+  # Wait for cloud-init to complete so /opt/monitoring/grafana/ directories exist
+  provisioner "remote-exec" {
+    inline = ["cloud-init status --wait || true"]
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../../monitoring/grafana/provisioning/datasources/datasource.yml"
+    destination = "/opt/monitoring/grafana/provisioning/datasources/datasource.yml"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../../monitoring/grafana/provisioning/dashboards/dashboard.yml"
+    destination = "/opt/monitoring/grafana/provisioning/dashboards/dashboard.yml"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../../monitoring/grafana/dashboards/tunnelmesh.json"
+    destination = "/opt/monitoring/grafana/dashboards/tunnelmesh.json"
+  }
+
+  # Restart Grafana to pick up provisioning files
+  provisioner "remote-exec" {
+    inline = [
+      "docker compose -f /opt/monitoring/docker-compose.yml --project-name tunnelmesh-monitoring restart grafana"
+    ]
+  }
 }
