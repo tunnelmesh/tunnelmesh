@@ -21,7 +21,7 @@ const SystemBucket = auth.SystemBucket
 
 // SystemStore provides high-level access to the _tunnelmesh system bucket.
 // This is used by the coordinator to store internal state like users, roles,
-// bindings, stats history, and wireguard configs.
+// bindings, and stats history.
 type SystemStore struct {
 	store *Store
 	owner string // Service user ID that owns the system bucket
@@ -54,12 +54,6 @@ const (
 	GroupBindingsPath = "auth/group_bindings.json"
 	FileSharesPath    = "auth/file_shares.json"
 	PanelsPath        = "auth/panels.json"
-)
-
-// WireGuard paths
-const (
-	WireGuardClientsPath = "wireguard/clients.json"
-	WGConcentratorPath   = "wireguard/concentrator.json"
 )
 
 // DNS paths
@@ -246,49 +240,6 @@ func (ss *SystemStore) SaveJSON(ctx context.Context, path string, data interface
 // LoadJSON loads arbitrary JSON data from a specified path in the system bucket with automatic rollback on corruption.
 func (ss *SystemStore) LoadJSON(ctx context.Context, path string, target interface{}) error {
 	return ss.loadJSONWithChecksum(ctx, path, target, 3)
-}
-
-// --- WireGuard Clients ---
-
-// SaveWireGuardClients saves WireGuard client configs to S3 with checksum validation.
-func (ss *SystemStore) SaveWireGuardClients(ctx context.Context, data interface{}) error {
-	return ss.saveJSONWithChecksum(ctx, WireGuardClientsPath, data)
-}
-
-// LoadWireGuardClients loads WireGuard client configs from S3 with automatic rollback on corruption.
-func (ss *SystemStore) LoadWireGuardClients(ctx context.Context, target interface{}) error {
-	return ss.loadJSONWithChecksum(ctx, WireGuardClientsPath, target, 3)
-}
-
-// --- WireGuard Concentrator ---
-
-// WGConcentratorConfig stores the WireGuard concentrator assignment.
-type WGConcentratorConfig struct {
-	PeerName string    `json:"peer_name"`
-	SetAt    time.Time `json:"set_at"`
-}
-
-// SaveWGConcentrator saves the WireGuard concentrator assignment to S3.
-func (ss *SystemStore) SaveWGConcentrator(ctx context.Context, peerName string) error {
-	config := WGConcentratorConfig{
-		PeerName: peerName,
-		SetAt:    time.Now(),
-	}
-	return ss.saveJSONWithChecksum(ctx, WGConcentratorPath, config)
-}
-
-// LoadWGConcentrator loads the WireGuard concentrator assignment from S3.
-func (ss *SystemStore) LoadWGConcentrator(ctx context.Context) (string, error) {
-	var config WGConcentratorConfig
-	if err := ss.loadJSONWithChecksum(ctx, WGConcentratorPath, &config, 3); err != nil {
-		return "", err
-	}
-	return config.PeerName, nil
-}
-
-// ClearWGConcentrator removes the WireGuard concentrator assignment from S3.
-func (ss *SystemStore) ClearWGConcentrator(ctx context.Context) error {
-	return ss.Delete(ctx, WGConcentratorPath)
 }
 
 // --- DNS Cache ---

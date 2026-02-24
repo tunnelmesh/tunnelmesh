@@ -1,5 +1,5 @@
 # TunnelMesh Node Module Variables
-# Supports: coordinator-only, coordinator+peer, peer+wireguard, peer-only
+# Supports: coordinator-only, coordinator+peer, peer-only
 
 # --- Required Variables ---
 
@@ -40,12 +40,6 @@ variable "coordinator_enabled" {
 
 variable "peer_enabled" {
   description = "Run as a mesh peer"
-  type        = bool
-  default     = false
-}
-
-variable "wireguard_enabled" {
-  description = "Enable WireGuard concentrator (requires peer_enabled=true)"
   type        = bool
   default     = false
 }
@@ -118,20 +112,6 @@ variable "location_city" {
   default     = ""
 }
 
-
-# --- WireGuard Settings ---
-
-variable "wg_listen_port" {
-  description = "WireGuard UDP listen port"
-  type        = number
-  default     = 51820
-}
-
-variable "wg_endpoint" {
-  description = "WireGuard public endpoint (defaults to {name}.{domain}:{wg_listen_port})"
-  type        = string
-  default     = ""
-}
 
 # --- Droplet Settings ---
 

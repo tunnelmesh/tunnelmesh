@@ -59,14 +59,6 @@ loki:
   url: "http://127.0.0.1:3100"
 %{ endif ~}
 
-%{ if wireguard_enabled ~}
-# WireGuard concentrator
-wireguard:
-  enabled: true
-  listen_port: ${wg_listen_port}
-  data_dir: /var/lib/tunnelmesh/wireguard
-  endpoint: "${wg_endpoint}"
-%{ endif ~}
 COORDCONF
 
 # Write auth token to service environment file (auth_token cannot be stored in YAML)

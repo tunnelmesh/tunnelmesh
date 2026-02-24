@@ -342,7 +342,6 @@ func (s *Server) handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 		s3.BindingsPath,
 		s3.GroupsPath,
 		s3.GroupBindingsPath,
-		s3.WGConcentratorPath,
 		s3.DNSCachePath,
 		s3.DNSAliasPath,
 	}

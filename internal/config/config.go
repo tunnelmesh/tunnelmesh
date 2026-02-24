@@ -24,30 +24,23 @@ type RelayConfig struct {
 	// No configuration needed - relay always runs with hardcoded 60s pair timeout
 }
 
-// WireGuardServerConfig holds configuration for WireGuard client management.
-type WireGuardServerConfig struct {
-	Enabled  bool   `yaml:"enabled"`  // Enable WireGuard client management
-	Endpoint string `yaml:"endpoint"` // Public endpoint for clients (concentrator address:port)
-}
-
 // CoordinatorConfig holds configuration for coordinator services (run by admin peers).
 type CoordinatorConfig struct {
-	Enabled            bool                  `yaml:"enabled"`              // Enable coordinator services (auto-enabled if peer is admin)
-	Listen             string                `yaml:"listen"`               // Coordination API listen address (e.g., ":8443")
-	DataDir            string                `yaml:"data_dir"`             // Data directory for persistence (default: /var/lib/tunnelmesh)
-	HeartbeatInterval  string                `yaml:"heartbeat_interval"`   // Heartbeat interval (default: 10s)
-	UserExpirationDays int                   `yaml:"user_expiration_days"` // Days until user expires after last seen (default: 270 = 9 months)
-	AdminPeers         []string              `yaml:"admin_peers"`          // Peer names or peer IDs (SHA256 of SSH key) for admins group (e.g., ["honker", "abc123..."] - peer IDs preferred for security)
-	Locations          bool                  `yaml:"locations"`            // Enable node location tracking (requires external IP geolocation API)
-	MemberlistSeeds    []string              `yaml:"memberlist_seeds"`     // Memberlist gossip cluster seed addresses (e.g., ["coord1.example.com:7946"])
-	MemberlistBindAddr string                `yaml:"memberlist_bind_addr"` // Address to bind memberlist gossip (default: ":7946")
-	Monitoring         MonitoringConfig      `yaml:"monitoring"`           // Reverse proxy config for Prometheus/Grafana
-	Relay              RelayConfig           `yaml:"relay"`                // WebSocket relay configuration
-	WireGuardServer    WireGuardServerConfig `yaml:"wireguard_server"`     // WireGuard client management
-	S3                 S3Config              `yaml:"s3"`                   // S3-compatible storage configuration
-	Filter             FilterConfig          `yaml:"filter"`               // Global packet filter rules for all peers
-	ServicePorts       []uint16              `yaml:"service_ports"`        // Service ports to auto-allow on peers (default: [9443] for metrics)
-	LandingPage        string                `yaml:"landing_page"`         // Path to custom landing page HTML file (default: built-in)
+	Enabled            bool             `yaml:"enabled"`              // Enable coordinator services (auto-enabled if peer is admin)
+	Listen             string           `yaml:"listen"`               // Coordination API listen address (e.g., ":8443")
+	DataDir            string           `yaml:"data_dir"`             // Data directory for persistence (default: /var/lib/tunnelmesh)
+	HeartbeatInterval  string           `yaml:"heartbeat_interval"`   // Heartbeat interval (default: 10s)
+	UserExpirationDays int              `yaml:"user_expiration_days"` // Days until user expires after last seen (default: 270 = 9 months)
+	AdminPeers         []string         `yaml:"admin_peers"`          // Peer names or peer IDs (SHA256 of SSH key) for admins group (e.g., ["honker", "abc123..."] - peer IDs preferred for security)
+	Locations          bool             `yaml:"locations"`            // Enable node location tracking (requires external IP geolocation API)
+	MemberlistSeeds    []string         `yaml:"memberlist_seeds"`     // Memberlist gossip cluster seed addresses (e.g., ["coord1.example.com:7946"])
+	MemberlistBindAddr string           `yaml:"memberlist_bind_addr"` // Address to bind memberlist gossip (default: ":7946")
+	Monitoring         MonitoringConfig `yaml:"monitoring"`           // Reverse proxy config for Prometheus/Grafana
+	Relay              RelayConfig      `yaml:"relay"`                // WebSocket relay configuration
+	S3                 S3Config         `yaml:"s3"`                   // S3-compatible storage configuration
+	Filter             FilterConfig     `yaml:"filter"`               // Global packet filter rules for all peers
+	ServicePorts       []uint16         `yaml:"service_ports"`        // Service ports to auto-allow on peers (default: [9443] for metrics)
+	LandingPage        string           `yaml:"landing_page"`         // Path to custom landing page HTML file (default: built-in)
 }
 
 // S3Config holds configuration for the S3-compatible storage service.
@@ -72,17 +65,6 @@ type VersionRetentionConfig struct {
 	MonthlyMonths int `yaml:"monthly_months"` // Then keep one version per month for N months (default: 6)
 }
 
-// WireGuardPeerConfig holds configuration for the WireGuard concentrator mode.
-type WireGuardPeerConfig struct {
-	Enabled      bool   `yaml:"enabled"`       // Run as WireGuard concentrator
-	ListenPort   int    `yaml:"listen_port"`   // WireGuard UDP port (default: 51820)
-	Endpoint     string `yaml:"endpoint"`      // Public endpoint for clients (host:port)
-	Interface    string `yaml:"interface"`     // Interface name (default: "wg0")
-	MTU          int    `yaml:"mtu"`           // MTU (default: 1420)
-	DataDir      string `yaml:"data_dir"`      // Server key storage directory
-	SyncInterval string `yaml:"sync_interval"` // Config sync interval (default: "30s")
-}
-
 // PeerConfig holds configuration for a peer node.
 type PeerConfig struct {
 	Name    string   `yaml:"name"`
@@ -90,24 +72,23 @@ type PeerConfig struct {
 	// AuthToken is the authentication credential for joining the mesh.
 	// Must be 64 hex characters (32 bytes). Generate with: openssl rand -hex 32
 	// CLI-only: loaded from TUNNELMESH_TOKEN env var
-	AuthToken         string              `yaml:"-"`
-	SSHPort           int                 `yaml:"ssh_port"`
-	PrivateKey        string              `yaml:"private_key"`
-	ControlSocket     string              `yaml:"control_socket"`     // Unix socket path for CLI commands (default: /var/run/tunnelmesh.sock)
-	HeartbeatInterval string              `yaml:"heartbeat_interval"` // Heartbeat interval (default: 10s)
-	MetricsEnabled    *bool               `yaml:"metrics_enabled"`    // Enable Prometheus metrics (default: true). Disable for 10Gbps+ high-performance networks.
-	MetricsPort       int                 `yaml:"metrics_port"`       // Prometheus metrics port on mesh IP (default: 9443)
-	LogLevel          string              `yaml:"log_level"`          // trace, debug, info, warn, error (default: info)
-	TUN               TUNConfig           `yaml:"tun"`
-	DNS               DNSConfig           `yaml:"dns"`
-	WireGuard         WireGuardPeerConfig `yaml:"wireguard"`
-	Geolocation       GeolocationConfig   `yaml:"geolocation"`        // Manual geolocation coordinates
-	ExitPeer          string              `yaml:"exit_peer"`          // Name of peer to route internet traffic through
-	AllowExitTraffic  bool                `yaml:"allow_exit_traffic"` // Allow this peer to act as exit peer for other peers
-	Filter            FilterConfig        `yaml:"filter"`             // Local packet filter rules
-	Loki              LokiConfig          `yaml:"loki"`               // Loki log shipping configuration
-	Docker            DockerConfig        `yaml:"docker"`             // Docker container orchestration
-	Coordinator       CoordinatorConfig   `yaml:"coordinator"`        // Coordinator services (optional, auto-enabled if admin)
+	AuthToken         string            `yaml:"-"`
+	SSHPort           int               `yaml:"ssh_port"`
+	PrivateKey        string            `yaml:"private_key"`
+	ControlSocket     string            `yaml:"control_socket"`     // Unix socket path for CLI commands (default: /var/run/tunnelmesh.sock)
+	HeartbeatInterval string            `yaml:"heartbeat_interval"` // Heartbeat interval (default: 10s)
+	MetricsEnabled    *bool             `yaml:"metrics_enabled"`    // Enable Prometheus metrics (default: true). Disable for 10Gbps+ high-performance networks.
+	MetricsPort       int               `yaml:"metrics_port"`       // Prometheus metrics port on mesh IP (default: 9443)
+	LogLevel          string            `yaml:"log_level"`          // trace, debug, info, warn, error (default: info)
+	TUN               TUNConfig         `yaml:"tun"`
+	DNS               DNSConfig         `yaml:"dns"`
+	Geolocation       GeolocationConfig `yaml:"geolocation"`        // Manual geolocation coordinates
+	ExitPeer          string            `yaml:"exit_peer"`          // Name of peer to route internet traffic through
+	AllowExitTraffic  bool              `yaml:"allow_exit_traffic"` // Allow this peer to act as exit peer for other peers
+	Filter            FilterConfig      `yaml:"filter"`             // Local packet filter rules
+	Loki              LokiConfig        `yaml:"loki"`               // Loki log shipping configuration
+	Docker            DockerConfig      `yaml:"docker"`             // Docker container orchestration
+	Coordinator       CoordinatorConfig `yaml:"coordinator"`        // Coordinator services (optional, auto-enabled if admin)
 }
 
 // TUNConfig holds configuration for the TUN interface.
@@ -265,29 +246,6 @@ func LoadPeerConfig(path string) (*PeerConfig, error) {
 		}
 		if cfg.Loki.FlushInterval == "" {
 			cfg.Loki.FlushInterval = "5s"
-		}
-	}
-
-	// WireGuard concentrator defaults
-	if cfg.WireGuard.Enabled {
-		if cfg.WireGuard.ListenPort == 0 {
-			cfg.WireGuard.ListenPort = 51820
-		}
-		if cfg.WireGuard.Interface == "" {
-			cfg.WireGuard.Interface = "wg0"
-		}
-		if cfg.WireGuard.MTU == 0 {
-			cfg.WireGuard.MTU = 1420
-		}
-		if cfg.WireGuard.SyncInterval == "" {
-			cfg.WireGuard.SyncInterval = "30s"
-		}
-		// Expand home directory in data dir
-		if strings.HasPrefix(cfg.WireGuard.DataDir, "~/") {
-			homeDir, err := os.UserHomeDir()
-			if err == nil {
-				cfg.WireGuard.DataDir = filepath.Join(homeDir, cfg.WireGuard.DataDir[2:])
-			}
 		}
 	}
 

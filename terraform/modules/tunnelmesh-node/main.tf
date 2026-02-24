@@ -11,9 +11,6 @@ terraform {
 }
 
 locals {
-  # Computed values
-  wg_endpoint = var.wg_endpoint != "" ? var.wg_endpoint : "${var.name}.${var.domain}:${var.wg_listen_port}"
-
   # Server URL for peer mode
   # If coordinator is also enabled, peer connects to localhost
   # Otherwise, use the provided peer_server_url
@@ -22,15 +19,12 @@ locals {
   # Determine which services to run
   run_coordinator = var.coordinator_enabled
   run_peer        = var.peer_enabled || (var.coordinator_enabled && var.peer_enabled)
-  # WireGuard concentrator only runs on peer nodes (coordinator just needs admin panel)
-  run_wireguard_concentrator = var.wireguard_enabled && var.peer_enabled
 
   # Tags based on enabled features
   feature_tags = concat(
     var.tags,
     var.coordinator_enabled ? ["coordinator"] : [],
     var.peer_enabled ? ["peer"] : [],
-    var.wireguard_enabled ? ["wireguard"] : [],
     var.monitoring_enabled ? ["monitoring"] : []
   )
 
@@ -41,7 +35,6 @@ locals {
   common_vars = {
     coordinator_enabled = var.coordinator_enabled
     peer_enabled        = var.peer_enabled
-    wireguard_enabled   = var.wireguard_enabled
     ssl_enabled         = var.ssl_enabled && var.coordinator_enabled
     monitoring_enabled  = var.monitoring_enabled
 
@@ -67,10 +60,6 @@ locals {
     location_latitude  = var.location_latitude
     location_longitude = var.location_longitude
     location_city      = var.location_city
-
-    # WireGuard settings
-    wg_listen_port = var.wg_listen_port
-    wg_endpoint    = local.wg_endpoint
 
     # Binary settings
     github_owner   = var.github_owner
@@ -196,16 +185,6 @@ resource "digitalocean_firewall" "node" {
     content {
       protocol         = "tcp"
       port_range       = tostring(var.external_api_port)
-      source_addresses = ["0.0.0.0/0", "::/0"]
-    }
-  }
-
-  # WireGuard UDP (only for peer nodes running concentrator)
-  dynamic "inbound_rule" {
-    for_each = local.run_wireguard_concentrator ? [1] : []
-    content {
-      protocol         = "udp"
-      port_range       = tostring(var.wg_listen_port)
       source_addresses = ["0.0.0.0/0", "::/0"]
     }
   }

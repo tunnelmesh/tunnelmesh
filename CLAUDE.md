@@ -136,13 +136,13 @@ Access control via existing RBAC system:
 
 **Default groups**:
 - `everyone`: visualizer, map, s3, shares
-- `all_admin_users`: peers, logs, wireguard, filter, dns, users, groups, bindings, docker
+- `all_admin_users`: peers, logs, filter, dns, users, groups, bindings, docker
 
 ### Built-in Panel IDs
 
 | Tab  | Panels                                                |
 |------|-------------------------------------------------------|
-| mesh | visualizer, map, peers, logs, wireguard, filter, dns |
+| mesh | visualizer, map, peers, logs, filter, dns |
 | data | s3, shares, users, groups, bindings, docker           |
 
 ### CSS Design Tokens

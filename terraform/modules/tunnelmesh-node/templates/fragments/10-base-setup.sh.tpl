@@ -74,6 +74,3 @@ systemctl restart systemd-journald
 mkdir -p /etc/tunnelmesh
 mkdir -p /var/lib/tunnelmesh
 
-%{ if wireguard_enabled && peer_enabled ~}
-mkdir -p /var/lib/tunnelmesh/wireguard
-%{ endif ~}

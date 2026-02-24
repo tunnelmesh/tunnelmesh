@@ -328,17 +328,6 @@ groups:
           summary: "No TunnelMesh peers responding"
           description: "Cannot reach any TunnelMesh peer metrics - possible complete network outage"
 
-      # Mesh: WireGuard concentrator down (if enabled)
-      - alert: WireGuardDown
-        expr: tunnelmesh_wireguard_enabled == 1 and tunnelmesh_wireguard_device_running == 0
-        for: 1m
-        labels:
-          severity: page
-          category: mesh
-        annotations:
-          summary: "WireGuard concentrator device down"
-          description: "WireGuard is enabled but the device is not running"
-
       # Data: S3 service down
       # Note: Also triggers when idle; consider changing to `absent()` only if false positives occur
       - alert: S3Down

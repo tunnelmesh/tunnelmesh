@@ -8,11 +8,10 @@ output "nodes" {
   description = "All deployed nodes with their details"
   value = {
     for name, node in module.node : name => {
-      ip                 = node.ipv4_address
-      hostname           = node.hostname
-      ssh                = node.ssh_command
-      coordinator_url    = node.coordinator_url
-      wireguard_endpoint = node.wireguard_endpoint
+      ip              = node.ipv4_address
+      hostname        = node.hostname
+      ssh             = node.ssh_command
+      coordinator_url = node.coordinator_url
     }
   }
 }
@@ -41,18 +40,6 @@ output "coordinator_url" {
   value       = local.coordinator_name != null ? module.node[local.coordinator_name].coordinator_url : var.external_coordinator_url
 }
 
-
-# ============================================================================
-# WIREGUARD ENDPOINTS
-# ============================================================================
-
-output "wireguard_endpoints" {
-  description = "WireGuard endpoints for peer nodes running concentrator"
-  value = {
-    for name, cfg in var.peers : name => module.node[name].wireguard_endpoint
-    if lookup(cfg, "wireguard", false) && lookup(cfg, "peer", false)
-  }
-}
 
 # ============================================================================
 # CONFIGURATION HELPERS

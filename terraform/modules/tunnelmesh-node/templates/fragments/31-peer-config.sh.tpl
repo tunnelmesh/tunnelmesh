@@ -33,14 +33,6 @@ tun:
 dns:
   listen: "127.0.0.1:5353"
 
-%{ if wireguard_enabled ~}
-# WireGuard concentrator
-wireguard:
-  enabled: true
-  listen_port: ${wg_listen_port}
-  data_dir: /var/lib/tunnelmesh/wireguard
-  endpoint: "${wg_endpoint}"
-%{ endif ~}
 PEERCONF
 
 # TUNNELMESH_SERVER is read by 'service install' and baked into the service's env vars

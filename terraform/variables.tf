@@ -36,10 +36,8 @@ variable "peers" {
     Map of nodes to deploy. Each node can have:
     - coordinator: bool - Run coordination server (only one node should have this)
     - peer: bool - Run as mesh peer
-    - wireguard: bool - Enable WireGuard concentrator
     - region: string - Override default region
     - size: string - Override default droplet size
-    - wg_port: number - Override WireGuard port
     - ssh_port: number - Override SSH tunnel port
     - exit_node: string - Route internet traffic through this peer (split-tunnel VPN)
     - allow_exit_traffic: bool - Allow this node to be an exit node for other peers
@@ -48,11 +46,10 @@ variable "peers" {
   EOF
   type        = map(any)
   default = {
-    # Default: all-in-one coordinator + peer + wireguard
+    # Default: all-in-one coordinator + peer
     "tunnelmesh" = {
       coordinator = true
       peer        = true
-      wireguard   = true
     }
   }
 
@@ -85,12 +82,6 @@ variable "default_droplet_size" {
   description = "Default droplet size"
   type        = string
   default     = "s-1vcpu-512mb-10gb" # $4/month
-}
-
-variable "default_wg_port" {
-  description = "Default WireGuard UDP port"
-  type        = number
-  default     = 51820
 }
 
 variable "default_ssh_port" {

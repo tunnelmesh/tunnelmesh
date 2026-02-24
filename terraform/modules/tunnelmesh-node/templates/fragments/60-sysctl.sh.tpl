@@ -1,4 +1,4 @@
-%{ if wireguard_enabled || peer_enabled ~}
+%{ if peer_enabled ~}
 # Enable IP forwarding
 cat >> /etc/sysctl.conf <<'SYSCTL'
 net.ipv4.ip_forward = 1

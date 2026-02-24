@@ -270,11 +270,6 @@ func (s *Server) setupAdminRoutes() {
 	s.adminMux.HandleFunc("/api/overview", s.handleAdminOverview)
 	s.adminMux.HandleFunc("/api/events", s.handleSSE)
 
-	if s.cfg.WireGuard.Enabled {
-		s.adminMux.HandleFunc("/api/wireguard/clients", s.handleWGClients)
-		s.adminMux.HandleFunc("/api/wireguard/clients/", s.handleWGClientByID)
-	}
-
 	// Filter rule management
 	s.adminMux.HandleFunc("/api/filter/rules", s.handleFilterRules)
 

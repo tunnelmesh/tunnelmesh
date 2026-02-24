@@ -47,12 +47,6 @@ type PeerMetrics struct {
 	ExitPeerInfo       *prometheus.GaugeVec // labels: exit_node
 	AllowsExitTraffic  prometheus.Gauge     // 1 if this node is an exit node
 
-	// WireGuard concentrator metrics
-	WireGuardEnabled        prometheus.Gauge
-	WireGuardDeviceRunning  prometheus.Gauge
-	WireGuardClientsTotal   prometheus.Gauge
-	WireGuardClientsEnabled prometheus.Gauge
-
 	// Geolocation metrics
 	PeerLatitude     prometheus.Gauge
 	PeerLongitude    prometheus.Gauge
@@ -196,28 +190,6 @@ func InitMetrics(peerName, meshIP, version string) *PeerMetrics {
 		AllowsExitTraffic: promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
 			Name:        "tunnelmesh_allows_exit_traffic",
 			Help:        "Whether this node allows exit traffic from other peers (1) or not (0)",
-			ConstLabels: constLabels,
-		}),
-
-		// WireGuard metrics
-		WireGuardEnabled: promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
-			Name:        "tunnelmesh_wireguard_enabled",
-			Help:        "Whether WireGuard concentrator is enabled (1) or not (0)",
-			ConstLabels: constLabels,
-		}),
-		WireGuardDeviceRunning: promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
-			Name:        "tunnelmesh_wireguard_device_running",
-			Help:        "Whether WireGuard device is running (1) or not (0)",
-			ConstLabels: constLabels,
-		}),
-		WireGuardClientsTotal: promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
-			Name:        "tunnelmesh_wireguard_clients_total",
-			Help:        "Total number of WireGuard clients",
-			ConstLabels: constLabels,
-		}),
-		WireGuardClientsEnabled: promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
-			Name:        "tunnelmesh_wireguard_clients_enabled",
-			Help:        "Number of enabled WireGuard clients",
 			ConstLabels: constLabels,
 		}),
 

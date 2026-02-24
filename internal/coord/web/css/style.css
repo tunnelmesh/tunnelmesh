@@ -407,7 +407,7 @@ main {
     color: var(--color-accent-green);
 }
 
-#peers-section, #dns-section, #wireguard-section, #filter-section,
+#peers-section, #dns-section, #filter-section,
 #s3-section, #peers-mgmt-section, #groups-section, #shares-section, #bindings-section {
     background: var(--color-bg-primary);
     padding: 0;
@@ -415,7 +415,7 @@ main {
     margin-bottom: 1.5rem;
 }
 
-#peers-section h2, #dns-section h2, #wireguard-section h2, #filter-section h2,
+#peers-section h2, #dns-section h2, #filter-section h2,
 #s3-section h2, #peers-mgmt-section h2, #groups-section h2, #shares-section h2, #bindings-section h2, #docker-section h2 {
     font-size: 1rem;
     font-weight: 600;
@@ -442,7 +442,6 @@ main {
 }
 
 /* Override h2 styles when inside section-header (has button beside it) */
-#wireguard-section .section-header h2,
 #filter-section .section-header h2,
 #s3-section .section-header h2,
 #peers-mgmt-section .section-header h2,
@@ -1080,7 +1079,7 @@ footer {
     border-top-color: var(--color-text-primary);
 }
 
-/* For section headers with buttons (like WireGuard), keep h2 content together */
+/* For section headers with buttons, keep h2 content together */
 .section-toggle h2 {
     flex: 0 1 auto;
 }

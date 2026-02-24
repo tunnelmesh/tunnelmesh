@@ -14,8 +14,4 @@ ufw allow in on tun-mesh to any port 443 proto tcp comment 'Mesh Admin HTTPS'
 %{ endif ~}
 %{ endif ~}
 
-%{ if wireguard_enabled && peer_enabled ~}
-ufw allow ${wg_listen_port}/udp comment 'WireGuard'
-%{ endif ~}
-
 ufw --force enable

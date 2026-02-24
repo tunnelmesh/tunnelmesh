@@ -28,7 +28,6 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/nfs"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/replication"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
-	"github.com/tunnelmesh/tunnelmesh/internal/coord/wireguard"
 	"github.com/tunnelmesh/tunnelmesh/internal/docker"
 	"github.com/tunnelmesh/tunnelmesh/internal/mesh"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
@@ -84,7 +83,6 @@ type Server struct {
 	serverStats        serverStats
 	relay              *relayManager
 	holePunch          *holePunchManager
-	wgStore            *wireguard.Store             // WireGuard client storage
 	ca                 *CertificateAuthority        // Internal CA for mesh TLS certs
 	version            string                       // Server version for admin display
 	sseHub             *sseHub                      // SSE hub for real-time dashboard updates
@@ -335,14 +333,8 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 		auth.SetPeerExpirationDays(cfg.Coordinator.UserExpirationDays)
 	}
 
-	// Initialize WireGuard client store if enabled
-	if cfg.Coordinator.WireGuardServer.Enabled {
-		srv.wgStore = wireguard.NewStore(mesh.CIDR)
-		log.Info().Msg("WireGuard client management enabled")
-	}
-
 	// Initialize relay manager early so recoverCoordinatorState (called from
-	// initS3Storage) can restore the WireGuard concentrator assignment.
+	// initS3Storage) can restore any state.
 	srv.relay = newRelayManager(ctx)
 
 	// Initialize S3 storage (always enabled, must be before IP allocator)
@@ -1095,11 +1087,6 @@ func (s *Server) setupRoutes(ctx context.Context) {
 	// Setup UDP hole-punch coordination routes
 	s.setupHolePunchRoutes()
 
-	// Setup WireGuard concentrator sync endpoint (JWT auth)
-	if s.cfg.Coordinator.WireGuardServer.Enabled {
-		s.setupWireGuardRoutes()
-	}
-
 	// Note: Replication endpoint moved to adminMux (see admin.go) to ensure
 	// replication only happens within the mesh network, not from public internet
 }
@@ -1307,15 +1294,8 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 }
 
 // recoverCoordinatorState recovers ephemeral coordinator state from S3.
-// This includes WG concentrator assignment and DNS cache/aliases.
+// This includes DNS cache/aliases and other persisted state.
 func (s *Server) recoverCoordinatorState(ctx context.Context, cfg *config.PeerConfig, systemStore *s3.SystemStore) {
-	// Recover WireGuard concentrator assignment
-	if concentrator, err := systemStore.LoadWGConcentrator(ctx); err == nil && concentrator != "" {
-		log.Info().Str("peer", concentrator).Msg("recovering WireGuard concentrator assignment")
-		// Store in relay manager - will be validated when peer reconnects
-		s.relay.RecoverWGConcentrator(concentrator)
-	}
-
 	// Recover DNS cache if available
 	if dnsCache, err := systemStore.LoadDNSCache(ctx); err == nil && len(dnsCache) > 0 {
 		log.Info().Int("entries", len(dnsCache)).Msg("recovering DNS cache")
@@ -2548,98 +2528,4 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 // GetCA returns the server's certificate authority.
 func (s *Server) GetCA() *CertificateAuthority {
 	return s.ca
-}
-
-// setupWireGuardRoutes registers the WireGuard API routes for concentrator sync.
-func (s *Server) setupWireGuardRoutes() {
-	// Concentrator fetches client list (JWT auth)
-	s.mux.HandleFunc("/api/v1/wireguard/clients", s.handleWireGuardClients)
-	// Concentrator reports handshakes (JWT auth)
-	s.mux.HandleFunc("/api/v1/wireguard/handshake", s.handleWireGuardHandshake)
-}
-
-// handleWireGuardClients returns the list of WireGuard clients for the concentrator.
-// Uses JWT authentication.
-func (s *Server) handleWireGuardClients(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Validate JWT token
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		s.jsonError(w, "missing authorization header", http.StatusUnauthorized)
-		return
-	}
-
-	parts := strings.SplitN(auth, " ", 2)
-	if len(parts) != 2 || parts[0] != "Bearer" {
-		s.jsonError(w, "invalid authorization header", http.StatusUnauthorized)
-		return
-	}
-
-	_, err := s.ValidateToken(parts[1])
-	if err != nil {
-		s.jsonError(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Return only enabled clients
-	allClients := s.wgStore.List()
-	enabledClients := make([]wireguard.Client, 0)
-	for _, c := range allClients {
-		if c.Enabled {
-			enabledClients = append(enabledClients, c)
-		}
-	}
-
-	resp := wireguard.ClientListResponse{
-		Clients: enabledClients,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// handleWireGuardHandshake updates the last seen time for a WireGuard client.
-// Called by the concentrator when it detects a client handshake.
-func (s *Server) handleWireGuardHandshake(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Validate JWT token
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		s.jsonError(w, "missing authorization header", http.StatusUnauthorized)
-		return
-	}
-
-	parts := strings.SplitN(auth, " ", 2)
-	if len(parts) != 2 || parts[0] != "Bearer" {
-		s.jsonError(w, "invalid authorization header", http.StatusUnauthorized)
-		return
-	}
-
-	_, err := s.ValidateToken(parts[1])
-	if err != nil {
-		s.jsonError(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	var req wireguard.HandshakeReport
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.wgStore.UpdateLastSeen(req.ClientID, req.HandshakeAt); err != nil {
-		s.jsonError(w, "client not found", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

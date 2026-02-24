@@ -39,8 +39,6 @@ type Collector struct {
 	peerLatencyProvider PeerLatencyProvider
 	identity            *peer.PeerIdentity
 	allowsExit          bool
-	wgEnabled           bool
-	wgConcentrator      WGConcentrator
 	filter              FilterStatus
 
 	// Last snapshot for delta calculation
@@ -79,12 +77,6 @@ type PeerLatencyProvider interface {
 	GetLatencies() map[string]int64
 }
 
-// WGConcentrator interface for WireGuard concentrator.
-type WGConcentrator interface {
-	IsDeviceRunning() bool
-	ClientCount() (total, enabled int)
-}
-
 // FilterStatus interface for getting packet filter status.
 type FilterStatus interface {
 	IsDefaultDeny() bool
@@ -101,8 +93,6 @@ type CollectorConfig struct {
 	PeerLatencyProvider PeerLatencyProvider
 	Identity            *peer.PeerIdentity
 	AllowsExit          bool
-	WGEnabled           bool
-	WGConcentrator      WGConcentrator
 	Filter              FilterStatus
 }
 
@@ -119,8 +109,6 @@ func NewCollector(m *PeerMetrics, cfg CollectorConfig) *Collector {
 		peerLatencyProvider: cfg.PeerLatencyProvider,
 		identity:            cfg.Identity,
 		allowsExit:          cfg.AllowsExit,
-		wgEnabled:           cfg.WGEnabled,
-		wgConcentrator:      cfg.WGConcentrator,
 		filter:              cfg.Filter,
 	}
 }
@@ -133,7 +121,6 @@ func (c *Collector) Collect() {
 	c.collectRelayStats()
 	c.collectLatencyStats()
 	c.collectExitPeerStats()
-	c.collectWireGuardStats()
 	c.collectGeolocationStats()
 	c.collectFilterStats()
 }
@@ -277,35 +264,6 @@ func (c *Collector) collectExitPeerStats() {
 	}
 }
 
-func (c *Collector) collectWireGuardStats() {
-	if c.wgEnabled {
-		c.metrics.WireGuardEnabled.Set(1)
-	} else {
-		c.metrics.WireGuardEnabled.Set(0)
-		c.metrics.WireGuardDeviceRunning.Set(0)
-		c.metrics.WireGuardClientsTotal.Set(0)
-		c.metrics.WireGuardClientsEnabled.Set(0)
-		return
-	}
-
-	if c.wgConcentrator == nil {
-		c.metrics.WireGuardDeviceRunning.Set(0)
-		c.metrics.WireGuardClientsTotal.Set(0)
-		c.metrics.WireGuardClientsEnabled.Set(0)
-		return
-	}
-
-	if c.wgConcentrator.IsDeviceRunning() {
-		c.metrics.WireGuardDeviceRunning.Set(1)
-	} else {
-		c.metrics.WireGuardDeviceRunning.Set(0)
-	}
-
-	total, enabled := c.wgConcentrator.ClientCount()
-	c.metrics.WireGuardClientsTotal.Set(float64(total))
-	c.metrics.WireGuardClientsEnabled.Set(float64(enabled))
-}
-
 func (c *Collector) collectGeolocationStats() {
 	if c.identity == nil || c.identity.Location == nil {
 		return
@@ -362,34 +320,6 @@ func (c *Collector) Run(ctx context.Context, interval time.Duration) {
 			c.Collect()
 		}
 	}
-}
-
-// NewWGConcentratorWrapper creates a new wrapper for WireGuard concentrator.
-// Pass nil for concentrator if WireGuard is not enabled.
-func NewWGConcentratorWrapper(
-	isDeviceRunning func() bool,
-	clientCount func() (total, enabled int),
-) WGConcentrator {
-	if isDeviceRunning == nil {
-		return nil
-	}
-	return &simpleWGWrapper{
-		isDeviceRunning: isDeviceRunning,
-		clientCount:     clientCount,
-	}
-}
-
-type simpleWGWrapper struct {
-	isDeviceRunning func() bool
-	clientCount     func() (total, enabled int)
-}
-
-func (w *simpleWGWrapper) IsDeviceRunning() bool {
-	return w.isDeviceRunning()
-}
-
-func (w *simpleWGWrapper) ClientCount() (total, enabled int) {
-	return w.clientCount()
 }
 
 // RelayWrapper wraps a PersistentRelay to implement RelayStatus and RTTProvider interfaces.

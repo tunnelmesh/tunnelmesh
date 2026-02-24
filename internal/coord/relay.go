@@ -16,7 +16,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
-	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -50,13 +49,11 @@ type persistentConn struct {
 
 // relayManager handles relay connections between peers.
 type relayManager struct {
-	pending        map[string]*relayConn      // key: "peerA->peerB" (legacy pairing)
-	persistent     map[string]*persistentConn // key: peerName (DERP-like routing)
-	wgConcentrator string                     // peerName of WireGuard concentrator (if any)
-	mu             sync.Mutex
-	s3SystemStore  *s3.SystemStore // For persisting concentrator assignment
+	pending    map[string]*relayConn      // key: "peerA->peerB" (legacy pairing)
+	persistent map[string]*persistentConn // key: peerName (DERP-like routing)
+	mu         sync.Mutex
 
-	// API request tracking
+	// Request tracking (for QueryFilterRules)
 	apiRequests   map[uint32]chan []byte // reqID -> response channel
 	apiRequestsMu sync.Mutex
 	nextReqID     uint32
@@ -69,9 +66,6 @@ const (
 	MsgTypePing            byte = 0x03 // Keepalive ping
 	MsgTypePong            byte = 0x04 // Keepalive pong
 	MsgTypePeerReconnected byte = 0x05 // Server -> Client: peer reconnected (tunnel may be stale)
-	MsgTypeWGAnnounce      byte = 0x10 // Client -> Server: announce as WireGuard concentrator
-	MsgTypeAPIRequest      byte = 0x11 // Server -> Client: API request to concentrator
-	MsgTypeAPIResponse     byte = 0x12 // Client -> Server: API response from concentrator
 
 	// Heartbeat and push notification message types
 	MsgTypeHeartbeat       byte = 0x20 // Client -> Server: stats update
@@ -109,166 +103,6 @@ func newRelayManager(ctx context.Context) *relayManager {
 		pending:     make(map[string]*relayConn),
 		persistent:  make(map[string]*persistentConn),
 		apiRequests: make(map[uint32]chan []byte),
-		// s3SystemStore will be set later via SetS3Store()
-	}
-}
-
-// SetS3Store sets the S3 system store for persistence.
-// This must be called after S3 initialization to enable WG concentrator persistence.
-func (r *relayManager) SetS3Store(store *s3.SystemStore) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.s3SystemStore = store
-}
-
-// SetWGConcentrator sets the peer that acts as WireGuard concentrator.
-func (r *relayManager) SetWGConcentrator(peerName string) {
-	r.mu.Lock()
-	old := r.wgConcentrator
-	r.wgConcentrator = peerName
-	s3Store := r.s3SystemStore // Capture before unlocking
-	r.mu.Unlock()
-
-	if old != peerName {
-		log.Info().Str("peer", peerName).Str("old", old).Msg("WireGuard concentrator updated")
-	}
-
-	// Persist to S3 if enabled (async to avoid blocking)
-	if s3Store != nil {
-		go func() {
-			// Use Background context for persistence - should complete even during shutdown
-			if err := s3Store.SaveWGConcentrator(context.Background(), peerName); err != nil {
-				log.Warn().Err(err).Msg("failed to persist WG concentrator")
-			} else {
-				log.Debug().Str("peer", peerName).Msg("persisted WG concentrator to S3")
-			}
-		}()
-	}
-}
-
-// GetWGConcentrator returns the current WireGuard concentrator peer name.
-func (r *relayManager) GetWGConcentrator() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.wgConcentrator
-}
-
-// RecoverWGConcentrator restores the WireGuard concentrator assignment from persistence.
-// This is used during startup to restore state without triggering a save operation.
-func (r *relayManager) RecoverWGConcentrator(peerName string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.wgConcentrator = peerName
-}
-
-// ClearWGConcentrator clears the concentrator if it matches the given peer.
-func (r *relayManager) ClearWGConcentrator(peerName string) {
-	r.mu.Lock()
-	cleared := false
-	s3Store := r.s3SystemStore // Capture before unlocking
-	if r.wgConcentrator == peerName {
-		r.wgConcentrator = ""
-		cleared = true
-	}
-	r.mu.Unlock()
-
-	if cleared {
-		log.Info().Str("peer", peerName).Msg("WireGuard concentrator disconnected")
-
-		// Clear from S3 if enabled
-		if s3Store != nil {
-			go func() {
-				// Use Background context for persistence - should complete even during shutdown
-				if err := s3Store.ClearWGConcentrator(context.Background()); err != nil {
-					log.Debug().Err(err).Msg("failed to clear WG concentrator from S3")
-				} else {
-					log.Debug().Msg("cleared WG concentrator from S3")
-				}
-			}()
-		}
-	}
-}
-
-// SendAPIRequest sends an API request to the WireGuard concentrator and waits for response.
-// Returns the response body or error if timeout/no concentrator.
-func (r *relayManager) SendAPIRequest(ctx context.Context, method string, body []byte, timeout time.Duration) ([]byte, error) {
-	r.mu.Lock()
-	concentrator := r.wgConcentrator
-	pc, ok := r.persistent[concentrator]
-	r.mu.Unlock()
-
-	if concentrator == "" || !ok {
-		return nil, fmt.Errorf("no WireGuard concentrator connected")
-	}
-
-	// Allocate request ID and response channel
-	r.apiRequestsMu.Lock()
-	reqID := r.nextReqID
-	r.nextReqID++
-	respChan := make(chan []byte, 1)
-	r.apiRequests[reqID] = respChan
-	r.apiRequestsMu.Unlock()
-
-	defer func() {
-		r.apiRequestsMu.Lock()
-		delete(r.apiRequests, reqID)
-		r.apiRequestsMu.Unlock()
-	}()
-
-	// Build request: [MsgTypeAPIRequest][reqID:4][method_len:1][method][body]
-	msg := make([]byte, 1+4+1+len(method)+len(body))
-	msg[0] = MsgTypeAPIRequest
-	msg[1] = byte(reqID >> 24)
-	msg[2] = byte(reqID >> 16)
-	msg[3] = byte(reqID >> 8)
-	msg[4] = byte(reqID)
-	msg[5] = byte(len(method))
-	copy(msg[6:], method)
-	copy(msg[6+len(method):], body)
-
-	// Send request via async write channel
-	select {
-	case pc.writeChan <- msg:
-		// Message queued
-	default:
-		return nil, fmt.Errorf("send API request: write channel full")
-	}
-
-	// Combine parent context with timeout
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Wait for response
-	select {
-	case resp := <-respChan:
-		return resp, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("API request to WireGuard concentrator: %w", ctx.Err())
-	}
-}
-
-// handleAPIResponse processes an API response from the concentrator.
-func (r *relayManager) handleAPIResponse(data []byte) {
-	if len(data) < 5 {
-		log.Debug().Msg("API response too short")
-		return
-	}
-
-	reqID := uint32(data[1])<<24 | uint32(data[2])<<16 | uint32(data[3])<<8 | uint32(data[4])
-	body := data[5:]
-
-	r.apiRequestsMu.Lock()
-	respChan, ok := r.apiRequests[reqID]
-	r.apiRequestsMu.Unlock()
-
-	if ok {
-		select {
-		case respChan <- body:
-		default:
-			log.Debug().Uint32("req_id", reqID).Msg("API response channel full")
-		}
-	} else {
-		log.Debug().Uint32("req_id", reqID).Msg("API response for unknown request")
 	}
 }
 
@@ -866,8 +700,6 @@ func (r *relayManager) PushServicePorts(peerName string, ports []uint16) {
 func (s *Server) setupRelayRoutes(ctx context.Context) {
 	if s.relay == nil {
 		s.relay = newRelayManager(ctx)
-		// Set S3 store (always available for WG concentrator persistence)
-		s.relay.SetS3Store(s.s3SystemStore)
 	}
 	s.mux.HandleFunc("/api/v1/relay/persistent", s.handlePersistentRelay)
 	s.mux.HandleFunc("/api/v1/relay/", s.handleRelay)
@@ -925,7 +757,6 @@ func (s *Server) handlePersistentRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		s.relay.UnregisterPersistent(peerName)
-		s.relay.ClearWGConcentrator(peerName) // Clear if this was the concentrator
 		if s.coordMetrics != nil {
 			s.coordMetrics.OnlinePeers.Dec()
 		}
@@ -1099,15 +930,6 @@ func (s *Server) handlePersistentRelayMessage(sourcePeer string, data []byte) {
 	case MsgTypePing:
 		// Respond with pong (handled at protocol level via SetPongHandler)
 		log.Debug().Str("peer", sourcePeer).Msg("persistent relay received ping")
-
-	case MsgTypeWGAnnounce:
-		// Peer announces itself as WireGuard concentrator
-		log.Info().Str("peer", sourcePeer).Msg("peer announced as WireGuard concentrator")
-		s.relay.SetWGConcentrator(sourcePeer)
-
-	case MsgTypeAPIResponse:
-		// API response from concentrator
-		s.relay.handleAPIResponse(data)
 
 	case MsgTypeFilterRulesReply:
 		// Filter rules response from peer
