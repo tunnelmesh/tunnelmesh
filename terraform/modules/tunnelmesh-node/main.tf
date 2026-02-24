@@ -257,6 +257,7 @@ resource "null_resource" "monitoring_files" {
     user        = "root"
     host        = digitalocean_reserved_ip.node.ip_address
     private_key = var.ssh_private_key_path != "" ? file(var.ssh_private_key_path) : null
+    agent       = true
     timeout     = "10m"
   }
 
