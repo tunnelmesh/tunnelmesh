@@ -54,10 +54,8 @@ func (c *realDockerClient) ListContainers(ctx context.Context) ([]ContainerInfo,
 }
 
 // InspectContainer returns detailed information about a specific container.
-// Note: getSize=false to avoid slow overlay filesystem size calculation per container.
-// Disk size is obtained from the batch ListContainers call (Size: true).
 func (c *realDockerClient) InspectContainer(ctx context.Context, id string) (*ContainerInfo, error) {
-	inspect, _, err := c.cli.ContainerInspectWithRaw(ctx, id, false) // getSize=false: slow per-container, use list instead
+	inspect, _, err := c.cli.ContainerInspectWithRaw(ctx, id, true) // getSize=true
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return nil, nil
@@ -121,8 +119,17 @@ func (c *realDockerClient) GetContainerStats(ctx context.Context, id string) (*C
 		memPercent = float64(v.MemoryStats.Usage) / float64(v.MemoryStats.Limit) * 100.0
 	}
 
-	// Disk size is populated by ListContainers (Size: true) and InspectContainer,
-	// not here to avoid slow per-container overlay filesystem size calculations.
+	// Get disk size from inspect API (stats API doesn't provide actual disk usage)
+	// Note: Docker stats API only provides I/O metrics (StorageStats.ReadSizeBytes),
+	// not filesystem size. We need SizeRootFs from the inspect API.
+	diskBytes := uint64(0)
+	inspect, _, err := c.cli.ContainerInspectWithRaw(ctx, id, true) // getSize=true
+	if err != nil {
+		log.Warn().Err(err).Str("container", id).Msg("Failed to get container size, using 0")
+		// Continue with zero disk bytes rather than failing entire stats call
+	} else if inspect.SizeRootFs != nil {
+		diskBytes = uint64(*inspect.SizeRootFs)
+	}
 
 	return &ContainerStats{
 		ContainerID:   v.ID,
@@ -132,7 +139,7 @@ func (c *realDockerClient) GetContainerStats(ctx context.Context, id string) (*C
 		MemoryBytes:   v.MemoryStats.Usage,
 		MemoryLimit:   v.MemoryStats.Limit,
 		MemoryPercent: memPercent,
-		DiskBytes:     0, // populated by ListContainers, not per-container inspect
+		DiskBytes:     diskBytes,
 		PIDs:          v.PidsStats.Current,
 	}, nil
 }
