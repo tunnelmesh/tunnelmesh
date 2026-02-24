@@ -8,6 +8,7 @@ mkdir -p /opt/monitoring/grafana/provisioning/datasources
 mkdir -p /opt/monitoring/grafana/provisioning/dashboards
 mkdir -p /opt/monitoring/grafana/dashboards
 mkdir -p /opt/monitoring/targets
+chown 65534:65534 /opt/monitoring/targets  # sd-generator runs as nobody (UID 65534)
 
 # Write prometheus config
 cat > /opt/monitoring/prometheus/prometheus.yml <<'PROMCONFIG'
