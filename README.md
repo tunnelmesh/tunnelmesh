@@ -36,19 +36,7 @@ routing.
 ## Getting Started
 
 For a complete step-by-step setup guide including downloading releases, configuring servers and peers, and installing as
-a system service, see the **[Getting Started Guide](docs/GETTING_STARTED.md)**.
-
-## Documentation
-
-- **[Getting Started Guide](docs/GETTING_STARTED.md)** - Installation, configuration, contexts, and running as a service
-- **[CLI Reference](docs/CLI.md)** - Complete command-line reference including context management
-- **[WireGuard Integration](docs/WIREGUARD.md)** - Connect mobile devices and standard WireGuard clients
-- **[S3 Storage](docs/S3_STORAGE.md)** - S3-compatible object storage and file shares
-- **[NFS File Sharing](docs/NFS.md)** - Mount file shares as network drives
-- **[Docker Deployment](docs/DOCKER.md)** - Running TunnelMesh in containers for development and production
-- **[Cloud Deployment](docs/CLOUD_DEPLOYMENT.md)** - Deploy to DigitalOcean with Terraform (includes deployment scenarios)
-- **[Benchmarking & Stress Testing](docs/BENCHMARKING.md)** - Measure throughput, latency, and chaos testing
-- **[Internal Packet Filter](docs/INTERNAL_PACKET_FILTER.md)** - Port-based firewall with per-peer rules and metrics
+a system service, see the **[Documentation](https://read.tunnelmesh.io)**.
 
 ## Architecture
 
@@ -171,7 +159,7 @@ coordinator:
   admin_peers: ["alice", "a1b2c3d4e5f6g7h8"]  # Names or peer IDs (16 hex chars)
 ```
 
-See [Admin Guide](docs/ADMIN.md) for complete details.
+See the [Admin Guide](https://read.tunnelmesh.io) for complete details.
 
 ## Configuration
 
@@ -330,7 +318,7 @@ tunnelmesh filter add --port 80 --protocol tcp --action allow
 tunnelmesh filter add --port 22 --action deny --source-peer badpeer
 ```
 
-See **[Internal Packet Filter Guide](docs/INTERNAL_PACKET_FILTER.md)** for full documentation including coordinator
+See the **[Internal Packet Filter Guide](https://read.tunnelmesh.io)** for full documentation including coordinator
 rules, metrics, and alerts.
 
 ### Config File Locations
@@ -488,11 +476,11 @@ sudo tunnelmesh service install
 sudo tunnelmesh service start
 ```
 
-See **[CLI Reference](docs/CLI.md)** for complete documentation, all flags, and walkthroughs.
+See the **[CLI Reference](https://read.tunnelmesh.io)** for complete documentation, all flags, and walkthroughs.
 
 ## Docker Deployment
 
-Run TunnelMesh in containers for development, testing, or production. The docker-compose setup includes **scalable coordinators** for testing chunk-level replication between multiple coordinator nodes. See the **[Docker Deployment Guide](docs/DOCKER.md)** for complete documentation.
+Run TunnelMesh in containers for development, testing, or production. The docker-compose setup includes **scalable coordinators** for testing chunk-level replication between multiple coordinator nodes. See the **[Docker Deployment Guide](https://read.tunnelmesh.io)** for complete documentation.
 
 ```bash
 cd docker
@@ -511,7 +499,7 @@ make docker-test                             # Run connectivity tests
 
 ## Cloud Deployment
 
-Deploy to DigitalOcean App Platform with Terraform. See the **[Cloud Deployment Guide](docs/CLOUD_DEPLOYMENT.md)** for
+Deploy to DigitalOcean App Platform with Terraform. See the **[Cloud Deployment Guide](https://read.tunnelmesh.io)** for
 complete documentation.
 
 ```bash
