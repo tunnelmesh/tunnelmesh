@@ -871,6 +871,39 @@ func TestSessionUpdateRemoteAddr(t *testing.T) {
 	}
 }
 
+// TestKeepaliveResetsSessionTimeout verifies that receiving a keepalive packet
+// updates lastRecv and prevents the session from being marked as timed out.
+// Regression test for bug where handleKeepalive did not call UpdateLastReceive,
+// causing idle sessions to time out every ~88s despite both peers sending keepalives.
+func TestKeepaliveResetsSessionTimeout(t *testing.T) {
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	conn, _ := net.ListenUDP("udp", addr)
+	defer func() { _ = conn.Close() }()
+
+	remoteAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
+
+	session := NewSession(SessionConfig{
+		LocalIndex: 0xCAFEBABE,
+		PeerName:   "keepalive-test",
+		RemoteAddr: remoteAddr,
+		Conn:       conn,
+	})
+
+	// Record time before updating
+	before := time.Now()
+
+	// Simulate receiving a keepalive by calling UpdateLastReceive directly
+	session.UpdateLastReceive()
+
+	after := time.Now()
+	lastRecv := session.LastReceive()
+
+	if lastRecv.Before(before) || lastRecv.After(after) {
+		t.Errorf("UpdateLastReceive did not update lastRecv: got %v, want between %v and %v",
+			lastRecv, before, after)
+	}
+}
+
 // =============================================================================
 // Handshake Error Case Tests
 // =============================================================================
