@@ -34,8 +34,8 @@ variable "admin_peers" {
 variable "peers" {
   description = <<-EOF
     Map of nodes to deploy. Each node can have:
-    - coordinator: bool - Run coordination server (only one node should have this)
-    - peer: bool - Run as mesh peer
+    - coordinator: bool - Run coordination server (multiple allowed for replication)
+    - peer: bool - Run as mesh peer (default: true, set false for coordinator-only)
     - region: string - Override default region
     - size: string - Override default droplet size
     - ssh_port: number - Override SSH tunnel port
@@ -53,13 +53,6 @@ variable "peers" {
     }
   }
 
-  validation {
-    condition = length([
-      for name, cfg in var.peers : name
-      if lookup(cfg, "coordinator", false)
-    ]) <= 1
-    error_message = "Only one node can have coordinator = true."
-  }
 }
 
 variable "external_coordinator_url" {

@@ -39,9 +39,9 @@ variable "coordinator_enabled" {
 }
 
 variable "peer_enabled" {
-  description = "Run as a mesh peer"
+  description = "Run as a mesh peer (default: true)"
   type        = bool
-  default     = false
+  default     = true
 }
 
 # --- Coordinator Settings ---

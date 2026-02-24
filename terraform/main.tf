@@ -57,8 +57,9 @@ data "digitalocean_ssh_key" "main" {
 locals {
   ssh_key_ids = var.ssh_key_name != "" ? [data.digitalocean_ssh_key.main[0].id] : []
 
-  # Find the coordinator node (there should be exactly one if any nodes need it)
-  coordinator_name = one([for name, cfg in var.peers : name if lookup(cfg, "coordinator", false)])
+  # Find a coordinator node for peer-only nodes to connect to (picks first alphabetically)
+  coordinator_names = [for name, cfg in var.peers : name if lookup(cfg, "coordinator", false)]
+  coordinator_name  = length(local.coordinator_names) > 0 ? local.coordinator_names[0] : null
   # External API on configurable port (port 443 reserved for mesh-internal admin)
   coordinator_url = local.coordinator_name != null ? "https://${local.coordinator_name}.${var.domain}:${var.external_api_port}" : var.external_coordinator_url
 
@@ -77,7 +78,7 @@ module "node" {
 
   # Feature flags from node config
   coordinator_enabled = lookup(each.value, "coordinator", false)
-  peer_enabled        = lookup(each.value, "peer", false)
+  peer_enabled        = lookup(each.value, "peer", true)
 
   # Coordinator settings
   locations_enabled = lookup(each.value, "locations_enabled", var.locations_enabled)
