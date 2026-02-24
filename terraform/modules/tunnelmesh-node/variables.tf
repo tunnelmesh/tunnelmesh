@@ -232,3 +232,9 @@ variable "prometheus_retention_days" {
   type        = number
   default     = 3
 }
+
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key for provisioners. Empty string uses SSH agent."
+  type        = string
+  default     = ""
+}

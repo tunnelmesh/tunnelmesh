@@ -8,6 +8,7 @@ mkdir -p /opt/monitoring/grafana/provisioning/datasources
 mkdir -p /opt/monitoring/grafana/provisioning/dashboards
 mkdir -p /opt/monitoring/grafana/dashboards
 mkdir -p /opt/monitoring/targets
+chown 65534:65534 /opt/monitoring/targets  # sd-generator runs as nobody (UID 65534)
 
 # Write prometheus config
 cat > /opt/monitoring/prometheus/prometheus.yml <<'PROMCONFIG'
@@ -231,31 +232,6 @@ limits_config:
   retention_period: ${loki_retention_days * 24}h
 LOKICONFIG
 
-# Download grafana provisioning files from repo
-echo "Downloading Grafana provisioning files..."
-curl -sL "https://raw.githubusercontent.com/${github_owner}/tunnelmesh/main/monitoring/grafana/provisioning/datasources/datasource.yml" \
-  -o /opt/monitoring/grafana/provisioning/datasources/datasource.yml
-curl -sL "https://raw.githubusercontent.com/${github_owner}/tunnelmesh/main/monitoring/grafana/provisioning/dashboards/dashboard.yml" \
-  -o /opt/monitoring/grafana/provisioning/dashboards/dashboard.yml
-
-# Download grafana dashboards via GitHub API
-echo "Downloading Grafana dashboards..."
-if [ -n "$GITHUB_TOKEN" ]; then
-  DASHBOARD_LIST=$(curl -sf -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
-else
-  DASHBOARD_LIST=$(curl -sf "https://api.github.com/repos/${github_owner}/tunnelmesh/contents/monitoring/grafana/dashboards")
-fi
-if echo "$DASHBOARD_LIST" | jq -e 'type == "array"' > /dev/null 2>&1; then
-  echo "$DASHBOARD_LIST" | jq -r '.[] | select(.name | endswith(".json")) | .download_url' | \
-    while read -r url; do
-      filename=$(basename "$url")
-      echo "  Downloading $filename"
-      curl -sL "$url" -o "/opt/monitoring/grafana/dashboards/$filename"
-    done
-else
-  echo "Warning: GitHub API did not return a valid dashboard list, skipping dashboard download"
-fi
-
 # Download SD generator binary from GitHub releases
 echo "Downloading TunnelMesh Prometheus SD Generator..."
 ARCH=$(dpkg --print-architecture)
@@ -344,7 +320,7 @@ services:
       - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
       - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Editor
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/tunnelmesh.json
     volumes:
       - /opt/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

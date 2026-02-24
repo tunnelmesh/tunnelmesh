@@ -105,6 +105,12 @@ variable "ssh_key_name" {
   default     = ""
 }
 
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key for Terraform provisioners (file/remote-exec). Uses SSH agent if empty."
+  type        = string
+  default     = ""
+}
+
 variable "github_owner" {
   description = "GitHub owner for downloading tunnelmesh binary"
   type        = string

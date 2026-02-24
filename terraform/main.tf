@@ -41,6 +41,10 @@ terraform {
       source  = "digitalocean/digitalocean"
       version = "~> 2.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -122,6 +126,7 @@ module "node" {
   monitoring_enabled        = lookup(each.value, "coordinator", false) && lookup(each.value, "monitoring_enabled", var.monitoring_enabled)
   prometheus_retention_days = var.prometheus_retention_days
   loki_retention_days       = var.loki_retention_days
+  ssh_private_key_path      = var.ssh_private_key_path
 
   tags = concat(
     ["tunnelmesh"],
