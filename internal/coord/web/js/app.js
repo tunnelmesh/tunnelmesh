@@ -610,9 +610,7 @@ async function checkLokiAvailable() {
         const testResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/resources/loki/api/v1/labels`);
         if (testResp.ok) {
             state.lokiEnabled = true;
-            if (!TM.panel || TM.panel.canView('logs')) {
-                document.getElementById('logs-section').style.display = 'block';
-            }
+            document.getElementById('logs-section').style.display = 'block';
             updateLokiExploreLink();
             fetchLogs();
             setInterval(fetchLogs, POLL_INTERVAL_MS);
@@ -644,19 +642,24 @@ function updateLokiExploreLink() {
 }
 
 async function fetchLogs() {
-    if (!state.lokiEnabled || !state.lokiDatasourceUid) return;
+    if (!state.lokiEnabled || !state.lokiDatasourceId) return;
 
     try {
         const peerCount = Math.max(state.currentPeers.length, 1);
         const limit = 25 * peerCount;
-        const now = Date.now() * 1000000; // nanoseconds
-        const oneHourAgo = now - 3600 * 1000000000;
+        // Use seconds for start/end — Loki query_range accepts Unix seconds
+        const nowSec = Math.floor(Date.now() / 1000);
+        const oneHourAgoSec = nowSec - 3600;
 
         const query = encodeURIComponent('{job="tunnelmesh"}');
-        const url = `/grafana/api/datasources/uid/${state.lokiDatasourceUid}/resources/loki/api/v1/query_range?query=${query}&start=${oneHourAgo}&end=${now}&limit=${limit}&direction=backward`;
+        // Use the numeric-ID proxy path which is more reliably supported across Grafana versions
+        const url = `/grafana/api/datasources/proxy/${state.lokiDatasourceId}/loki/api/v1/query_range?query=${query}&start=${oneHourAgoSec}&end=${nowSec}&limit=${limit}&direction=backward`;
 
         const resp = await fetch(url);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+            console.error('Loki query_range failed:', resp.status, await resp.text().catch(() => ''));
+            return;
+        }
 
         const data = await resp.json();
         displayLogs(data);
@@ -1221,13 +1224,6 @@ function registerBuiltinPanels() {
             collapsible: true,
             resizable: true,
             sortOrder: 50,
-            // Loki availability controls section visibility — keep hidden until confirmed
-            onShow: () => {
-                if (!state.lokiEnabled) {
-                    const section = document.getElementById('logs-section');
-                    if (section) section.style.display = 'none';
-                }
-            },
         },
         {
             id: 'filter',
