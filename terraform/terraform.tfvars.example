@@ -10,6 +10,11 @@
 #   export TF_VAR_do_token="dop_v1_xxx"
 # Get yours at: https://cloud.digitalocean.com/account/api/tokens
 
+# ZeroSSL EAB credentials (avoids Let's Encrypt rate limits on repeated deploys)
+# Get these at: https://app.zerossl.com/developer > ACME Credentials
+zerossl_eab_kid      = ""
+zerossl_eab_hmac_key = ""
+
 # Your domain name (must be managed in DigitalOcean DNS)
 domain = "example.com"
 
@@ -175,10 +180,6 @@ peers = {
 # Email for SSL certificate notifications
 # ssl_email = "admin@example.com"
 
-# ZeroSSL EAB credentials (replaces Let's Encrypt to avoid rate limits)
-# Get these at: https://app.zerossl.com/developer > ACME Credentials
-# zerossl_eab_kid      = "xxxxxxxxxxxxxxxxxxxxxxxx"
-# zerossl_eab_hmac_key = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # Enable node location tracking (requires external IP geolocation API)
 # WARNING: When enabled, the coordinator will query ip-api.com to geolocate nodes
