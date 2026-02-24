@@ -118,9 +118,23 @@ variable "binary_version" {
 }
 
 variable "ssl_email" {
-  description = "Email for Let's Encrypt notifications"
+  description = "Email for SSL certificate notifications"
   type        = string
   default     = ""
+}
+
+variable "zerossl_eab_kid" {
+  description = "ZeroSSL EAB Key ID (from app.zerossl.com > Developer > ACME Credentials). When set, ZeroSSL is used instead of Let's Encrypt."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "zerossl_eab_hmac_key" {
+  description = "ZeroSSL EAB HMAC Key (from app.zerossl.com > Developer > ACME Credentials)."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 variable "auto_update_enabled" {

@@ -69,7 +69,9 @@ locals {
     binary_version = var.binary_version
 
     # SSL settings
-    ssl_email = local.ssl_email
+    ssl_email            = local.ssl_email
+    zerossl_eab_kid      = var.zerossl_eab_kid
+    zerossl_eab_hmac_key = var.zerossl_eab_hmac_key
 
     # Auto-update settings
     auto_update_enabled  = var.auto_update_enabled
