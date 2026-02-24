@@ -39,6 +39,7 @@ locals {
     monitoring_enabled  = var.monitoring_enabled
 
     # Names and domains
+    reserved_ip   = digitalocean_reserved_ip.node.ip_address
     node_name     = var.name
     domain        = var.domain
 
