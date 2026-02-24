@@ -38,10 +38,6 @@ routing.
 For a complete step-by-step setup guide including downloading releases, configuring servers and peers, and installing as
 a system service, see the **[Documentation](https://read.tunnelmesh.io)**.
 
-## Documentation
-
-Full documentation is available at **[read.tunnelmesh.io](https://read.tunnelmesh.io)**.
-
 ## Architecture
 
 ```
