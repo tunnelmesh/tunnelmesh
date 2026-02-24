@@ -1,32 +1,38 @@
 :root {
-    /* Core colors */
-    --color-bg-primary: #0d1117;
-    --color-bg-secondary: #161b22;
-    --color-bg-tertiary: #21262d;
-    --color-border-primary: #30363d;
-    --color-border-secondary: #21262d;
+    /* Core colors — website-derived navy palette */
+    --color-bg-primary: #080c18;
+    --color-bg-secondary: #0e1222;
+    --color-bg-tertiary: #161e30;
+    --color-border-primary: #1e2d45;
+    --color-border-secondary: #0e1222;
 
-    /* Text colors */
-    --color-text-primary: #e6edf3;
-    --color-text-secondary: #8b949e;
+    /* Text colors — website-derived */
+    --color-text-primary: #e8eaf0;
+    --color-text-secondary: rgb(232 234 240 / 0.58);
 
-    /* Accent colors */
-    --color-accent-blue: #58a6ff;
+    /* Accent — website teal replaces GitHub blue */
+    --color-accent: #00d4b4;
+    --color-accent-blue: #00d4b4;
     --color-accent-green: #3fb950;
     --color-accent-red: #f85149;
     --color-accent-orange: #d29922;
 
-    /* Button colors */
-    --color-btn-primary: #238636;
-    --color-btn-primary-hover: #2ea043;
+    /* Semantic vars used by progress bar */
+    --color-danger: #f85149;
+    --color-warning: #d29922;
+    --color-success: #3fb950;
+
+    /* Button colors — teal primary instead of GitHub green */
+    --color-btn-primary: #008a78;
+    --color-btn-primary-hover: #00a896;
     --color-btn-danger: #f85149;
 
-    /* Focus ring */
-    --color-focus-ring: rgb(88 166 255 / 0.3);
+    /* Focus ring — teal */
+    --color-focus-ring: rgb(0 212 180 / 0.3);
 
-    /* Card hover state (matches network topology nodes) */
-    --color-card-hover-bg: #2d333b;
-    --color-card-hover-border: #58a6ff;
+    /* Card hover — teal tint */
+    --color-card-hover-bg: rgb(0 212 180 / 0.06);
+    --color-card-hover-border: #00d4b4;
 
     /* Design tokens - unified styling */
     --panel-border-radius: 0px;
@@ -37,10 +43,10 @@
     /* Visualizer colors - for canvas/D3 use */
     --viz-peer-online: #3fb950;
     --viz-peer-offline: #f85149;
-    --viz-peer-coordinator: #58a6ff;
-    --viz-edge-online: rgb(88 166 255 / 0.4);
+    --viz-peer-coordinator: #00d4b4;
+    --viz-edge-online: rgb(0 212 180 / 0.4);
     --viz-edge-offline: rgb(248 81 73 / 0.3);
-    --viz-label-text: #e6edf3;
+    --viz-label-text: #e8eaf0;
 
     /* Font stacks */
     --font-mono: ui-monospace, sfmono-regular, 'SF Mono', menlo, consolas, 'Courier New', monospace;
@@ -141,7 +147,7 @@ body {
 }
 
 header {
-    background: #1e252e;
+    background: var(--color-bg-secondary);
     padding: 1rem 2rem;
     border-bottom: 1px solid var(--color-border-primary);
     display: flex;
@@ -1517,6 +1523,40 @@ a.logs-container {
    S3 Explorer Styles (GitHub-style single-pane file browser)
    ========================================================================= */
 
+/* Volume capacity bar */
+#s3-volume-bar {
+    padding: 6px 1rem;
+    border-bottom: 1px solid var(--color-border-primary);
+    background: var(--color-bg-secondary);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.s3-volume-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+}
+
+.s3-volume-track {
+    flex: 1;
+    height: 6px;
+    background: var(--color-bg-tertiary);
+    border: 1px solid var(--color-border-primary);
+}
+
+.s3-volume-fill {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.s3-volume-detail {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+}
+
 /* Navigation bar with breadcrumb */
 .s3-nav {
     display: flex;
@@ -1704,16 +1744,7 @@ a.logs-container {
 }
 
 .s3-fullscreen .s3-content {
-    height: calc(100vh - 90px) !important;
-}
-
-.s3-fullscreen .section-toggle {
-    pointer-events: none;
-    cursor: default;
-}
-
-.s3-fullscreen .section-toggle::after {
-    display: none;
+    height: calc(100vh - 44px) !important;
 }
 
 /* Resizable content container */
