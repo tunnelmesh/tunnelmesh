@@ -61,9 +61,12 @@ loki:
 
 COORDCONF
 
-# Write auth token to service environment file (auth_token cannot be stored in YAML)
+# Write auth token (and server URL for secondary coordinators) to service environment file
 mkdir -p /etc/sysconfig
 echo "TUNNELMESH_TOKEN=${auth_token}" > /etc/sysconfig/tunnelmesh-server
+%{ if peer_server != "" ~}
+echo "TUNNELMESH_SERVER=${peer_server}" >> /etc/sysconfig/tunnelmesh-server
+%{ endif ~}
 chmod 600 /etc/sysconfig/tunnelmesh-server
 
 # Install coordinator service (serve mode)
