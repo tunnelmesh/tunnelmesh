@@ -11,10 +11,11 @@ terraform {
 }
 
 locals {
-  # Server URL for peer mode
-  # If coordinator is also enabled, peer connects to localhost
-  # Otherwise, use the provided peer_server_url
-  peer_server = var.coordinator_enabled ? "http://127.0.0.1:${var.coordinator_port}" : var.peer_server_url
+  # Server URL for peer mode:
+  # - Primary coordinator (coordinator_enabled=true, peer_server_url=""): join localhost to bootstrap
+  # - Secondary coordinators (coordinator_enabled=true, peer_server_url set): join the primary coordinator
+  # - Pure peers (coordinator_enabled=false): join the provided coordinator URL
+  peer_server = (var.coordinator_enabled && var.peer_server_url == "") ? "http://127.0.0.1:${var.coordinator_port}" : var.peer_server_url
 
   # Determine which services to run
   run_coordinator = var.coordinator_enabled
