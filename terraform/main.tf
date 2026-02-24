@@ -84,10 +84,11 @@ module "node" {
   locations_enabled = lookup(each.value, "locations_enabled", var.locations_enabled)
   external_api_port = var.external_api_port
 
-  # Peer server URL (for non-coordinator nodes)
-  # If this node is the coordinator, it connects to localhost
-  # Otherwise, connect to the coordinator node or external URL
-  peer_server_url = lookup(each.value, "coordinator", false) ? "" : local.coordinator_url
+  # Peer server URL:
+  # - Pure peer nodes: join the primary coordinator
+  # - Primary coordinator (first alphabetically): empty = bootstrap the mesh
+  # - Secondary coordinators: join the primary coordinator to replicate
+  peer_server_url = (lookup(each.value, "coordinator", false) && each.key == local.coordinator_name) ? "" : local.coordinator_url
 
   # Exit node settings
   exit_node          = lookup(each.value, "exit_node", "")
