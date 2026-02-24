@@ -10,7 +10,7 @@ const { createSparklineSVG } = TM.table;
 const { createModalController } = TM.modal;
 
 // Panel refresh lists - defines which panels to refresh for each tab
-const _PANELS_MESH_TAB = ['peers', 'wg-clients', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
+const _PANELS_MESH_TAB = ['peers', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
 const PANELS_APP_TAB = ['s3', 'shares', 'docker']; // App tab panels
 const PANELS_DATA_TAB = ['peers-mgmt', 'groups', 'bindings', 'dns']; // Data tab panels
 
@@ -44,9 +44,6 @@ const events = TM.events;
 // Dashboard state - track history per peer
 const state = {
     peerHistory: {}, // { peerName: { throughputTx: [], throughputRx: [], packetsTx: [], packetsRx: [] } }
-    wgClients: [],
-    wgEnabled: false,
-    currentWGConfig: null,
     eventSource: null, // Store EventSource for cleanup
     selectedNodeId: null, // Centralized selection state
     // Visualizer state
@@ -58,7 +55,6 @@ const state = {
     // Pagination state
     peersVisibleCount: ROWS_PER_PAGE,
     dnsVisibleCount: ROWS_PER_PAGE,
-    wgVisibleCount: ROWS_PER_PAGE,
     peersMgmtVisibleCount: ROWS_PER_PAGE,
     groupsVisibleCount: ROWS_PER_PAGE,
     sharesVisibleCount: ROWS_PER_PAGE,
@@ -90,12 +86,6 @@ function initDOMCache() {
     // DNS table elements
     dom.dnsBody = document.getElementById('dns-body');
     dom.noDns = document.getElementById('no-dns');
-
-    // WireGuard elements
-    dom.wgClientsBody = document.getElementById('wg-clients-body');
-    dom.noWgClients = document.getElementById('no-wg-clients');
-    dom.addWgClientBtn = document.getElementById('add-wg-client-btn');
-    dom.wgModal = document.getElementById('wg-modal');
 
     // Filter elements
     dom.filterSection = document.getElementById('filter-section');
@@ -266,7 +256,6 @@ function updateDashboard(data) {
     // Update visualizer with peer data
     if (state.visualizer) {
         state.visualizer.setDomainSuffix(state.domainSuffix);
-        // TODO: Detect which peer is the WG concentrator (for now, null)
         state.visualizer.syncNodes(data.peers, null);
         state.visualizer.render();
     }
@@ -365,16 +354,6 @@ const dnsPagination = createPaginationController({
     onRender: () => renderDnsTable(),
 });
 
-const wgPagination = createPaginationController({
-    pageSize: ROWS_PER_PAGE,
-    getItems: () => state.wgClients,
-    getVisibleCount: () => state.wgVisibleCount,
-    setVisibleCount: (n) => {
-        state.wgVisibleCount = n;
-    },
-    onRender: () => updateWGClientsTable(),
-});
-
 const peersMgmtPagination = createPaginationController({
     pageSize: ROWS_PER_PAGE,
     getItems: () => state.currentPeersMgmt,
@@ -439,8 +418,6 @@ window.showMorePeers = () => peersPagination.showMore();
 window.showLessPeers = () => peersPagination.showLess();
 window.showMoreDns = () => dnsPagination.showMore();
 window.showLessDns = () => dnsPagination.showLess();
-window.showMoreWg = () => wgPagination.showMore();
-window.showLessWg = () => wgPagination.showLess();
 window.showMorePeersMgmt = () => peersMgmtPagination.showMore();
 window.showLessPeersMgmt = () => peersMgmtPagination.showLess();
 window.showMoreGroups = () => groupsPagination.showMore();
@@ -449,16 +426,8 @@ window.showMoreShares = () => sharesPagination.showMore();
 window.showLessShares = () => sharesPagination.showLess();
 window.showMoreBindings = () => bindingsPagination.showMore();
 window.showLessBindings = () => bindingsPagination.showLess();
-window.showLessWg = () => wgPagination.showLess();
 
 // Modal controllers (initialized with element IDs, resolved lazily)
-const wgModal = createModalController('wg-modal', {
-    onClose: () => {
-        state.currentWGConfig = null;
-        fetchWGClients();
-    },
-});
-
 const filterModal = createModalController('filter-modal', {
     onClose: () => {
         // Clear form
@@ -600,56 +569,6 @@ function renderDnsTable() {
         document.getElementById('dns-show-less').style.display = dnsUIState.canShowLess ? 'inline' : 'none';
         document.getElementById('dns-shown-count').textContent = dnsUIState.shown;
         document.getElementById('dns-total-count').textContent = dnsUIState.total;
-    }
-}
-
-// WireGuard Client Management
-
-async function checkWireGuardStatus() {
-    try {
-        const resp = await fetch('/api/wireguard/clients');
-        document.getElementById('wireguard-section').style.display = 'block';
-
-        if (resp.ok) {
-            state.wgEnabled = true;
-            state.wgConcentratorConnected = true;
-            const data = await resp.json();
-            state.wgClients = data.clients || [];
-            updateWGClientsTable();
-        } else if (resp.status === 503) {
-            // WireGuard enabled but no concentrator connected
-            state.wgEnabled = true;
-            state.wgConcentratorConnected = false;
-            state.wgClients = [];
-            updateWGClientsTable();
-        } else {
-            // WireGuard not enabled (404 or other error)
-            document.getElementById('wireguard-section').style.display = 'none';
-            state.wgEnabled = false;
-        }
-    } catch (_err) {
-        // WireGuard not enabled or network error
-        state.wgEnabled = false;
-    }
-}
-
-async function fetchWGClients() {
-    if (!state.wgEnabled) return;
-
-    try {
-        const resp = await fetch('/api/wireguard/clients');
-        if (resp.ok) {
-            state.wgConcentratorConnected = true;
-            const data = await resp.json();
-            state.wgClients = data.clients || [];
-            updateWGClientsTable();
-        } else if (resp.status === 503) {
-            state.wgConcentratorConnected = false;
-            state.wgClients = [];
-            updateWGClientsTable();
-        }
-    } catch (err) {
-        console.error('Failed to fetch WG clients:', err);
     }
 }
 
@@ -891,190 +810,6 @@ function updateAlertTiles(counts) {
         }
     }
 }
-
-function updateWGClientsTable() {
-    // Check if concentrator is connected
-    if (!state.wgConcentratorConnected) {
-        if (dom.wgClientsBody) dom.wgClientsBody.innerHTML = '';
-        if (dom.noWgClients) {
-            dom.noWgClients.textContent =
-                'No WireGuard concentrator connected. Start a mesh peer with --wireguard flag.';
-            dom.noWgClients.style.display = 'block';
-        }
-        document.getElementById('wg-pagination').style.display = 'none';
-        if (dom.addWgClientBtn) dom.addWgClientBtn.disabled = true;
-        return;
-    }
-
-    if (dom.addWgClientBtn) dom.addWgClientBtn.disabled = false;
-
-    if (state.wgClients.length === 0) {
-        if (dom.wgClientsBody) dom.wgClientsBody.innerHTML = '';
-        if (dom.noWgClients) {
-            dom.noWgClients.textContent = 'No WireGuard peers yet. Add a peer to generate a QR code.';
-            dom.noWgClients.style.display = 'block';
-        }
-        document.getElementById('wg-pagination').style.display = 'none';
-        return;
-    }
-
-    if (dom.noWgClients) dom.noWgClients.style.display = 'none';
-    const visibleClients = wgPagination.getVisibleItems();
-    if (!dom.wgClientsBody) return;
-    dom.wgClientsBody.innerHTML = visibleClients
-        .map((client) => {
-            const statusClass = client.enabled ? 'online' : 'offline';
-            const statusText = client.enabled ? 'Enabled' : 'Disabled';
-            const lastSeen = client.last_seen ? formatLastSeen(client.last_seen) : 'Never';
-
-            return `
-            <tr>
-                <td><strong>${escapeHtml(client.name)}</strong></td>
-                <td><code>${client.mesh_ip}</code></td>
-                <td><code>${escapeHtml(client.dns_name)}.tunnelmesh</code></td>
-                <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-                <td>${lastSeen}</td>
-                <td class="actions-cell">
-                    <button class="btn-icon" onclick="toggleWGClient('${client.id}', ${!client.enabled})" title="${client.enabled ? 'Disable' : 'Enable'}">
-                        ${client.enabled ? '⏸' : '▶'}
-                    </button>
-                    <button class="btn-danger" onclick="deleteWGClient('${client.id}', '${escapeHtml(client.name)}')">Delete</button>
-                </td>
-            </tr>
-        `;
-        })
-        .join('');
-
-    // Update pagination UI using controller state
-    const wgUIState = wgPagination.getUIState();
-    const wgPaginationEl = document.getElementById('wg-pagination');
-    if (wgPaginationEl) {
-        wgPaginationEl.style.display = wgUIState.isEmpty ? 'none' : 'flex';
-        document.getElementById('wg-show-more').style.display = wgUIState.hasMore ? 'inline' : 'none';
-        document.getElementById('wg-show-less').style.display = wgUIState.canShowLess ? 'inline' : 'none';
-        document.getElementById('wg-shown-count').textContent = wgUIState.shown;
-        document.getElementById('wg-total-count').textContent = wgUIState.total;
-    }
-}
-
-function showAddWGClientModal() {
-    if (!state.wgConcentratorConnected) {
-        return; // Don't open modal if no concentrator
-    }
-    document.getElementById('wg-modal-title').textContent = 'Add WireGuard Peer';
-    document.getElementById('wg-add-form').style.display = 'block';
-    document.getElementById('wg-config-display').style.display = 'none';
-    document.getElementById('wg-client-name').value = '';
-    wgModal.open();
-}
-
-function closeWGModal() {
-    wgModal.close();
-}
-window.closeWGModal = closeWGModal;
-
-async function _createWGClient() {
-    const nameInput = document.getElementById('wg-client-name');
-    const name = nameInput.value.trim();
-
-    if (!name) {
-        showToast('Please enter a client name', 'warning');
-        return;
-    }
-
-    try {
-        const resp = await fetch('/api/wireguard/clients', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
-        });
-
-        if (!resp.ok) {
-            const err = await resp.json();
-            showToast(`Failed to create client: ${err.message || 'Unknown error'}`, 'error');
-            return;
-        }
-
-        const data = await resp.json();
-        state.currentWGConfig = data;
-
-        // Show the config
-        document.getElementById('wg-modal-title').textContent = 'Client Created';
-        document.getElementById('wg-add-form').style.display = 'none';
-        document.getElementById('wg-config-display').style.display = 'block';
-
-        document.getElementById('wg-qr-image').src = data.qr_code || '';
-        document.getElementById('wg-created-name').textContent = data.client.name;
-        document.getElementById('wg-created-ip').textContent = data.client.mesh_ip;
-        document.getElementById('wg-created-dns').textContent = `${data.client.dns_name}.tunnelmesh`;
-        document.getElementById('wg-config-text').value = data.config;
-    } catch (err) {
-        console.error('Failed to create WG client:', err);
-        showToast('Failed to create client', 'error');
-    }
-}
-window.createWGClient = _createWGClient;
-
-function _downloadWGConfig() {
-    if (!state.currentWGConfig) return;
-
-    const config = state.currentWGConfig.config;
-    const name = state.currentWGConfig.client.dns_name || 'wireguard';
-    const blob = new Blob([config], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${name}.conf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-window.downloadWGConfig = _downloadWGConfig;
-
-async function _toggleWGClient(id, enabled) {
-    try {
-        const resp = await fetch(`/api/wireguard/clients/${id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled }),
-        });
-
-        if (!resp.ok) {
-            showToast('Failed to update client', 'error');
-            return;
-        }
-
-        fetchWGClients();
-    } catch (err) {
-        console.error('Failed to toggle WG client:', err);
-        showToast('Failed to update client', 'error');
-    }
-}
-window.toggleWGClient = _toggleWGClient;
-
-async function _deleteWGClient(id, name) {
-    if (!confirm(`Delete WireGuard peer "${name}"?`)) {
-        return;
-    }
-
-    try {
-        const resp = await fetch(`/api/wireguard/clients/${id}`, {
-            method: 'DELETE',
-        });
-
-        if (!resp.ok) {
-            showToast('Failed to delete client', 'error');
-            return;
-        }
-
-        fetchWGClients();
-    } catch (err) {
-        console.error('Failed to delete WG client:', err);
-        showToast('Failed to delete client', 'error');
-    }
-}
-window.deleteWGClient = _deleteWGClient;
 
 // ============= PACKET FILTER FUNCTIONS =============
 
@@ -1484,15 +1219,6 @@ function registerBuiltinPanels() {
             sortOrder: 50,
         },
         {
-            id: 'wireguard',
-            sectionId: 'wireguard-section',
-            tab: 'mesh',
-            title: 'WireGuard Peers',
-            category: 'network',
-            hasActionButton: true,
-            sortOrder: 60,
-        },
-        {
             id: 'filter',
             sectionId: 'filter-section',
             tab: 'mesh',
@@ -1618,10 +1344,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initial data fetch
     fetchData();
 
-    // Check if WireGuard is enabled and setup handlers
-    checkWireGuardStatus();
-    setInterval(fetchWGClients, POLL_INTERVAL_MS);
-
     // Check if Prometheus is available for alerts
     checkPrometheusAvailable();
 
@@ -1631,18 +1353,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load peer management (peers, groups, shares)
     checkPeerManagement();
 
-    // Add client button handler
-    if (dom.addWgClientBtn) {
-        dom.addWgClientBtn.addEventListener('click', showAddWGClientModal);
-    }
-
     // Add filter rule button handler
     if (dom.addFilterRuleBtn) {
         dom.addFilterRuleBtn.addEventListener('click', openFilterModal);
     }
 
     // Setup modal background click handlers
-    wgModal.setupBackgroundClose();
     filterModal.setupBackgroundClose();
 
     // Setup background click for group modal
@@ -2106,7 +1822,6 @@ function initRefreshCoordinator() {
 
     // Register all panel refresh functions
     TM.refresh.register('peers', () => fetchData(false));
-    TM.refresh.register('wg-clients', fetchWGClients);
     TM.refresh.register('logs', fetchLogs);
     TM.refresh.register('alerts', fetchAlerts);
     TM.refresh.register('filter', loadFilterRules);

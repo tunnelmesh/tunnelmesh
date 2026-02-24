@@ -169,14 +169,6 @@ groups:
           summary: "No TunnelMesh peers responding"
           description: "Cannot reach any TunnelMesh peer metrics - possible complete network outage"
 
-      - alert: TunnelMeshWireGuardDown
-        expr: tunnelmesh_wireguard_enabled == 1 and tunnelmesh_wireguard_device_running == 0
-        for: 1m
-        labels:
-          severity: page
-        annotations:
-          summary: "WireGuard concentrator device down"
-          description: "WireGuard is enabled but the device is not running"
 ALERTS
 
 # Write loki config (retention expressed in hours)

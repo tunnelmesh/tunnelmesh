@@ -46,12 +46,6 @@ output "coordinator_api_url" {
   value       = var.coordinator_enabled ? (var.ssl_enabled ? "https://${var.name}.${var.domain}" : "http://${digitalocean_reserved_ip.node.ip_address}:${var.coordinator_port}") : null
 }
 
-# WireGuard-specific outputs
-output "wireguard_endpoint" {
-  description = "WireGuard endpoint for clients (only for peer nodes running concentrator)"
-  value       = var.wireguard_enabled && var.peer_enabled ? "${var.name}.${var.domain}:${var.wg_listen_port}" : null
-}
-
 # Peer-specific outputs
 output "peer_name" {
   description = "The mesh peer name"

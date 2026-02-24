@@ -336,34 +336,6 @@
             </div>
         </section>
 
-        <section id="wireguard-section" data-tab="mesh" style="display: none;">
-            <div class="section-header section-toggle" onclick="toggleSection(this)">
-                <h2>WireGuard</h2>
-                <button id="add-wg-client-btn" class="btn-primary" onclick="event.stopPropagation()">+ Add Peer</button>
-            </div>
-            <div class="collapsible-content">
-                <table id="wireguard-clients">
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Mesh IP</th>
-                            <th>DNS Name</th>
-                            <th>Status</th>
-                            <th>Last Seen</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="wg-clients-body"></tbody>
-                </table>
-                <div id="no-wg-clients" class="empty-state" style="display: none;">
-                    No WireGuard peers yet. Add a peer to generate a QR code.
-                </div>
-                <div id="wg-pagination" class="show-more-container" style="display: none;">
-                    <span id="wg-show-more"><button class="show-more-link" onclick="showMoreWg()">show more (<span id="wg-shown-count">0</span> / <span id="wg-total-count">0</span>)</button></span><span id="wg-show-less" style="display: none;"><span class="show-more-separator">|</span><button class="show-more-link" onclick="showLessWg()">show less</button></span>
-                </div>
-            </div>
-        </section>
-
         <section id="filter-section" data-tab="mesh" style="display: none;">
             <div class="section-header section-toggle" onclick="toggleSection(this)">
                 <h2>Filter</h2>
@@ -683,47 +655,6 @@
                         <small class="form-hint">When disabled, access is controlled via RBAC bindings</small>
                     </div>
                     <button class="btn-primary" onclick="createShare()">Create Share</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- WireGuard Peer Modal -->
-        <div id="wg-modal" class="modal" style="display: none;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h3 id="wg-modal-title">Add WireGuard Peer</h3>
-                    <button class="modal-close" onclick="closeWGModal()">&times;</button>
-                </div>
-                <div class="modal-body">
-                    <!-- Add Peer Form -->
-                    <div id="wg-add-form">
-                        <div class="form-group">
-                            <label for="wg-client-name">Peer Name</label>
-                            <input type="text" id="wg-client-name" placeholder="e.g., iPhone, Laptop">
-                        </div>
-                        <button id="wg-create-btn" class="btn-primary" onclick="createWGClient()">Create Peer</button>
-                    </div>
-                    <!-- Client Config Display -->
-                    <div id="wg-config-display" style="display: none;">
-                        <div class="config-grid">
-                            <div class="qr-code">
-                                <img id="wg-qr-image" alt="WireGuard QR Code">
-                            </div>
-                            <div class="config-details">
-                                <p><strong>Name:</strong> <span id="wg-created-name"></span></p>
-                                <p><strong>Mesh IP:</strong> <span id="wg-created-ip"></span></p>
-                                <p><strong>DNS:</strong> <span id="wg-created-dns"></span></p>
-                                <button class="btn-secondary" onclick="downloadWGConfig()">Download .conf</button>
-                            </div>
-                        </div>
-                        <div class="warning-box">
-                            <strong>Important:</strong> Save this configuration now. The private key cannot be retrieved later.
-                        </div>
-                        <div class="config-textarea">
-                            <label>Configuration File:</label>
-                            <textarea id="wg-config-text" readonly rows="12"></textarea>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>

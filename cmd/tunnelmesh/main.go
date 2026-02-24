@@ -39,7 +39,6 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/metrics"
 	"github.com/tunnelmesh/tunnelmesh/internal/netmon"
 	"github.com/tunnelmesh/tunnelmesh/internal/peer"
-	peerwg "github.com/tunnelmesh/tunnelmesh/internal/peer/wireguard"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
 	"github.com/tunnelmesh/tunnelmesh/internal/svc"
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
@@ -61,9 +60,6 @@ var (
 var (
 	cfgFile  string
 	logLevel string
-
-	// WireGuard concentrator flag
-	wireguardEnabled bool
 
 	// Geolocation flags
 	latitude  float64
@@ -165,7 +161,6 @@ Auth token must be set via TUNNELMESH_TOKEN environment variable.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runJoin,
 	}
-	joinCmd.Flags().BoolVar(&wireguardEnabled, "wireguard", false, "enable WireGuard concentrator mode")
 	joinCmd.Flags().Float64Var(&latitude, "latitude", 0, "manual geolocation latitude (-90 to 90)")
 	joinCmd.Flags().Float64Var(&longitude, "longitude", 0, "manual geolocation longitude (-180 to 180)")
 	joinCmd.Flags().StringVar(&city, "city", "", "city name for manual geolocation (shown in admin UI)")
@@ -678,9 +673,6 @@ func runJoin(cmd *cobra.Command, args []string) error {
 		cfg.AuthToken = envToken
 	}
 
-	if wireguardEnabled {
-		cfg.WireGuard.Enabled = true
-	}
 	if latitude != 0 || longitude != 0 {
 		cfg.Geolocation.Latitude = latitude
 		cfg.Geolocation.Longitude = longitude
@@ -1532,133 +1524,6 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		})
 	}
 
-	// Initialize WireGuard concentrator if enabled
-	var wgConcentrator *peerwg.Concentrator
-	var wgRouter *peerwg.Router
-	var wgStore *peerwg.ClientStore
-	var wgAPIHandler *peerwg.APIHandler
-	if cfg.WireGuard.Enabled {
-		// Set default data dir if not specified
-		dataDir := cfg.WireGuard.DataDir
-		if dataDir == "" {
-			homeDir, _ := os.UserHomeDir()
-			dataDir = filepath.Join(homeDir, ".tunnelmesh", "wireguard")
-		}
-
-		// Create persistent client store
-		var err error
-		wgStore, err = peerwg.NewClientStore(resp.MeshCIDR, dataDir)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to create WireGuard client store")
-		} else {
-			wgCfg := &peerwg.ConcentratorConfig{
-				ServerURL:    cfg.PrimaryServer(),
-				AuthToken:    cfg.AuthToken,
-				ListenPort:   cfg.WireGuard.ListenPort,
-				DataDir:      dataDir,
-				SyncInterval: 30 * time.Second, // Not used for syncing from server anymore
-				MeshCIDR:     resp.MeshCIDR,
-			}
-
-			wgConcentrator, err = peerwg.NewConcentrator(wgCfg)
-			if err != nil {
-				log.Error().Err(err).Msg("failed to create WireGuard concentrator")
-			} else {
-				// Create WG router for packet routing decisions
-				wgRouter = peerwg.NewRouter(resp.MeshCIDR)
-
-				// Create API handler for proxied requests
-				wgAPIHandler = peerwg.NewAPIHandler(
-					wgStore,
-					wgConcentrator.PublicKey(),
-					cfg.WireGuard.Endpoint,
-					resp.MeshCIDR,
-					resp.Domain,
-				)
-
-				// Set up relay to handle API requests if relay is connected
-				if node.PersistentRelay != nil {
-					node.PersistentRelay.SetAPIRequestHandler(func(reqID uint32, method string, body []byte) {
-						response := wgAPIHandler.HandleRequest(method, body)
-						if err := node.PersistentRelay.SendAPIResponse(reqID, response); err != nil {
-							log.Error().Err(err).Uint32("req_id", reqID).Msg("failed to send API response")
-						}
-					})
-
-					// Announce as WireGuard concentrator
-					if err := node.PersistentRelay.AnnounceWGConcentrator(); err != nil {
-						log.Error().Err(err).Msg("failed to announce as WireGuard concentrator")
-					}
-				}
-
-				// Load initial clients from store and update router
-				clients := wgStore.List()
-				wgClients := make([]peerwg.Client, len(clients))
-				for i, c := range clients {
-					wgClients[i] = peerwg.Client{
-						ID:        c.ID,
-						Name:      c.Name,
-						PublicKey: c.PublicKey,
-						MeshIP:    c.MeshIP,
-						DNSName:   c.DNSName,
-						Enabled:   c.Enabled,
-						CreatedAt: c.CreatedAt,
-						LastSeen:  c.LastSeen,
-					}
-				}
-				wgRouter.UpdateClients(wgClients)
-
-				log.Info().
-					Int("port", cfg.WireGuard.ListenPort).
-					Str("public_key", wgConcentrator.PublicKey()).
-					Int("clients", len(clients)).
-					Msg("WireGuard concentrator initialized")
-
-				// Start the WireGuard device if TUN is available
-				if tunDev != nil {
-					// Calculate concentrator's WG interface address
-					// Use .1 in the first WG client subnet (e.g., 10.42.100.1/16)
-					_, meshNet, _ := net.ParseCIDR(resp.MeshCIDR)
-					baseIP := meshNet.IP.To4()
-					wgAddr := fmt.Sprintf("%d.%d.100.1/16", baseIP[0], baseIP[1])
-
-					if err := wgConcentrator.StartDevice("wg-mesh", wgAddr); err != nil {
-						log.Error().Err(err).Msg("failed to start WireGuard device")
-					} else {
-						// Create packet handler for bidirectional forwarding
-						wgPacketHandler := peerwg.NewPacketHandler(wgRouter, wgConcentrator)
-						forwarder.SetWGHandler(wgPacketHandler)
-
-						// Set up callback for packets from WG clients to mesh
-						wgConcentrator.SetOnPacketFromWG(func(packet []byte) {
-							if err := forwarder.ForwardPacket(packet); err != nil {
-								log.Debug().Err(err).Msg("failed to forward WG packet to mesh")
-							}
-						})
-
-						// Set up callback for API handler to update WG device when clients change
-						wgAPIHandler.SetOnClientsChanged(func(clients []peerwg.Client) {
-							// Update router
-							wgRouter.UpdateClients(clients)
-
-							// Update concentrator (which updates the WG device)
-							if err := wgConcentrator.UpdateClients(clients); err != nil {
-								log.Error().Err(err).Msg("failed to update WireGuard clients")
-							} else {
-								log.Info().Int("clients", len(clients)).Msg("WireGuard clients updated")
-							}
-						})
-
-						log.Info().Str("address", wgAddr).Msg("WireGuard device started and integrated with forwarder")
-					}
-				}
-			}
-		}
-	}
-
-	// Suppress unused - wgStore is used via wgAPIHandler
-	_ = wgStore
-
 	// Start DNS resolver if enabled
 	var dnsConfigured bool
 	// DNS is always enabled for all peers
@@ -1759,24 +1624,6 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		log.Info().Str("url", cfg.Loki.URL).Msg("Loki log shipping enabled")
 	}
 
-	// Create WireGuard metrics wrapper if enabled
-	var wgWrapper metrics.WGConcentrator
-	if wgConcentrator != nil {
-		wgWrapper = metrics.NewWGConcentratorWrapper(
-			wgConcentrator.IsDeviceRunning,
-			func() (total, enabled int) {
-				clients := wgConcentrator.Clients()
-				for _, c := range clients {
-					total++
-					if c.Enabled {
-						enabled++
-					}
-				}
-				return
-			},
-		)
-	}
-
 	// Create metrics collector
 	relayWrapper := metrics.NewRelayWrapper(node.PersistentRelay)
 	metricsCollector := metrics.NewCollector(peerMetrics, metrics.CollectorConfig{
@@ -1788,8 +1635,6 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		PeerLatencyProvider: node.LatencyProber,
 		Identity:            identity,
 		AllowsExit:          cfg.AllowExitTraffic,
-		WGEnabled:           cfg.WireGuard.Enabled,
-		WGConcentrator:      wgWrapper,
 		Filter:              filter,
 	})
 
@@ -1860,13 +1705,6 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	// Clean up system resolver
 	if dnsConfigured {
 		removeSystemResolver(resp.Domain, cfg.TUN.Name)
-	}
-
-	// Stop WireGuard device
-	if wgConcentrator != nil && wgConcentrator.IsDeviceRunning() {
-		if err := wgConcentrator.StopDevice(); err != nil {
-			log.Warn().Err(err).Msg("failed to stop WireGuard device")
-		}
 	}
 
 	// Close all connections via FSM (properly transitions states and triggers observers)

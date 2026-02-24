@@ -108,25 +108,6 @@ func TestSystemStoreSaveLoadBindings(t *testing.T) {
 	assert.Equal(t, "my-bucket", loaded[1].BucketScope)
 }
 
-func TestSystemStoreSaveLoadWireGuardClients(t *testing.T) {
-	store := newTestStoreWithCAS(t)
-	ss, err := NewSystemStore(store, "svc:coordinator")
-	require.NoError(t, err)
-
-	clients := []map[string]interface{}{
-		{"id": "client1", "name": "laptop", "ip": "10.42.100.1"},
-		{"id": "client2", "name": "phone", "ip": "10.42.100.2"},
-	}
-
-	err = ss.SaveWireGuardClients(context.Background(), clients)
-	require.NoError(t, err)
-
-	var loaded []map[string]interface{}
-	err = ss.LoadWireGuardClients(context.Background(), &loaded)
-	require.NoError(t, err)
-	require.Len(t, loaded, 2)
-}
-
 func TestSystemStoreExists(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	ss, err := NewSystemStore(store, "svc:coordinator")

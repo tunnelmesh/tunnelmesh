@@ -25,10 +25,8 @@ auth_token = ""
 # Per-node options:
 #   coordinator = true/false  # Run coordination server (max 1)
 #   peer        = true/false  # Run as mesh peer
-#   wireguard   = true/false  # Enable WireGuard concentrator
 #   region      = "ams3"      # Override default region
 #   size        = "s-1vcpu-1gb"  # Override droplet size
-#   wg_port     = 51820       # Override WireGuard port
 #   ssh_port    = 2222        # Override SSH tunnel port
 #   tags        = ["custom"]  # Additional tags
 #
@@ -52,45 +50,40 @@ peers = {
   "tunnelmesh" = {
     coordinator        = true
     peer               = true
-    wireguard          = true
     allow_exit_traffic = true  # Allow clients to route internet through this node
     # dns_aliases = ["coordinator", "main"]  # Additional DNS names for this node
     # location = { latitude = 52.37, longitude = 4.90, city = "Amsterdam", country = "NL" }
   }
 }
 
-# --- Example 2: Coordinator Peer (Exit Node) + Separate WireGuard Peer ---
+# --- Example 2: Coordinator Peer (Exit Node) + Additional Peer ---
 # peers = {
 #   "tunnelmesh" = {
 #     coordinator        = true
 #     peer               = true
 #     allow_exit_traffic = true
 #   }
-#   "tm-wg" = {
+#   "tm-peer" = {
 #     peer      = true
-#     wireguard = true
 #     exit_node = "tunnelmesh"  # Route internet through coordinator
 #   }
 # }
 
 # --- Example 3: Multi-Region Deployment ---
-# Coordinator in Amsterdam, WireGuard peers in multiple regions
+# Coordinator in Amsterdam, peers in multiple regions
 # peers = {
 #   "tunnelmesh" = {
 #     coordinator = true
 #     peer        = true
-#     wireguard   = true
 #     region      = "ams3"
 #   }
 #   "tm-us" = {
-#     peer      = true
-#     wireguard = true
-#     region    = "nyc3"
+#     peer   = true
+#     region = "nyc3"
 #   }
 #   "tm-asia" = {
-#     peer      = true
-#     wireguard = true
-#     region    = "sgp1"
+#     peer   = true
+#     region = "sgp1"
 #   }
 # }
 
@@ -101,7 +94,6 @@ peers = {
 #   "tunnelmesh" = {
 #     coordinator = true
 #     peer        = true
-#     wireguard   = true
 #     region      = "ams3"
 #   }
 #   # This node allows other peers to route their internet through it
@@ -126,7 +118,7 @@ peers = {
 # }
 
 # --- Example 5: High Availability Setup ---
-# Larger coordinator, multiple WireGuard entry points
+# Larger coordinator, multiple peer entry points
 # peers = {
 #   "tunnelmesh" = {
 #     coordinator = true
@@ -134,15 +126,13 @@ peers = {
 #     size        = "s-1vcpu-2gb"
 #     region      = "ams3"
 #   }
-#   "tm-wg-eu" = {
-#     peer      = true
-#     wireguard = true
-#     region    = "fra1"
+#   "tm-eu" = {
+#     peer   = true
+#     region = "fra1"
 #   }
-#   "tm-wg-us" = {
-#     peer      = true
-#     wireguard = true
-#     region    = "sfo3"
+#   "tm-us" = {
+#     peer   = true
+#     region = "sfo3"
 #   }
 # }
 
@@ -151,8 +141,7 @@ peers = {
 # external_coordinator_url = "https://tunnelmesh.example.com"
 # peers = {
 #   "tm-office" = {
-#     peer      = true
-#     wireguard = true
+#     peer = true
 #   }
 #   "tm-datacenter" = {
 #     peer = true
@@ -169,9 +158,6 @@ peers = {
 
 # Droplet size
 # default_droplet_size = "s-1vcpu-512mb-10gb"  # $4/mo
-
-# WireGuard UDP port
-# default_wg_port = 51820
 
 # SSH tunnel port for mesh connections
 # default_ssh_port = 2222

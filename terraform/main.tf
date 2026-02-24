@@ -6,18 +6,10 @@
 # Example configurations in terraform.tfvars:
 #
 # peers = {
-#   # All-in-one: coordinator + peer + wireguard
+#   # All-in-one: coordinator + peer
 #   "tunnelmesh" = {
 #     coordinator = true
 #     peer        = true
-#     wireguard   = true
-#   }
-#
-#   # Additional WireGuard peer in different region
-#   "tm-eu" = {
-#     peer      = true
-#     wireguard = true
-#     region    = "fra1"
 #   }
 #
 #   # Exit node in Asia (allows other peers to route internet traffic through it)
@@ -86,7 +78,6 @@ module "node" {
   # Feature flags from node config
   coordinator_enabled = lookup(each.value, "coordinator", false)
   peer_enabled        = lookup(each.value, "peer", false)
-  wireguard_enabled   = lookup(each.value, "wireguard", false)
 
   # Coordinator settings
   locations_enabled = lookup(each.value, "locations_enabled", var.locations_enabled)
@@ -105,10 +96,6 @@ module "node" {
   location_latitude  = try(each.value.location.latitude, null)
   location_longitude = try(each.value.location.longitude, null)
   location_city      = try(each.value.location.city, "")
-
-  # WireGuard settings
-  wg_listen_port = lookup(each.value, "wg_port", var.default_wg_port)
-  wg_endpoint    = lookup(each.value, "wireguard", false) ? "${each.key}.${var.domain}:${lookup(each.value, "wg_port", var.default_wg_port)}" : ""
 
   # Droplet settings
   droplet_size = lookup(each.value, "size", var.default_droplet_size)
@@ -136,7 +123,6 @@ module "node" {
     ["tunnelmesh"],
     lookup(each.value, "coordinator", false) ? ["coordinator"] : [],
     lookup(each.value, "peer", false) ? ["peer"] : [],
-    lookup(each.value, "wireguard", false) ? ["wireguard"] : [],
     lookup(each.value, "allow_exit_traffic", false) ? ["exit-node"] : [],
     try(each.value.tags, [])
   )

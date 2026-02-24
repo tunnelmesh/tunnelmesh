@@ -69,20 +69,6 @@ func (m *mockRelay) IsConnected() bool {
 	return m.connected
 }
 
-type mockWGConcentrator struct {
-	deviceRunning  bool
-	totalClients   int
-	enabledClients int
-}
-
-func (m *mockWGConcentrator) IsDeviceRunning() bool {
-	return m.deviceRunning
-}
-
-func (m *mockWGConcentrator) ClientCount() (total, enabled int) {
-	return m.totalClients, m.enabledClients
-}
-
 type mockFilter struct {
 	defaultDeny bool
 	counts      routing.RuleCounts
@@ -365,47 +351,6 @@ func TestCollector_CollectExitPeerStats(t *testing.T) {
 	}
 }
 
-func TestCollector_CollectWireGuardStats(t *testing.T) {
-	oldRegistry := Registry
-	Registry = prometheus.NewRegistry()
-	defer func() { Registry = oldRegistry }()
-
-	Registry.MustRegister(collectors.NewGoCollector())
-	Registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-
-	m := InitMetrics("test-peer", "10.42.0.1", "1.0.0")
-
-	wg := &mockWGConcentrator{
-		deviceRunning:  true,
-		totalClients:   10,
-		enabledClients: 8,
-	}
-
-	c := NewCollector(m, CollectorConfig{
-		WGEnabled:      true,
-		WGConcentrator: wg,
-	})
-
-	c.Collect()
-
-	mfs, _ := Registry.Gather()
-	expected := map[string]float64{
-		"tunnelmesh_wireguard_enabled":         1,
-		"tunnelmesh_wireguard_device_running":  1,
-		"tunnelmesh_wireguard_clients_total":   10,
-		"tunnelmesh_wireguard_clients_enabled": 8,
-	}
-
-	for _, mf := range mfs {
-		if exp, ok := expected[mf.GetName()]; ok {
-			val := mf.GetMetric()[0].GetGauge().GetValue()
-			if val != exp {
-				t.Errorf("%s: expected %f, got %f", mf.GetName(), exp, val)
-			}
-		}
-	}
-}
-
 func TestCollector_CollectGeolocationStats(t *testing.T) {
 	oldRegistry := Registry
 	Registry = prometheus.NewRegistry()
@@ -649,16 +594,10 @@ func TestCollector_NilComponents(t *testing.T) {
 	// Verify default values
 	mfs, _ := Registry.Gather()
 	for _, mf := range mfs {
-		switch mf.GetName() {
-		case "tunnelmesh_relay_connected":
+		if mf.GetName() == "tunnelmesh_relay_connected" {
 			val := mf.GetMetric()[0].GetGauge().GetValue()
 			if val != 0 {
 				t.Errorf("Expected relay_connected=0 with nil relay, got %f", val)
-			}
-		case "tunnelmesh_wireguard_enabled":
-			val := mf.GetMetric()[0].GetGauge().GetValue()
-			if val != 0 {
-				t.Errorf("Expected wireguard_enabled=0 with WGEnabled=false, got %f", val)
 			}
 		}
 	}
