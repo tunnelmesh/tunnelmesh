@@ -1751,9 +1751,15 @@ func (c *Connection) RemoteAddr() net.Addr {
 	return c.session.RemoteAddr()
 }
 
-// IsHealthy returns true if the UDP session is established and ready for data.
+// IsHealthy returns true if the UDP session is established and receiving keepalives.
 func (c *Connection) IsHealthy() bool {
-	return c.session.State() == SessionStateEstablished
+	if c.session.State() != SessionStateEstablished {
+		return false
+	}
+	// Session is healthy if keepalives (or data) have been received recently.
+	// Use the session timeout (75s) as the threshold — if we haven't heard
+	// anything in that long, the UDP session itself will time out.
+	return time.Since(c.session.LastReceive()) < 75*time.Second
 }
 
 // Listener accepts incoming UDP connections.
