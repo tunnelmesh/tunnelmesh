@@ -620,8 +620,11 @@ async function checkLokiAvailable() {
         state.lokiDatasourceId = dsInfo.id;
         state.lokiDatasourceUid = dsInfo.uid;
 
-        // Test query to verify Loki is responding (Grafana 9.5+ UID-based resources endpoint)
-        const testResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/resources/loki/api/v1/labels`);
+        // Test that Loki is responding via the Grafana datasource resources proxy.
+        // The Grafana Loki plugin allowlists paths WITHOUT the "loki/" prefix and
+        // prepends it itself: "api/v1/labels" → Loki /loki/api/v1/labels.
+        // Using "loki/api/v1/labels" fails the allowlist check → 404.
+        const testResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/resources/api/v1/labels`);
         if (testResp.ok) {
             state.lokiEnabled = true;
             document.getElementById('logs-section').style.display = 'block';
@@ -669,7 +672,7 @@ async function fetchLogs() {
         const oneHourAgoSec = nowSec - 3600;
 
         const query = encodeURIComponent('{job="tunnelmesh"}');
-        const url = `/grafana/api/datasources/uid/${state.lokiDatasourceUid}/resources/loki/api/v1/query_range?query=${query}&start=${oneHourAgoSec}&end=${nowSec}&limit=${limit}&direction=backward`;
+        const url = `/grafana/api/datasources/uid/${state.lokiDatasourceUid}/resources/api/v1/query_range?query=${query}&start=${oneHourAgoSec}&end=${nowSec}&limit=${limit}&direction=backward`;
 
         const resp = await fetch(url);
         if (!resp.ok) {
