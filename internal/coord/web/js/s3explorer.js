@@ -1036,7 +1036,6 @@
         const preview = document.getElementById('s3-preview');
         const empty = document.getElementById('s3-empty');
         const browseActions = document.getElementById('s3-browse-actions');
-        const fileActions = document.getElementById('s3-file-actions');
         const paginationEl = document.getElementById('s3-pagination');
 
         if (!tbody) return;
@@ -1045,9 +1044,6 @@
         if (viewer) viewer.style.display = 'none';
         if (preview) preview.style.display = 'none';
         if (browser) browser.style.display = 'block';
-        // Show browse actions (hide for read-only buckets), hide file actions
-        if (browseActions) browseActions.style.display = state.writable ? 'flex' : 'none';
-        if (fileActions) fileActions.style.display = 'none';
 
         // Clear current file
         state.currentFile = null;
@@ -1084,7 +1080,6 @@
                     <span>New Bucket</span>
                 `;
                 browseActions.insertBefore(newBucketBtn, browseActions.firstChild);
-                browseActions.style.display = 'flex';
             }
 
             state.buckets = buckets;
@@ -1293,6 +1288,8 @@
                 });
             }
         }
+
+        updateToolbar();
     }
 
     /* istanbul ignore next */
@@ -1389,9 +1386,6 @@
         const viewer = document.getElementById('s3-viewer');
         const preview = document.getElementById('s3-preview');
         const editor = document.getElementById('s3-editor');
-        const browseActions = document.getElementById('s3-browse-actions');
-        const selectionActions = document.getElementById('s3-selection-actions');
-        const fileActions = document.getElementById('s3-file-actions');
         const saveBtn = document.getElementById('s3-save-btn');
         const deleteBtn = document.getElementById('s3-delete-btn');
         const readonlyBadge = document.getElementById('s3-readonly-badge');
@@ -1418,10 +1412,8 @@
         state.currentFile = { bucket, key };
         state.isDirty = false;
 
-        // Hide browser, browse actions, and selection actions
+        // Hide browser, show viewer
         if (browser) browser.style.display = 'none';
-        if (browseActions) browseActions.style.display = 'none';
-        if (selectionActions) selectionActions.style.display = 'none';
 
         renderBreadcrumb();
 
@@ -1432,9 +1424,9 @@
                 preview.style.display = 'flex';
                 preview.innerHTML = `<img src="${contentBase}" alt="${escapeHtml(fileName)}">`;
             }
-            if (fileActions) fileActions.style.display = 'flex';
             if (saveBtn) saveBtn.style.display = isReadOnly ? 'none' : 'inline-flex';
             if (deleteBtn) deleteBtn.style.display = isReadOnly ? 'none' : 'inline-flex';
+            updateToolbar();
             return;
         }
 
@@ -1510,7 +1502,6 @@
 
             if (viewer) viewer.style.display = 'block';
             if (preview) preview.style.display = 'none';
-            if (fileActions) fileActions.style.display = 'flex';
             if (saveBtn) saveBtn.style.display = isReadOnly ? 'none' : 'inline-flex';
 
             // Update delete/undelete button
@@ -1601,9 +1592,7 @@
                 updateLineNumbers();
             }
 
-            updateModeToggleButton();
-            updateCloseButton();
-            updateViewToggleButton();
+            updateToolbar();
 
             // Focus editor at position 0 when in source mode
             if (state.editorMode === 'source' && editor && !isReadOnly) {
@@ -1631,22 +1620,10 @@
 
         state.currentFile = null;
         state.isDirty = false;
-        updateCloseButton();
-        updateViewToggleButton();
         renderFileListing();
 
         // Update browser history to reflect closed file
         updateBrowserHistory();
-    }
-
-    /**
-     * Update close button disabled state based on whether a file is open
-     */
-    function updateCloseButton() {
-        const closeBtn = document.getElementById('s3-close-btn');
-        if (closeBtn) {
-            closeBtn.disabled = !state.currentFile;
-        }
     }
 
     /* istanbul ignore next */
@@ -1933,6 +1910,61 @@
         }
     }
 
+    /**
+     * Central toolbar FSM — single source of truth for all toolbar visibility.
+     *
+     * States:
+     *   viewing   — a file is open (state.currentFile !== null)
+     *   selecting — browsing with ≥1 item selected
+     *   browsing  — browsing with no selection
+     *
+     * Call this after every state transition: navigate, open, close, toggle selection.
+     */
+    /* istanbul ignore next */
+    function updateToolbar() {
+        const browseActions = document.getElementById('s3-browse-actions');
+        const selectionActions = document.getElementById('s3-selection-actions');
+        const fileActions = document.getElementById('s3-file-actions');
+        const viewToggleBtn = document.getElementById('s3-view-toggle-btn');
+        const closeBtn = document.getElementById('s3-close-btn');
+        const renameBtn = document.getElementById('s3-rename-btn');
+        const countEl = document.getElementById('s3-selection-count');
+
+        const isViewing = state.currentFile !== null;
+        const selCount = state.selectedItems.size;
+
+        if (isViewing) {
+            // FILE state: show file actions only
+            if (browseActions) browseActions.style.display = 'none';
+            if (selectionActions) selectionActions.style.display = 'none';
+            if (fileActions) fileActions.style.display = 'flex';
+            if (viewToggleBtn) viewToggleBtn.style.display = 'none';
+        } else if (selCount > 0) {
+            // BROWSING + SELECTION state
+            if (browseActions) browseActions.style.display = 'none';
+            if (selectionActions) selectionActions.style.display = 'flex';
+            if (fileActions) fileActions.style.display = 'none';
+            if (viewToggleBtn) viewToggleBtn.style.display = 'inline-flex';
+            if (renameBtn) renameBtn.style.display = selCount === 1 ? 'inline-flex' : 'none';
+            if (countEl) countEl.textContent = `${selCount} selected`;
+        } else {
+            // BROWSING + NO SELECTION state
+            if (browseActions) browseActions.style.display = state.writable ? 'flex' : 'none';
+            if (selectionActions) selectionActions.style.display = 'none';
+            if (fileActions) fileActions.style.display = 'none';
+            if (viewToggleBtn) viewToggleBtn.style.display = 'inline-flex';
+        }
+
+        // Close button enabled only when a file is open
+        if (closeBtn) closeBtn.disabled = !state.currentFile;
+
+        // View toggle icon — only needs updating when browsing (hidden otherwise)
+        if (!isViewing) updateViewToggleButton();
+
+        // Mode toggle button — only relevant when viewing a file
+        updateModeToggleButton();
+    }
+
     /* istanbul ignore next */
     function updateSaveButton() {
         const saveBtn = document.getElementById('s3-save-btn');
@@ -2090,7 +2122,6 @@
         const bucketInfo = state.buckets.find((b) => b.name === bucket);
         state.writable = bucketInfo ? bucketInfo.writable : true;
 
-        updateCloseButton();
         await renderFileListing();
 
         // Update browser history (unless restoring from history)
@@ -2497,22 +2528,7 @@
 
     /* istanbul ignore next */
     function updateSelectionUI() {
-        const browseActions = document.getElementById('s3-browse-actions');
-        const selectionActions = document.getElementById('s3-selection-actions');
-        const renameBtn = document.getElementById('s3-rename-btn');
-        const countEl = document.getElementById('s3-selection-count');
-
-        const count = state.selectedItems.size;
-
-        if (count > 0) {
-            if (browseActions) browseActions.style.display = 'none';
-            if (selectionActions) selectionActions.style.display = 'flex';
-            if (renameBtn) renameBtn.style.display = count === 1 ? 'inline-flex' : 'none';
-            if (countEl) countEl.textContent = `${count} selected`;
-        } else {
-            if (browseActions) browseActions.style.display = 'flex';
-            if (selectionActions) selectionActions.style.display = 'none';
-        }
+        updateToolbar();
     }
 
     function updateRowSelectionVisuals() {
@@ -2823,8 +2839,7 @@
         initIconGridEvents();
         initDatasheetEvents();
         initTreeviewEvents();
-        updateViewToggleButton();
-        updateCloseButton();
+        updateToolbar();
 
         // Listen for browser back/forward navigation
         window.addEventListener('popstate', handlePopState);

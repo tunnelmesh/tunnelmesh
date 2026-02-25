@@ -40,6 +40,10 @@
     --modal-border-radius: 0px;
     --input-border-radius: 0px;
 
+    /* Docker action buttons - fixed square size for uniform appearance */
+    --docker-action-btn-size: 2.25rem;
+    --docker-action-btn-font-size: 0.875rem;
+
     /* Visualizer colors - for canvas/D3 use */
     --viz-peer-online: #3fb950;
     --viz-peer-offline: #f85149;
@@ -2658,6 +2662,29 @@ a.logs-container {
     gap: 0.5rem;
     justify-content: flex-end;
     margin-top: 1rem;
+}
+
+/* Docker action buttons - uniform square size driven by design tokens */
+.docker-action-btn {
+    width: var(--docker-action-btn-size);
+    height: var(--docker-action-btn-size);
+    min-width: var(--docker-action-btn-size);
+    padding: 0;
+    justify-content: center;
+    align-items: center;
+    font-size: var(--docker-action-btn-font-size);
+}
+
+/* Docker actions cell - vertically centred */
+#docker-containers td:last-child {
+    vertical-align: middle;
+}
+
+/* Flex wrapper inside the actions cell */
+.docker-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
 }
 
 /* Docker table - right-align status, ports, network columns */

@@ -262,29 +262,30 @@ function formatDockerNetwork(networkMode) {
 // Render action buttons for container
 function renderDockerActions(container) {
     const isRunning = container.state === 'running';
+    const id = escapeHtml(container.id);
 
-    if (isRunning) {
-        return `
-            <button class="btn btn-primary"
-                    onclick="dockerControlContainer('${escapeHtml(container.id)}', 'stop')"
-                    title="Stop container">
-                ⏸
-            </button>
-            <button class="btn btn-primary"
-                    onclick="dockerControlContainer('${escapeHtml(container.id)}', 'restart')"
-                    title="Restart container">
-                ↻
-            </button>
-        `;
-    } else {
-        return `
-            <button class="btn btn-primary"
-                    onclick="dockerControlContainer('${escapeHtml(container.id)}', 'start')"
-                    title="Start container">
+    return `
+        <div class="docker-actions">
+            <button class="btn btn-primary docker-action-btn"
+                    onclick="dockerControlContainer('${id}', 'start')"
+                    title="Start container"
+                    ${isRunning ? 'disabled' : ''}>
                 ▶
             </button>
-        `;
-    }
+            <button class="btn btn-primary docker-action-btn"
+                    onclick="dockerControlContainer('${id}', 'stop')"
+                    title="Stop container"
+                    ${!isRunning ? 'disabled' : ''}>
+                ⏸
+            </button>
+            <button class="btn btn-primary docker-action-btn"
+                    onclick="dockerControlContainer('${id}', 'restart')"
+                    title="Restart container"
+                    ${!isRunning ? 'disabled' : ''}>
+                ↻
+            </button>
+        </div>
+    `;
 }
 
 // Control container (start/stop/restart)
