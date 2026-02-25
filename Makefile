@@ -199,15 +199,10 @@ docker-build:
 	@docker system prune -f --filter "until=1h" >/dev/null 2>&1 || true
 
 docker-up: docker-build
-	@if [ ! -f /tmp/tunnelmesh-docker-token ]; then \
-		printf "%s" "$$(openssl rand -hex 32)" > /tmp/tunnelmesh-docker-token; \
-		chmod 600 /tmp/tunnelmesh-docker-token; \
-		echo "Generated new auth token (run 'make docker-down' to rotate)"; \
-	else \
-		echo "Reusing existing auth token (run 'make docker-down && make docker-up' to rotate)"; \
-	fi; \
-	TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token); \
-	echo "Auth token: $$TUNNELMESH_TOKEN"; \
+	@TUNNELMESH_TOKEN=$$(openssl rand -hex 32); \
+	echo "Generated auth token: $$TUNNELMESH_TOKEN"; \
+	printf "%s" "$$TUNNELMESH_TOKEN" > /tmp/tunnelmesh-docker-token; \
+	chmod 600 /tmp/tunnelmesh-docker-token; \
 	TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) up -d; \
 	echo "TunnelMesh Docker environment started"; \
 	echo "Use 'make docker-logs' to follow logs"; \
