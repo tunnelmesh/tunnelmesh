@@ -620,19 +620,20 @@ async function checkLokiAvailable() {
         state.lokiDatasourceId = dsInfo.id;
         state.lokiDatasourceUid = dsInfo.uid;
 
-        // Test that Loki is responding via the Grafana datasource resources proxy.
-        // The Grafana Loki plugin allowlists paths WITHOUT the "loki/" prefix and
-        // prepends it itself: "api/v1/labels" → Loki /loki/api/v1/labels.
-        // Using "loki/api/v1/labels" fails the allowlist check → 404.
-        const testResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/resources/api/v1/labels`);
-        if (testResp.ok) {
+        // Verify Loki is reachable via the datasource health endpoint.
+        // The /resources/ proxy is broken for Loki in Grafana 12; /health is reliable.
+        const healthResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/health`);
+        const healthData = healthResp.ok ? await healthResp.json() : null;
+        if (healthResp.ok && healthData?.status === 'OK') {
             state.lokiEnabled = true;
             document.getElementById('logs-section').style.display = 'block';
             updateLokiExploreLink();
             fetchLogs();
             setInterval(fetchLogs, POLL_INTERVAL_MS);
         } else {
-            console.warn(`Loki check: labels endpoint returned HTTP ${testResp.status} (Loki not ready?)`);
+            console.warn(
+                `Loki check: health endpoint returned HTTP ${healthResp.status} status=${healthData?.status} (Loki not ready?)`,
+            );
             lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
         }
     } catch (err) {
@@ -667,16 +668,31 @@ async function fetchLogs() {
     try {
         const peerCount = Math.max(state.currentPeers.length, 1);
         const limit = 25 * peerCount;
-        // Unix seconds — Loki query_range start/end use seconds, not nanoseconds
-        const nowSec = Math.floor(Date.now() / 1000);
-        const oneHourAgoSec = nowSec - 3600;
+        const now = Date.now(); // ms
+        const oneHourAgo = now - 3600000; // ms
 
-        const query = encodeURIComponent('{job="tunnelmesh"}');
-        const url = `/grafana/api/datasources/uid/${state.lokiDatasourceUid}/resources/api/v1/query_range?query=${query}&start=${oneHourAgoSec}&end=${nowSec}&limit=${limit}&direction=backward`;
-
-        const resp = await fetch(url);
+        // Use Grafana's unified query endpoint — the /resources/ proxy is broken
+        // for Loki in Grafana 12. Response is in DataFrame format.
+        const resp = await fetch('/grafana/api/ds/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                queries: [
+                    {
+                        refId: 'A',
+                        expr: '{job="tunnelmesh"}',
+                        queryType: 'range',
+                        maxLines: limit,
+                        direction: 'backward',
+                        datasource: { uid: state.lokiDatasourceUid, type: 'loki' },
+                    },
+                ],
+                from: String(oneHourAgo),
+                to: String(now),
+            }),
+        });
         if (!resp.ok) {
-            console.error('Loki query_range failed:', resp.status, await resp.text().catch(() => ''));
+            console.error('Loki ds/query failed:', resp.status, await resp.text().catch(() => ''));
             return;
         }
 
@@ -692,17 +708,27 @@ function displayLogs(data) {
     const noLogs = document.getElementById('no-logs');
     if (!logsContent) return;
 
-    const streams = data.data?.result || [];
+    // Parse Grafana DataFrame format returned by /api/ds/query.
+    // Each frame is one log stream; fields are: labels(0), Time(1), Line(2), tsNs(3)...
+    const frames = data.results?.A?.frames || [];
     const allEntries = [];
 
-    // Collect all log entries from all streams
-    for (const stream of streams) {
-        const labels = stream.stream || {};
-        for (const [timestamp, line] of stream.values || []) {
+    for (const frame of frames) {
+        const fields = frame.schema?.fields || [];
+        const values = frame.data?.values || [];
+        const timeIdx = fields.findIndex((f) => f.name === 'Time');
+        const lineIdx = fields.findIndex((f) => f.name === 'Line');
+        const labelsIdx = fields.findIndex((f) => f.name === 'labels');
+        if (timeIdx === -1 || lineIdx === -1) continue;
+
+        const times = values[timeIdx] || [];
+        const lines = values[lineIdx] || [];
+        const labelsList = labelsIdx >= 0 ? values[labelsIdx] : [];
+        for (let i = 0; i < lines.length; i++) {
             allEntries.push({
-                timestamp: parseInt(timestamp, 10) / 1000000, // Convert to milliseconds
-                line,
-                labels,
+                timestamp: times[i], // already in ms
+                line: lines[i],
+                labels: labelsList[i] || {},
             });
         }
     }
