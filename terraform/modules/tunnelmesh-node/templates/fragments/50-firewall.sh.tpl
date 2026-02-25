@@ -9,11 +9,11 @@ ufw allow ${ssh_tunnel_port + 1}/udp comment 'TunnelMesh UDP'
 %{ if coordinator_enabled ~}
 ufw allow 80/tcp comment 'HTTP'
 ufw allow ${external_api_port}/tcp comment 'HTTPS API'
+%{ endif ~}
 %{ if peer_enabled ~}
 # tun-mesh traffic is authenticated by Noise protocol — mesh packet filter
 # handles per-service access control, no OS-level port filtering needed here
 ufw allow in on tun-mesh comment 'Mesh (Noise-authenticated)'
-%{ endif ~}
 %{ endif ~}
 
 ufw --force enable

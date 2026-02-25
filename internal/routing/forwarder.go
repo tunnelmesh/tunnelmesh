@@ -815,6 +815,13 @@ func (f *Forwarder) Run(ctx context.Context) error {
 	}
 }
 
+// healthChecker is an optional interface for tunnels that can report liveness.
+// UDP connections implement this so the forwarder can distinguish idle (but
+// keepalive-alive) tunnels from truly dead ones.
+type healthChecker interface {
+	IsHealthy() bool
+}
+
 // HandleTunnel reads packets from a tunnel and writes them to the TUN device.
 func (f *Forwarder) HandleTunnel(ctx context.Context, peerName string, tunnel io.ReadWriteCloser) {
 	log.Info().Str("peer", peerName).Msg("handling tunnel")
@@ -830,6 +837,7 @@ func (f *Forwarder) HandleTunnel(ctx context.Context, peerName string, tunnel io
 	}
 	resultCh := make(chan readResult, 1)
 
+outerLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -843,34 +851,44 @@ func (f *Forwarder) HandleTunnel(ctx context.Context, peerName string, tunnel io
 			resultCh <- readResult{n, err}
 		}()
 
-		// Wait for read result with timeout
-		select {
-		case <-ctx.Done():
-			return
+		// Inner wait loop – re-arms the timeout when the tunnel is still healthy
+		// (keepalives are flowing) so idle UDP tunnels are not torn down.
+		for {
+			select {
+			case <-ctx.Done():
+				return
 
-		case <-time.After(TunnelReadTimeout):
-			// No data received within timeout - tunnel is stale
-			log.Warn().Str("peer", peerName).Dur("timeout", TunnelReadTimeout).Msg("tunnel read timeout, closing")
-			f.triggerDeadTunnel(peerName)
-			return
-
-		case result := <-resultCh:
-			if result.err != nil {
-				if ctx.Err() != nil {
-					return
+			case <-time.After(TunnelReadTimeout):
+				// No data frame received within timeout window.
+				// Check whether keepalives prove the tunnel is still alive.
+				if hc, ok := tunnel.(healthChecker); ok && hc.IsHealthy() {
+					// Transport is healthy – just no data. Reset timer and keep waiting.
+					continue
 				}
-				if errors.Is(result.err, io.EOF) {
-					log.Info().Str("peer", peerName).Msg("tunnel closed")
-					return
-				}
-				log.Error().Err(result.err).Str("peer", peerName).Msg("tunnel read error")
+				log.Warn().Str("peer", peerName).Dur("timeout", TunnelReadTimeout).Msg("tunnel read timeout, closing")
 				f.triggerDeadTunnel(peerName)
 				return
-			}
 
-			// Write to TUN with peer context for per-peer filtering
-			if err := f.ReceivePacketFromPeer(buf.Data()[:result.n], peerName); err != nil {
-				log.Debug().Err(err).Msg("receive packet failed")
+			case result := <-resultCh:
+				if result.err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					if errors.Is(result.err, io.EOF) {
+						log.Info().Str("peer", peerName).Msg("tunnel closed")
+						return
+					}
+					log.Error().Err(result.err).Str("peer", peerName).Msg("tunnel read error")
+					f.triggerDeadTunnel(peerName)
+					return
+				}
+
+				// Write to TUN with peer context for per-peer filtering
+				if err := f.ReceivePacketFromPeer(buf.Data()[:result.n], peerName); err != nil {
+					log.Debug().Err(err).Msg("receive packet failed")
+				}
+				// Data frame processed – break inner loop and spawn next read.
+				continue outerLoop
 			}
 		}
 	}
