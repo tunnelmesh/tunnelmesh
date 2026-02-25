@@ -263,7 +263,7 @@ services:
   # The restart: true ensures they restart when coord-1 restarts/recreates.
   # Monitoring stack is centralized on coord-1 but can scrape metrics from all coordinators.
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.9.1
     container_name: tunnelmesh-prometheus
     # Share coord-1's network namespace to access mesh IPs via TUN
     network_mode: "service:coord-1"
@@ -321,7 +321,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.3.3
     container_name: tunnelmesh-grafana
     # Share coord-1's network namespace
     network_mode: "service:coord-1"
@@ -357,7 +357,7 @@ services:
     restart: unless-stopped
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.6.7
     container_name: tunnelmesh-loki
     # Share coord-1's network namespace to receive logs from mesh peers
     network_mode: "service:coord-1"
