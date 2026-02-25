@@ -10,7 +10,7 @@ const { createSparklineSVG } = TM.table;
 const { createModalController } = TM.modal;
 
 // Panel refresh lists - defines which panels to refresh for each tab
-const _PANELS_MESH_TAB = ['peers', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
+const PANELS_MESH_TAB = ['peers', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
 const PANELS_APP_TAB = ['s3', 'shares', 'docker']; // App tab panels
 const PANELS_DATA_TAB = ['peers-mgmt', 'groups', 'bindings', 'dns']; // Data tab panels
 
@@ -594,30 +594,51 @@ async function checkPrometheusAvailable() {
 }
 
 // Loki logs
+let lokiRetryTimer = null;
 async function checkLokiAvailable() {
+    // If already enabled, just refresh logs instead of re-checking
+    if (state.lokiEnabled) {
+        fetchLogs();
+        return;
+    }
+
+    // Cancel any pending retry; we're running the check right now
+    if (lokiRetryTimer) {
+        clearTimeout(lokiRetryTimer);
+        lokiRetryTimer = null;
+    }
+
     try {
         // First get the Loki datasource info from Grafana
         const dsResp = await fetch('/grafana/api/datasources/name/Loki');
         if (!dsResp.ok) {
-            console.debug('Loki datasource not found');
+            console.warn(`Loki check: datasource API returned HTTP ${dsResp.status} (Grafana not ready?)`);
+            lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
             return;
         }
         const dsInfo = await dsResp.json();
         state.lokiDatasourceId = dsInfo.id;
         state.lokiDatasourceUid = dsInfo.uid;
 
-        // Test query to verify Loki is responding (Grafana 9.5+ UID-based resources endpoint)
-        const testResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/resources/loki/api/v1/labels`);
-        if (testResp.ok) {
+        // Verify Loki is reachable via the datasource health endpoint.
+        // The /resources/ proxy is broken for Loki in Grafana 12; /health is reliable.
+        const healthResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/health`);
+        const healthData = healthResp.ok ? await healthResp.json() : null;
+        if (healthResp.ok && healthData?.status === 'OK') {
             state.lokiEnabled = true;
             document.getElementById('logs-section').style.display = 'block';
             updateLokiExploreLink();
             fetchLogs();
             setInterval(fetchLogs, POLL_INTERVAL_MS);
+        } else {
+            console.warn(
+                `Loki check: health endpoint returned HTTP ${healthResp.status} status=${healthData?.status} (Loki not ready?)`,
+            );
+            lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
         }
     } catch (err) {
-        console.debug('Loki not available:', err.message);
-        state.lokiEnabled = false;
+        console.warn('Loki check failed:', err.message);
+        lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
     }
 }
 
@@ -647,14 +668,33 @@ async function fetchLogs() {
     try {
         const peerCount = Math.max(state.currentPeers.length, 1);
         const limit = 25 * peerCount;
-        const now = Date.now() * 1000000; // nanoseconds
-        const oneHourAgo = now - 3600 * 1000000000;
+        const now = Date.now(); // ms
+        const oneHourAgo = now - 3600000; // ms
 
-        const query = encodeURIComponent('{job="tunnelmesh"}');
-        const url = `/grafana/api/datasources/uid/${state.lokiDatasourceUid}/resources/loki/api/v1/query_range?query=${query}&start=${oneHourAgo}&end=${now}&limit=${limit}&direction=backward`;
-
-        const resp = await fetch(url);
-        if (!resp.ok) return;
+        // Use Grafana's unified query endpoint — the /resources/ proxy is broken
+        // for Loki in Grafana 12. Response is in DataFrame format.
+        const resp = await fetch('/grafana/api/ds/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                queries: [
+                    {
+                        refId: 'A',
+                        expr: '{job="tunnelmesh"}',
+                        queryType: 'range',
+                        maxLines: limit,
+                        direction: 'backward',
+                        datasource: { uid: state.lokiDatasourceUid, type: 'loki' },
+                    },
+                ],
+                from: String(oneHourAgo),
+                to: String(now),
+            }),
+        });
+        if (!resp.ok) {
+            console.error('Loki ds/query failed:', resp.status, await resp.text().catch(() => ''));
+            return;
+        }
 
         const data = await resp.json();
         displayLogs(data);
@@ -668,17 +708,27 @@ function displayLogs(data) {
     const noLogs = document.getElementById('no-logs');
     if (!logsContent) return;
 
-    const streams = data.data?.result || [];
+    // Parse Grafana DataFrame format returned by /api/ds/query.
+    // Each frame is one log stream; fields are: labels(0), Time(1), Line(2), tsNs(3)...
+    const frames = data.results?.A?.frames || [];
     const allEntries = [];
 
-    // Collect all log entries from all streams
-    for (const stream of streams) {
-        const labels = stream.stream || {};
-        for (const [timestamp, line] of stream.values || []) {
+    for (const frame of frames) {
+        const fields = frame.schema?.fields || [];
+        const values = frame.data?.values || [];
+        const timeIdx = fields.findIndex((f) => f.name === 'Time');
+        const lineIdx = fields.findIndex((f) => f.name === 'Line');
+        const labelsIdx = fields.findIndex((f) => f.name === 'labels');
+        if (timeIdx === -1 || lineIdx === -1) continue;
+
+        const times = values[timeIdx] || [];
+        const lines = values[lineIdx] || [];
+        const labelsList = labelsIdx >= 0 ? values[labelsIdx] : [];
+        for (let i = 0; i < lines.length; i++) {
             allEntries.push({
-                timestamp: parseInt(timestamp, 10) / 1000000, // Convert to milliseconds
-                line,
-                labels,
+                timestamp: times[i], // already in ms
+                line: lines[i],
+                labels: labelsList[i] || {},
             });
         }
     }
@@ -1387,6 +1437,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
+    // Setup background click for manage groups modal
+    const manageGroupsModal = document.getElementById('manage-groups-modal');
+    if (manageGroupsModal) {
+        manageGroupsModal.addEventListener('click', (e) => {
+            if (e.target === manageGroupsModal) closeManageGroupsModal();
+        });
+    }
+
     // Panel resize handles
     if (dom.logsResizeHandle && dom.logsContainer) {
         initPanelResize(dom.logsResizeHandle, dom.logsContainer);
@@ -1421,8 +1479,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else if (tabName === 'data') {
             TM.refresh.triggerMultiple(PANELS_DATA_TAB, { cascade: false });
         } else if (tabName === 'mesh') {
-            // Mesh tab panels are updated via SSE/polling from fetchData(true) called above
-            // No explicit refresh trigger needed here
+            TM.refresh.triggerMultiple(PANELS_MESH_TAB, { cascade: false });
         }
     }
 });
@@ -1533,18 +1590,20 @@ function renderPeersMgmtTable() {
     noPeers.style.display = 'none';
     const visiblePeers = peersMgmtPagination.getVisibleItems();
     tbody.innerHTML = visiblePeers
-        .map(
-            (p) => `
+        .map((p) => {
+            const groups = (p.groups || []).filter((g) => g !== 'everyone');
+            const groupsDisplay = groups.length > 0 ? groups.map((g) => escapeHtml(g)).join(', ') : '-';
+            return `
         <tr>
             <td>${escapeHtml(p.name || '-')}</td>
-            <td><span class="status-badge ${p.is_service ? 'service' : 'user'}">${p.is_service ? 'Service' : 'Peer'}</span></td>
-            <td>${p.groups && p.groups.length > 0 ? p.groups.map((g) => escapeHtml(g)).join(', ') : '-'}</td>
+            <td>${groupsDisplay}</td>
             <td>${p.last_seen ? formatLastSeen(p.last_seen) : '-'}</td>
             <td>${p.is_service ? 'Never' : p.expires_at ? formatExpiry(p.expires_at) : '-'}</td>
             <td><span class="status-badge ${p.expired ? 'expired' : 'active'}">${p.expired ? 'Expired' : 'Active'}</span></td>
+            <td><button class="btn-small btn-primary" onclick="openManageGroupsModal('${escapeHtml(p.id)}')">Groups</button></td>
         </tr>
-    `,
-        )
+    `;
+        })
         .join('');
 
     updateSectionPagination('peers-mgmt', peersMgmtPagination);
@@ -1668,6 +1727,99 @@ async function deleteGroup(name) {
     }
 }
 window.deleteGroup = deleteGroup;
+
+// =====================
+// Peer Group Management
+// =====================
+
+let _managingPeer = null; // { id, name, groups }
+
+function openManageGroupsModal(peerId) {
+    const peer = state.currentPeersMgmt.find((p) => p.id === peerId);
+    if (!peer) return;
+    _managingPeer = { id: peer.id, name: peer.name, groups: [...(peer.groups || [])] };
+    document.getElementById('manage-groups-title').textContent = `Groups — ${peer.name}`;
+    _renderManageGroupsList();
+    _populateManageGroupsDropdown();
+    document.getElementById('manage-groups-modal').style.display = 'flex';
+}
+window.openManageGroupsModal = openManageGroupsModal;
+
+function closeManageGroupsModal() {
+    document.getElementById('manage-groups-modal').style.display = 'none';
+    _managingPeer = null;
+}
+window.closeManageGroupsModal = closeManageGroupsModal;
+
+function _renderManageGroupsList() {
+    const el = document.getElementById('manage-groups-list');
+    const groups = _managingPeer.groups || [];
+    if (groups.length === 0) {
+        el.innerHTML = '<p class="text-muted manage-groups-empty">No groups.</p>';
+        return;
+    }
+    const builtinNames = new Set((state.currentGroups || []).filter((g) => g.builtin).map((g) => g.name));
+    el.innerHTML = groups
+        .map((g) => {
+            const isBuiltin = builtinNames.has(g);
+            return `<div class="manage-group-row">
+            <span>${escapeHtml(g)}</span>
+            ${isBuiltin ? '<span class="text-muted manage-group-builtin">built-in</span>' : `<button class="btn-small btn-danger" onclick="removePeerFromGroup('${escapeHtml(g)}')">Remove</button>`}
+        </div>`;
+        })
+        .join('');
+}
+
+function _populateManageGroupsDropdown() {
+    const select = document.getElementById('manage-groups-select');
+    const current = new Set(_managingPeer.groups || []);
+    const available = (state.currentGroups || []).filter((g) => !current.has(g.name) && !g.builtin);
+    select.innerHTML =
+        available.length === 0
+            ? '<option value="">No groups available</option>'
+            : available.map((g) => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`).join('');
+}
+
+async function removePeerFromGroup(groupName) {
+    if (!_managingPeer) return;
+    try {
+        const resp = await fetch(
+            `/api/groups/${encodeURIComponent(groupName)}/members/${encodeURIComponent(_managingPeer.id)}`,
+            { method: 'DELETE' },
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        _managingPeer.groups = _managingPeer.groups.filter((g) => g !== groupName);
+        _renderManageGroupsList();
+        _populateManageGroupsDropdown();
+        TM.refresh.trigger('peers-mgmt');
+        showToast(`Removed from "${groupName}"`, 'success');
+    } catch (err) {
+        showToast(`Failed to remove from group: ${err.message}`, 'error');
+    }
+}
+window.removePeerFromGroup = removePeerFromGroup;
+
+async function addPeerToSelectedGroup() {
+    if (!_managingPeer) return;
+    const groupName = document.getElementById('manage-groups-select').value;
+    if (!groupName) return;
+    try {
+        const resp = await fetch(`/api/groups/${encodeURIComponent(groupName)}/members`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: _managingPeer.id }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        _managingPeer.groups.push(groupName);
+        _renderManageGroupsList();
+        _populateManageGroupsDropdown();
+        TM.refresh.trigger('peers-mgmt');
+        showToast(`Added to "${groupName}"`, 'success');
+    } catch (err) {
+        showToast(`Failed to add to group: ${err.message}`, 'error');
+    }
+}
+window.addPeerToSelectedGroup = addPeerToSelectedGroup;
 
 async function fetchShares() {
     try {
@@ -1824,7 +1976,7 @@ function initRefreshCoordinator() {
 
     // Register all panel refresh functions
     TM.refresh.register('peers', () => fetchData(false));
-    TM.refresh.register('logs', fetchLogs);
+    TM.refresh.register('logs', checkLokiAvailable);
     TM.refresh.register('alerts', fetchAlerts);
     TM.refresh.register('filter', loadFilterRules);
     TM.refresh.register('peers-mgmt', fetchPeersMgmt);
@@ -1934,9 +2086,12 @@ function switchTab(tabName, options = {}) {
 
     // Handle tab-specific initialization
     if (tabName === 'mesh') {
+        // Refresh mesh-tab panels (peers/logs/alerts/filter) on tab switch.
+        // 'logs' calls checkLokiAvailable which retries if Grafana wasn't ready on page load.
+        if (TM.refresh) {
+            TM.refresh.triggerMultiple(PANELS_MESH_TAB, { cascade: false });
+        }
         // Defer visualizer and map resize until after DOM updates to get correct dimensions
-        // Note: Mesh panels (peers, logs, filter, etc.) are updated via SSE/polling
-        // from fetchData(), not via refresh coordinator
         requestAnimationFrame(() => {
             if (state.visualizer) {
                 state.visualizer.resize();
