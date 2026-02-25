@@ -265,12 +265,12 @@ function renderDockerActions(container) {
 
     if (isRunning) {
         return `
-            <button class="btn-icon"
+            <button class="btn btn-primary"
                     onclick="dockerControlContainer('${escapeHtml(container.id)}', 'stop')"
                     title="Stop container">
                 ⏸
             </button>
-            <button class="btn-icon"
+            <button class="btn btn-primary"
                     onclick="dockerControlContainer('${escapeHtml(container.id)}', 'restart')"
                     title="Restart container">
                 ↻
@@ -278,7 +278,7 @@ function renderDockerActions(container) {
         `;
     } else {
         return `
-            <button class="btn-icon"
+            <button class="btn btn-primary"
                     onclick="dockerControlContainer('${escapeHtml(container.id)}', 'start')"
                     title="Start container">
                 ▶

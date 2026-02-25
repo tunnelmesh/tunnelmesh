@@ -595,6 +595,12 @@ async function checkPrometheusAvailable() {
 
 // Loki logs
 async function checkLokiAvailable() {
+    // If already enabled, just refresh logs instead of re-checking
+    if (state.lokiEnabled) {
+        fetchLogs();
+        return;
+    }
+
     try {
         // First get the Loki datasource info from Grafana
         const dsResp = await fetch('/grafana/api/datasources/name/Loki');
@@ -617,7 +623,6 @@ async function checkLokiAvailable() {
         }
     } catch (err) {
         console.debug('Loki not available:', err.message);
-        state.lokiEnabled = false;
     }
 }
 
@@ -1931,7 +1936,7 @@ function initRefreshCoordinator() {
 
     // Register all panel refresh functions
     TM.refresh.register('peers', () => fetchData(false));
-    TM.refresh.register('logs', fetchLogs);
+    TM.refresh.register('logs', checkLokiAvailable);
     TM.refresh.register('alerts', fetchAlerts);
     TM.refresh.register('filter', loadFilterRules);
     TM.refresh.register('peers-mgmt', fetchPeersMgmt);
