@@ -10,7 +10,7 @@ const { createSparklineSVG } = TM.table;
 const { createModalController } = TM.modal;
 
 // Panel refresh lists - defines which panels to refresh for each tab
-const _PANELS_MESH_TAB = ['peers', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
+const PANELS_MESH_TAB = ['peers', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
 const PANELS_APP_TAB = ['s3', 'shares', 'docker']; // App tab panels
 const PANELS_DATA_TAB = ['peers-mgmt', 'groups', 'bindings', 'dns']; // Data tab panels
 
@@ -594,6 +594,7 @@ async function checkPrometheusAvailable() {
 }
 
 // Loki logs
+let lokiRetryTimer = null;
 async function checkLokiAvailable() {
     // If already enabled, just refresh logs instead of re-checking
     if (state.lokiEnabled) {
@@ -601,11 +602,18 @@ async function checkLokiAvailable() {
         return;
     }
 
+    // Cancel any pending retry; we're running the check right now
+    if (lokiRetryTimer) {
+        clearTimeout(lokiRetryTimer);
+        lokiRetryTimer = null;
+    }
+
     try {
         // First get the Loki datasource info from Grafana
         const dsResp = await fetch('/grafana/api/datasources/name/Loki');
         if (!dsResp.ok) {
-            console.debug('Loki datasource not found');
+            console.warn(`Loki check: datasource API returned HTTP ${dsResp.status} (Grafana not ready?)`);
+            lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
             return;
         }
         const dsInfo = await dsResp.json();
@@ -620,9 +628,13 @@ async function checkLokiAvailable() {
             updateLokiExploreLink();
             fetchLogs();
             setInterval(fetchLogs, POLL_INTERVAL_MS);
+        } else {
+            console.warn(`Loki check: labels endpoint returned HTTP ${testResp.status} (Loki not ready?)`);
+            lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
         }
     } catch (err) {
-        console.debug('Loki not available:', err.message);
+        console.warn('Loki check failed:', err.message);
+        lokiRetryTimer = setTimeout(checkLokiAvailable, 30000);
     }
 }
 
@@ -1438,8 +1450,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else if (tabName === 'data') {
             TM.refresh.triggerMultiple(PANELS_DATA_TAB, { cascade: false });
         } else if (tabName === 'mesh') {
-            // Mesh tab panels are updated via SSE/polling from fetchData(true) called above
-            // No explicit refresh trigger needed here
+            TM.refresh.triggerMultiple(PANELS_MESH_TAB, { cascade: false });
         }
     }
 });
@@ -2046,9 +2057,12 @@ function switchTab(tabName, options = {}) {
 
     // Handle tab-specific initialization
     if (tabName === 'mesh') {
+        // Refresh mesh-tab panels (peers/logs/alerts/filter) on tab switch.
+        // 'logs' calls checkLokiAvailable which retries if Grafana wasn't ready on page load.
+        if (TM.refresh) {
+            TM.refresh.triggerMultiple(PANELS_MESH_TAB, { cascade: false });
+        }
         // Defer visualizer and map resize until after DOM updates to get correct dimensions
-        // Note: Mesh panels (peers, logs, filter, etc.) are updated via SSE/polling
-        // from fetchData(), not via refresh coordinator
         requestAnimationFrame(() => {
             if (state.visualizer) {
                 state.visualizer.resize();
