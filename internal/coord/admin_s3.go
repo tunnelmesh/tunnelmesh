@@ -412,13 +412,16 @@ func (s *Server) handleS3ListBuckets(w http.ResponseWriter, r *http.Request) {
 			usedBytes = quotaStats.PerBucket[b.Name]
 		}
 
-		// Look up per-bucket quota from file share if this is a file share bucket
+		// Look up per-bucket quota: prefer file share metadata for fs+ buckets,
+		// fall back to BucketMeta.QuotaBytes for regular buckets.
 		var quotaBytes int64
 		if s.fileShareMgr != nil && strings.HasPrefix(b.Name, s3.FileShareBucketPrefix) {
 			shareName := strings.TrimPrefix(b.Name, s3.FileShareBucketPrefix)
 			if share := s.fileShareMgr.Get(shareName); share != nil {
 				quotaBytes = share.QuotaBytes
 			}
+		} else {
+			quotaBytes = b.QuotaBytes
 		}
 
 		bucketInfos = append(bucketInfos, S3BucketInfo{
@@ -476,7 +479,7 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name              string `json:"name"`
 		ReplicationFactor int    `json:"replication_factor"` // Optional, defaults to 2
-		QuotaBytes        int64  `json:"quota_bytes"`        // Optional (not implemented yet)
+		QuotaBytes        int64  `json:"quota_bytes"`        // Optional per-bucket quota in bytes; 0 = unlimited
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -530,8 +533,19 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	// Apply per-bucket quota if specified
+	if req.QuotaBytes > 0 {
+		q := req.QuotaBytes
+		if err := s.s3Store.UpdateBucketMetadata(r.Context(), req.Name, s3.BucketMetadataUpdate{
+			QuotaBytes: &q,
+		}); err != nil {
+			// Best-effort: bucket was created, quota not set
+			log.Warn().Err(err).Str("bucket", req.Name).Msg("failed to set quota on new bucket")
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{"name": req.Name})
 }
 

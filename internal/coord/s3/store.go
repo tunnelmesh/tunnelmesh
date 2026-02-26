@@ -86,12 +86,14 @@ type BucketMeta struct {
 	SizeBytes         int64                `json:"size_bytes"`               // Total size of live objects (updated incrementally)
 	ReplicationFactor int                  `json:"replication_factor"`       // Number of replicas (1-3)
 	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"` // Erasure coding policy for new objects
+	QuotaBytes        int64                `json:"quota_bytes,omitempty"`    // Per-bucket quota in bytes; 0 = unlimited
 }
 
 // BucketMetadataUpdate contains mutable bucket metadata fields (admin-only).
 type BucketMetadataUpdate struct {
 	ReplicationFactor *int                 `json:"replication_factor,omitempty"` // Update replication factor (1-3)
 	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"`     // Update erasure coding policy
+	QuotaBytes        *int64               `json:"quota_bytes,omitempty"`        // Update per-bucket quota; nil = no change, 0 = remove limit
 }
 
 // ChunkMetadata contains per-chunk metadata for distributed replication.
@@ -642,6 +644,14 @@ func (s *Store) UpdateBucketMetadata(ctx context.Context, bucket string, updates
 			return fmt.Errorf("invalid erasure coding policy: %w", err)
 		}
 		meta.ErasureCoding = updates.ErasureCoding
+	}
+
+	// Validate and apply per-bucket quota update
+	if updates.QuotaBytes != nil {
+		if *updates.QuotaBytes < 0 {
+			return fmt.Errorf("quota_bytes cannot be negative")
+		}
+		meta.QuotaBytes = *updates.QuotaBytes
 	}
 
 	// Save updated metadata
@@ -1546,6 +1556,14 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
+		// Per-bucket quota enforcement
+		if ecBucketMeta.QuotaBytes > 0 {
+			bucketUsed := s.quota.BucketUsedBytes(bucket)
+			if bucketUsed+delta > ecBucketMeta.QuotaBytes {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("bucket quota exceeded: using %d of %d bytes", bucketUsed+delta, ecBucketMeta.QuotaBytes)
+			}
+		}
 	}
 
 	// Clear stale version files from a previous object lifecycle at this key.
@@ -1822,6 +1840,14 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 		if !s.quota.CanAllocate(delta) {
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
+		}
+		// Per-bucket quota enforcement
+		if bucketMeta.QuotaBytes > 0 {
+			bucketUsed := s.quota.BucketUsedBytes(bucket)
+			if bucketUsed+delta > bucketMeta.QuotaBytes {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("bucket quota exceeded: using %d of %d bytes", bucketUsed+delta, bucketMeta.QuotaBytes)
+			}
 		}
 	}
 

@@ -39,7 +39,6 @@ async function loadDockerContainers() {
 
         const data = await response.json();
         dockerContainers = data.containers || [];
-        dockerAvailable = true;
 
         renderDockerContainers();
     } catch (err) {
@@ -50,7 +49,6 @@ async function loadDockerContainers() {
             console.error('Failed to load Docker containers:', err);
         }
         // On error, hide the panel (likely Docker not available)
-        dockerAvailable = false;
         hideDockerPanel();
     }
 }

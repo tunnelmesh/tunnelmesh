@@ -16,8 +16,5 @@ func TestMain(m *testing.M) {
 		// Ignore replicator background goroutines (they're properly cleaned up)
 		goleak.IgnoreTopFunction("github.com/tunnelmesh/tunnelmesh/internal/coord/replication.(*Replicator).Start.func1"),
 		goleak.IgnoreTopFunction("github.com/tunnelmesh/tunnelmesh/internal/coord/replication.(*Replicator).syncLoop"),
-		// Ignore hole punch cleanup goroutine (runs for server lifetime)
-		// TODO: Add proper shutdown signal to stop this goroutine
-		goleak.IgnoreTopFunction("github.com/tunnelmesh/tunnelmesh/internal/coord.(*Server).setupHolePunchRoutes.func1"),
 	)
 }

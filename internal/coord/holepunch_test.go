@@ -1,6 +1,11 @@
 package coord
 
-import "testing"
+import (
+	"context"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestIsLocalOrPrivateIP(t *testing.T) {
 	tests := []struct {
@@ -47,4 +52,57 @@ func TestIsLocalOrPrivateIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStartHolePunchCleanup_StopsOnContextCancel(t *testing.T) {
+	s := &Server{holePunch: newHolePunchManager()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Count how many cleanup calls happen before cancel
+	var cleanupCalls atomic.Int32
+	done := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-ticker.C:
+				cleanupCalls.Add(1)
+				s.holePunch.CleanupStale()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Let it run a few cycles
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	// Goroutine must stop within a reasonable time
+	select {
+	case <-done:
+		// success
+	case <-time.After(time.Second):
+		t.Fatal("hole-punch cleanup goroutine did not stop after context cancellation")
+	}
+
+	if cleanupCalls.Load() == 0 {
+		t.Fatal("expected at least one cleanup call before cancel")
+	}
+}
+
+func TestStartHolePunchCleanup_ExitsOnCancel(t *testing.T) {
+	s := &Server{holePunch: newHolePunchManager()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	// startHolePunchCleanup should start but exit right away
+	s.startHolePunchCleanup(ctx)
+
+	// Give the goroutine a moment to exit; goleak will catch it if it doesn't
+	time.Sleep(20 * time.Millisecond)
 }

@@ -3110,3 +3110,89 @@ func TestImportObjectMeta_ConcurrentStress(t *testing.T) {
 		}
 	}
 }
+
+// =========================================================================
+// Per-Bucket Quota Tests
+// =========================================================================
+
+func TestBucketQuota_EnforcedOnPut(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterKey := [32]byte{1, 2, 3, 4}
+	quota := NewQuotaManager(100 * 1024 * 1024) // 100 MiB global limit
+	store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "limited", "alice", 1, nil))
+
+	// Set a 100-byte per-bucket quota
+	bucketQuota := int64(100)
+	require.NoError(t, store.UpdateBucketMetadata(ctx, "limited", BucketMetadataUpdate{
+		QuotaBytes: &bucketQuota,
+	}))
+
+	// First put: 80 bytes — should succeed
+	content80 := bytes.Repeat([]byte("x"), 80)
+	_, err = store.PutObject(ctx, "limited", "obj1.bin", bytes.NewReader(content80), int64(len(content80)), "application/octet-stream", nil)
+	require.NoError(t, err, "80-byte upload should succeed under 100-byte quota")
+
+	// Second put: 30 bytes more (total 110) — should fail
+	content30 := bytes.Repeat([]byte("y"), 30)
+	_, err = store.PutObject(ctx, "limited", "obj2.bin", bytes.NewReader(content30), int64(len(content30)), "application/octet-stream", nil)
+	require.Error(t, err, "upload exceeding per-bucket quota should fail")
+	assert.Contains(t, err.Error(), "bucket quota exceeded")
+}
+
+func TestBucketQuota_DoesNotAffectOtherBuckets(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterKey := [32]byte{1, 2, 3, 4}
+	quota := NewQuotaManager(100 * 1024 * 1024)
+	store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "limited", "alice", 1, nil))
+	require.NoError(t, store.CreateBucket(ctx, "unlimited", "alice", 1, nil))
+
+	// Set a 50-byte quota on "limited" only
+	bucketQuota := int64(50)
+	require.NoError(t, store.UpdateBucketMetadata(ctx, "limited", BucketMetadataUpdate{
+		QuotaBytes: &bucketQuota,
+	}))
+
+	// Put 60 bytes into "limited" — should fail
+	content60 := bytes.Repeat([]byte("a"), 60)
+	_, err = store.PutObject(ctx, "limited", "obj.bin", bytes.NewReader(content60), int64(len(content60)), "application/octet-stream", nil)
+	require.Error(t, err, "upload to quota-limited bucket should fail")
+
+	// Put 60 bytes into "unlimited" — should succeed
+	_, err = store.PutObject(ctx, "unlimited", "obj.bin", bytes.NewReader(content60), int64(len(content60)), "application/octet-stream", nil)
+	require.NoError(t, err, "upload to unlimited bucket should succeed regardless of other bucket quotas")
+}
+
+func TestBucketQuota_ZeroMeansUnlimited(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterKey := [32]byte{1, 2, 3, 4}
+	quota := NewQuotaManager(100 * 1024 * 1024)
+	store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "default", "alice", 1, nil))
+
+	// QuotaBytes == 0 (default) means no per-bucket limit
+	content := bytes.Repeat([]byte("z"), 1024)
+	_, err = store.PutObject(ctx, "default", "big.bin", bytes.NewReader(content), int64(len(content)), "application/octet-stream", nil)
+	require.NoError(t, err, "bucket with no quota set should accept any upload")
+}
+
+func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "test", "alice", 1, nil))
+
+	neg := int64(-1)
+	err := store.UpdateBucketMetadata(ctx, "test", BucketMetadataUpdate{QuotaBytes: &neg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be negative")
+}
