@@ -533,14 +533,17 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply per-bucket quota if specified
+	// Apply per-bucket quota if specified.
+	// Best-effort: UpdateBucketMetadata is a local file write on a directory that was
+	// just created, so failure here is extremely unlikely (filesystem error in <1ms window).
+	// If it fails the bucket still exists but is unlimited; the warning log captures this.
+	// Use the PATCH endpoint to correct quota post-creation if needed.
 	if req.QuotaBytes > 0 {
 		q := req.QuotaBytes
 		if err := s.s3Store.UpdateBucketMetadata(r.Context(), req.Name, s3.BucketMetadataUpdate{
 			QuotaBytes: &q,
 		}); err != nil {
-			// Best-effort: bucket was created, quota not set
-			log.Warn().Err(err).Str("bucket", req.Name).Msg("failed to set quota on new bucket")
+			log.Warn().Err(err).Str("bucket", req.Name).Msg("failed to set quota on new bucket; bucket created but is unlimited")
 		}
 	}
 
@@ -628,14 +631,8 @@ func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, buck
 		return
 	}
 
-	// Check admin permission (bucket_scope=* or admin role)
+	// Admin check (consistent with panel handlers: IsAdmin on empty user → 403, not 401)
 	userID := s.getRequestOwner(r)
-	if userID == "" {
-		s.jsonError(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-
-	// Admin check: user must be an admin to update bucket metadata
 	if !s.s3Authorizer.IsAdmin(userID) {
 		s.jsonError(w, "admin permission required", http.StatusForbidden)
 		return
@@ -661,5 +658,7 @@ func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, buck
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{})
 }

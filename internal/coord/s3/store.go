@@ -1731,6 +1731,28 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	// coordinatorID is set once at init and never changes — safe to read without lock
 	coordID := s.coordinatorID
 
+	// Cleanup on failure: remove all chunks written during Phase 2 from CAS.
+	// Mirrors the EC path's cleanup (putObjectWithErasureCoding ~line 1385).
+	// Handles quota rejection, context cancellation, and other error paths.
+	var success bool
+	defer func() {
+		if !success && len(chunks) > 0 {
+			for _, hash := range chunks {
+				if freed, err := s.cas.DeleteChunk(context.Background(), hash); err != nil {
+					s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to cleanup CDC chunk during rollback")
+				} else if freed > 0 {
+					s.statsChunkCount.Add(-1)
+					s.statsChunkBytes.Add(-freed)
+				}
+				if s.chunkRegistry != nil {
+					if err := s.chunkRegistry.UnregisterChunk(hash); err != nil {
+						s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to unregister CDC chunk during rollback")
+					}
+				}
+			}
+		}
+	}()
+
 	for {
 		// Check for context cancellation to allow interrupting long uploads
 		select {
@@ -1935,6 +1957,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	}
 
 	s.mu.Unlock()
+	success = true
 
 	// Phase 4: After lock — pruning (filesystem walk, safe without lock).
 	// Version files have unique names, os.Remove is atomic/idempotent,
