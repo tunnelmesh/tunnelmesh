@@ -64,7 +64,7 @@ func ClassifyS3StatusWithError(httpStatus int, err error) string {
 	// Check error type first for semantic classification
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrQuotaExceeded):
+		case errors.Is(err, ErrQuotaExceeded), errors.Is(err, ErrBucketQuotaExceeded):
 			return "quota_exceeded"
 		case errors.Is(err, ErrAccessDenied):
 			return "access_denied"
@@ -607,6 +607,8 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 			s.writeError(rec, http.StatusNotFound, "NoSuchBucket", "Bucket not found")
 		case errors.Is(err, ErrQuotaExceeded):
 			s.writeError(rec, http.StatusForbidden, "QuotaExceeded", "Storage quota exceeded")
+		case errors.Is(err, ErrBucketQuotaExceeded):
+			s.writeError(rec, http.StatusForbidden, "BucketQuotaExceeded", err.Error())
 		default:
 			s.writeError(rec, http.StatusInternalServerError, "InternalError", err.Error())
 		}

@@ -253,9 +253,14 @@ func (s *Server) setupHolePunchRoutes() {
 
 // startHolePunchCleanup starts the periodic stale-endpoint cleanup goroutine.
 // Called from StartPeriodicCleanup where a context is available.
-func (s *Server) startHolePunchCleanup(ctx context.Context) {
+// An optional interval overrides the default 1-minute tick (useful in tests).
+func (s *Server) startHolePunchCleanup(ctx context.Context, interval ...time.Duration) {
+	d := time.Minute
+	if len(interval) > 0 {
+		d = interval[0]
+	}
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(d)
 		defer ticker.Stop()
 		for {
 			select {

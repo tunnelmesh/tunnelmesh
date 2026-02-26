@@ -1561,7 +1561,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			bucketUsed := s.quota.BucketUsedBytes(bucket)
 			if bucketUsed+delta > ecBucketMeta.QuotaBytes {
 				s.mu.Unlock()
-				return nil, fmt.Errorf("bucket quota exceeded: using %d of %d bytes", bucketUsed+delta, ecBucketMeta.QuotaBytes)
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, ecBucketMeta.QuotaBytes)
 			}
 		}
 	}
@@ -1846,7 +1846,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			bucketUsed := s.quota.BucketUsedBytes(bucket)
 			if bucketUsed+delta > bucketMeta.QuotaBytes {
 				s.mu.Unlock()
-				return nil, fmt.Errorf("bucket quota exceeded: using %d of %d bytes", bucketUsed+delta, bucketMeta.QuotaBytes)
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, bucketMeta.QuotaBytes)
 			}
 		}
 	}

@@ -607,7 +607,8 @@ func (s *Server) handleGetBucket(w http.ResponseWriter, r *http.Request, bucket 
 // handleUpdateBucket updates bucket metadata (admin-only)
 func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	var req struct {
-		ReplicationFactor *int `json:"replication_factor,omitempty"`
+		ReplicationFactor *int   `json:"replication_factor,omitempty"`
+		QuotaBytes        *int64 `json:"quota_bytes,omitempty"` // nil = no change, 0 = remove limit
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -640,9 +641,15 @@ func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, buck
 		return
 	}
 
+	if req.QuotaBytes != nil && *req.QuotaBytes < 0 {
+		s.jsonError(w, "quota_bytes cannot be negative", http.StatusBadRequest)
+		return
+	}
+
 	// Update bucket metadata
 	updates := s3.BucketMetadataUpdate{
 		ReplicationFactor: req.ReplicationFactor,
+		QuotaBytes:        req.QuotaBytes,
 	}
 
 	if err := s.s3Store.UpdateBucketMetadata(r.Context(), bucket, updates); err != nil {
