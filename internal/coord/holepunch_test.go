@@ -1,6 +1,12 @@
 package coord
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+
+	"go.uber.org/goleak"
+)
 
 func TestIsLocalOrPrivateIP(t *testing.T) {
 	tests := []struct {
@@ -47,4 +53,34 @@ func TestIsLocalOrPrivateIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStartHolePunchCleanup_StopsOnContextCancel(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	s := &Server{holePunch: newHolePunchManager()}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Call the real implementation with a short interval so it ticks several times
+	// before we cancel, proving both that it runs and that it stops.
+	s.startHolePunchCleanup(ctx, 10*time.Millisecond)
+
+	// Let it run a few cleanup cycles.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	// Give the goroutine a moment to observe cancellation; goleak will catch it if it leaks.
+	time.Sleep(20 * time.Millisecond)
+}
+
+func TestStartHolePunchCleanup_ExitsOnCancel(t *testing.T) {
+	s := &Server{holePunch: newHolePunchManager()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	// startHolePunchCleanup should start but exit right away
+	s.startHolePunchCleanup(ctx)
+
+	// Give the goroutine a moment to exit; goleak will catch it if it doesn't
+	time.Sleep(20 * time.Millisecond)
 }

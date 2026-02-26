@@ -1,6 +1,7 @@
 package coord
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -242,22 +243,34 @@ func (m *holePunchManager) GetPendingHolePunches(peerName string) []string {
 	return result
 }
 
-// setupHolePunchRoutes registers the hole-punch API routes.
+// setupHolePunchRoutes registers the hole-punch API routes (no goroutines).
 func (s *Server) setupHolePunchRoutes() {
 	s.holePunch = newHolePunchManager()
-
-	// Start cleanup goroutine
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			s.holePunch.CleanupStale()
-		}
-	}()
-
 	s.mux.HandleFunc("/api/v1/udp/register", s.withAuth(s.handleUDPRegister))
 	s.mux.HandleFunc("/api/v1/udp/holepunch", s.withAuth(s.handleHolePunch))
 	s.mux.HandleFunc("/api/v1/udp/endpoint/", s.withAuth(s.handleGetEndpoint))
+}
+
+// startHolePunchCleanup starts the periodic stale-endpoint cleanup goroutine.
+// Called from StartPeriodicCleanup where a context is available.
+// An optional interval overrides the default 1-minute tick (useful in tests).
+func (s *Server) startHolePunchCleanup(ctx context.Context, interval ...time.Duration) {
+	d := time.Minute
+	if len(interval) > 0 {
+		d = interval[0]
+	}
+	go func() {
+		ticker := time.NewTicker(d)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.holePunch.CleanupStale()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // handleUDPRegister handles UDP endpoint registration.

@@ -86,12 +86,14 @@ type BucketMeta struct {
 	SizeBytes         int64                `json:"size_bytes"`               // Total size of live objects (updated incrementally)
 	ReplicationFactor int                  `json:"replication_factor"`       // Number of replicas (1-3)
 	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"` // Erasure coding policy for new objects
+	QuotaBytes        int64                `json:"quota_bytes,omitempty"`    // Per-bucket quota in bytes; 0 = unlimited
 }
 
 // BucketMetadataUpdate contains mutable bucket metadata fields (admin-only).
 type BucketMetadataUpdate struct {
 	ReplicationFactor *int                 `json:"replication_factor,omitempty"` // Update replication factor (1-3)
 	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"`     // Update erasure coding policy
+	QuotaBytes        *int64               `json:"quota_bytes,omitempty"`        // Update per-bucket quota; nil = no change, 0 = remove limit
 }
 
 // ChunkMetadata contains per-chunk metadata for distributed replication.
@@ -642,6 +644,14 @@ func (s *Store) UpdateBucketMetadata(ctx context.Context, bucket string, updates
 			return fmt.Errorf("invalid erasure coding policy: %w", err)
 		}
 		meta.ErasureCoding = updates.ErasureCoding
+	}
+
+	// Validate and apply per-bucket quota update
+	if updates.QuotaBytes != nil {
+		if *updates.QuotaBytes < 0 {
+			return fmt.Errorf("quota_bytes cannot be negative")
+		}
+		meta.QuotaBytes = *updates.QuotaBytes
 	}
 
 	// Save updated metadata
@@ -1546,6 +1556,14 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
+		// Per-bucket quota enforcement
+		if ecBucketMeta.QuotaBytes > 0 {
+			bucketUsed := s.quota.BucketUsedBytes(bucket)
+			if bucketUsed+delta > ecBucketMeta.QuotaBytes {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, ecBucketMeta.QuotaBytes)
+			}
+		}
 	}
 
 	// Clear stale version files from a previous object lifecycle at this key.
@@ -1713,6 +1731,28 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	// coordinatorID is set once at init and never changes — safe to read without lock
 	coordID := s.coordinatorID
 
+	// Cleanup on failure: remove all chunks written during Phase 2 from CAS.
+	// Mirrors the EC path's cleanup (putObjectWithErasureCoding ~line 1385).
+	// Handles quota rejection, context cancellation, and other error paths.
+	var success bool
+	defer func() {
+		if !success && len(chunks) > 0 {
+			for _, hash := range chunks {
+				if freed, err := s.cas.DeleteChunk(context.Background(), hash); err != nil {
+					s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to cleanup CDC chunk during rollback")
+				} else if freed > 0 {
+					s.statsChunkCount.Add(-1)
+					s.statsChunkBytes.Add(-freed)
+				}
+				if s.chunkRegistry != nil {
+					if err := s.chunkRegistry.UnregisterChunk(hash); err != nil {
+						s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to unregister CDC chunk during rollback")
+					}
+				}
+			}
+		}
+	}()
+
 	for {
 		// Check for context cancellation to allow interrupting long uploads
 		select {
@@ -1823,6 +1863,14 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
+		// Per-bucket quota enforcement
+		if bucketMeta.QuotaBytes > 0 {
+			bucketUsed := s.quota.BucketUsedBytes(bucket)
+			if bucketUsed+delta > bucketMeta.QuotaBytes {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, bucketMeta.QuotaBytes)
+			}
+		}
 	}
 
 	// Clear stale version files from a previous object lifecycle at this key.
@@ -1909,6 +1957,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	}
 
 	s.mu.Unlock()
+	success = true
 
 	// Phase 4: After lock — pruning (filesystem walk, safe without lock).
 	// Version files have unique names, os.Remove is atomic/idempotent,

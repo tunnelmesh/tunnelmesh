@@ -776,6 +776,11 @@ func gcStaggerDelay(coordName string) time.Duration {
 //   - Runs garbage collection on versions and orphaned chunks
 //   - Updates CAS metrics (dedup ratio, chunk count, etc.)
 func (s *Server) StartPeriodicCleanup(ctx context.Context) {
+	// Start hole-punch endpoint cleanup (context-aware, stops on shutdown)
+	if s.holePunch != nil {
+		s.startHolePunchCleanup(ctx)
+	}
+
 	if s.s3Store == nil {
 		return
 	}
