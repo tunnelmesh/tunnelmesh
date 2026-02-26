@@ -2444,8 +2444,18 @@
                 if (e.lengthComputable) onProgress(e.loaded / e.total);
             });
             xhr.addEventListener('load', () => {
-                if (xhr.status >= 200 && xhr.status < 300) resolve();
-                else reject(new Error(`HTTP ${xhr.status}`));
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve();
+                } else {
+                    let msg = `HTTP ${xhr.status}`;
+                    try {
+                        const body = JSON.parse(xhr.responseText);
+                        if (body.message) msg = body.message;
+                    } catch (_) {
+                        // ignore parse errors
+                    }
+                    reject(new Error(msg));
+                }
             });
             xhr.addEventListener('error', () => reject(new Error('Network error')));
             xhr.send(file);
@@ -2471,8 +2481,8 @@
                     fill.style.width = `${pct * 100}%`;
                 });
                 showToast(`Uploaded ${file.name}`, 'success');
-            } catch (_err) {
-                showToast(`Failed to upload ${file.name}`, 'error');
+            } catch (err) {
+                showToast(`Failed to upload ${file.name}: ${err.message}`, 'error');
             }
         }
 

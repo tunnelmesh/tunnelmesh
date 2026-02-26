@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
+	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 )
 
 // S3VersionInfo represents a version for the API response.
@@ -28,9 +30,6 @@ type S3VersionInfo struct {
 type RestoreVersionRequest struct {
 	VersionID string `json:"version_id"`
 }
-
-// MaxS3ObjectSize is the maximum size for S3 object uploads (10MB).
-const MaxS3ObjectSize = 10 * 1024 * 1024
 
 // handleS3ListObjects returns objects in a bucket with optional prefix/delimiter.
 func (s *Server) handleS3ListObjects(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -269,7 +268,7 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 	}
 
 	// Limit request body size to prevent DoS
-	r.Body = http.MaxBytesReader(w, r.Body, MaxS3ObjectSize)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxObjectSize)
 
 	// Attempt to recover missing bucket for share (no-op if bucket exists).
 	// Recovery failure is logged but not returned: the subsequent PutObject will fail
@@ -308,7 +307,7 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 		var maxBytesErr *http.MaxBytesError
 		switch {
 		case errors.As(err, &maxBytesErr):
-			s.jsonError(w, "object too large (max 10MB)", http.StatusRequestEntityTooLarge)
+			s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 		case errors.Is(err, s3.ErrBucketNotFound):
 			s.jsonError(w, "bucket not found", http.StatusNotFound)
 		default:

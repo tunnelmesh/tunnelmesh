@@ -20,6 +20,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
+	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -510,13 +511,34 @@ func TestS3Proxy_PutObject_Streaming(t *testing.T) {
 	assert.Equal(t, content, data)
 }
 
-func TestS3Proxy_PutObject_TooLarge(t *testing.T) {
-	srv := newTestServerWithS3AndBucket(t)
+// zeroReader is an infinite source of zero bytes used to test size limits
+// without allocating large buffers.
+type zeroReader struct{}
 
-	// Create a body just over the 10MB limit — use a reader that claims a large size
-	// to trigger MaxBytesReader during streaming through PutObject.
-	oversize := make([]byte, MaxS3ObjectSize+1)
-	req := httptest.NewRequest(http.MethodPut, "/api/s3/buckets/test-bucket/objects/huge.bin", bytes.NewReader(oversize))
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+func TestS3Proxy_PutObject_TooLarge(t *testing.T) {
+	const testLimit = 1 * 1024 * 1024 // 1MB for test speed
+
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+	cfg.Coordinator.DataDir = t.TempDir()
+	cfg.Coordinator.S3.MaxObjectSize = bytesize.Size(testLimit)
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+	require.NoError(t, srv.s3Store.CreateBucket(context.Background(), "test-bucket", "admin", 2, nil))
+
+	// Stream zeros just over testLimit to trigger MaxBytesReader without
+	// allocating the full buffer in memory.
+	req := httptest.NewRequest(http.MethodPut, "/api/s3/buckets/test-bucket/objects/huge.bin",
+		io.LimitReader(zeroReader{}, testLimit+1))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	rec := httptest.NewRecorder()
 	srv.adminMux.ServeHTTP(rec, req)
