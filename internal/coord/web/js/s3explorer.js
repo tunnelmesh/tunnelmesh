@@ -2420,31 +2420,63 @@
         event.target.value = '';
     }
 
+    function createProgressBar() {
+        const bar = document.createElement('div');
+        bar.id = 's3-upload-progress';
+        bar.innerHTML = `
+            <div class="s3-progress-label" id="s3-progress-label">Uploading...</div>
+            <div class="s3-progress-track">
+                <div class="s3-progress-fill" id="s3-progress-fill"></div>
+            </div>`;
+        document.getElementById('s3-section')?.appendChild(bar);
+        return bar;
+    }
+
+    function uploadFileWithProgress(file, key, onProgress) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open(
+                'PUT',
+                `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(key)}`,
+            );
+            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) onProgress(e.loaded / e.total);
+            });
+            xhr.addEventListener('load', () => {
+                if (xhr.status >= 200 && xhr.status < 300) resolve();
+                else reject(new Error(`HTTP ${xhr.status}`));
+            });
+            xhr.addEventListener('error', () => reject(new Error('Network error')));
+            xhr.send(file);
+        });
+    }
+
     async function uploadFiles(files) {
         if (!state.currentBucket) {
             showToast('Navigate into a bucket first', 'warning');
             return;
         }
 
+        const bar = createProgressBar();
+        const label = document.getElementById('s3-progress-label');
+        const fill = document.getElementById('s3-progress-fill');
+
         for (const file of files) {
             const key = state.currentPath + file.name;
 
             try {
-                const content = await file.arrayBuffer();
-                await fetch(
-                    `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(key)}`,
-                    {
-                        method: 'PUT',
-                        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-                        body: content,
-                    },
-                );
+                await uploadFileWithProgress(file, key, (pct) => {
+                    label.textContent = `Uploading ${file.name}... ${Math.round(pct * 100)}%`;
+                    fill.style.width = `${pct * 100}%`;
+                });
                 showToast(`Uploaded ${file.name}`, 'success');
             } catch (_err) {
                 showToast(`Failed to upload ${file.name}`, 'error');
             }
         }
 
+        bar.remove();
         await renderFileListing();
     }
 
@@ -2461,33 +2493,39 @@
 
         let dragCounter = 0;
 
-        section.addEventListener('dragenter', (e) => {
+        document.addEventListener('dragenter', (e) => {
+            if (!e.dataTransfer?.types?.includes('Files')) return;
             e.preventDefault();
             dragCounter++;
-            if (state.currentBucket) {
+            if (state.currentBucket && section.style.display !== 'none') {
                 dropZone.classList.add('active');
             }
         });
 
-        section.addEventListener('dragleave', (e) => {
+        document.addEventListener('dragleave', (e) => {
+            if (!e.dataTransfer?.types?.includes('Files')) return;
             e.preventDefault();
             dragCounter--;
-            if (dragCounter === 0) {
+            if (dragCounter <= 0) {
+                dragCounter = 0;
                 dropZone.classList.remove('active');
             }
         });
 
-        section.addEventListener('dragover', (e) => {
-            e.preventDefault();
+        document.addEventListener('dragover', (e) => {
+            if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
         });
 
-        section.addEventListener('drop', async (e) => {
+        document.addEventListener('drop', async (e) => {
             e.preventDefault();
             dragCounter = 0;
             dropZone.classList.remove('active');
 
-            if (!state.currentBucket) {
-                showToast('Navigate into a bucket first', 'warning');
+            // Only upload if s3 section is active and user is in a bucket
+            if (section.style.display === 'none' || !state.currentBucket) {
+                if (e.dataTransfer?.files?.length > 0 && section.style.display !== 'none') {
+                    showToast('Navigate into a bucket first', 'warning');
+                }
                 return;
             }
 
