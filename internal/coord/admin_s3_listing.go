@@ -495,15 +495,17 @@ func (s *Server) reconcileLocalIndex(ctx context.Context) {
 			ownerName = s.getPeerName(bucketMeta.Owner)
 		}
 
-		// Paginate through all objects (ListObjects returns up to maxKeys per call)
-		var marker string
-		for {
-			objects, isTruncated, nextMarker, err := s.s3Store.ListObjects(ctx, bkt.Name, "", marker, 1000)
-			if err != nil {
-				log.Warn().Err(err).Str("bucket", bkt.Name).Msg("reconcile: failed to list objects")
-				break
-			}
-
+		// Scan all objects without holding the store mutex. Using the paginated
+		// ListObjects API would hold the global RLock once per page (each page
+		// re-walks the full metadata tree from the start), producing O(N²) lock
+		// hold time and blocking all concurrent writes for ~9 seconds after hours
+		// of accumulated objects. ScanObjectsForReconcile does a single O(N) walk
+		// with no lock; concurrent-delete gaps are silently skipped and filled in
+		// by the merge-CAS step below.
+		objects, err := s.s3Store.ScanObjectsForReconcile(ctx, bkt.Name)
+		if err != nil {
+			log.Warn().Err(err).Str("bucket", bkt.Name).Msg("reconcile: failed to scan objects")
+		} else {
 			for _, obj := range objects {
 				info := S3ObjectInfo{
 					Key:          obj.Key,
@@ -517,15 +519,10 @@ func (s *Server) reconcileLocalIndex(ctx context.Context) {
 				}
 				bl.Objects = append(bl.Objects, info)
 			}
-
-			if !isTruncated {
-				break
-			}
-			marker = nextMarker
 		}
 
-		// List recycled objects
-		recycled, err := s.s3Store.ListRecycledObjects(ctx, bkt.Name)
+		// Scan recycled objects (also lock-free for the same reasons)
+		recycled, err := s.s3Store.ScanRecycledForReconcile(ctx, bkt.Name)
 		if err != nil {
 			log.Warn().Err(err).Str("bucket", bkt.Name).Msg("reconcile: failed to list recycled objects")
 		} else {
