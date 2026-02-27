@@ -2423,20 +2423,30 @@
     function createProgressBar() {
         const bar = document.createElement('div');
         bar.id = 's3-upload-progress';
+
+        const header = document.createElement('div');
+        header.className = 's3-progress-header';
         const label = document.createElement('div');
         label.className = 's3-progress-label';
         label.textContent = 'Uploading...';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 's3-progress-cancel';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        header.append(label, cancelBtn);
+
         const track = document.createElement('div');
         track.className = 's3-progress-track';
         const fill = document.createElement('div');
         fill.className = 's3-progress-fill';
         track.appendChild(fill);
-        bar.append(label, track);
+
+        bar.append(header, track);
         document.getElementById('s3-section')?.appendChild(bar);
-        return { bar, label, fill };
+        return { bar, label, fill, cancelBtn };
     }
 
-    function uploadFileWithProgress(file, key, onProgress) {
+    function uploadFileWithProgress(file, key, onProgress, signal) {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open(
@@ -2462,6 +2472,8 @@
                 }
             });
             xhr.addEventListener('error', () => reject(new Error('Network error')));
+            xhr.addEventListener('abort', () => reject(new DOMException('Upload cancelled', 'AbortError')));
+            signal?.addEventListener('abort', () => xhr.abort());
             xhr.send(file);
         });
     }
@@ -2472,18 +2484,30 @@
             return;
         }
 
-        const { bar, label, fill } = createProgressBar();
+        const controller = new AbortController();
+        const { bar, label, fill, cancelBtn } = createProgressBar();
+        cancelBtn.addEventListener('click', () => controller.abort());
 
         for (const file of files) {
+            if (controller.signal.aborted) break;
             const key = state.currentPath + file.name;
 
             try {
-                await uploadFileWithProgress(file, key, (pct) => {
-                    label.textContent = `Uploading ${file.name}... ${Math.round(pct * 100)}%`;
-                    fill.style.width = `${pct * 100}%`;
-                });
+                await uploadFileWithProgress(
+                    file,
+                    key,
+                    (pct) => {
+                        label.textContent = `Uploading ${file.name}... ${Math.round(pct * 100)}%`;
+                        fill.style.width = `${pct * 100}%`;
+                    },
+                    controller.signal,
+                );
                 showToast(`Uploaded ${file.name}`, 'success');
             } catch (err) {
+                if (err.name === 'AbortError') {
+                    showToast('Upload cancelled', 'warning');
+                    break;
+                }
                 showToast(`Failed to upload ${file.name}: ${err.message}`, 'error');
             }
         }

@@ -2522,10 +2522,30 @@ a.logs-container {
     border-top: 1px solid var(--color-border);
 }
 
+.s3-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
 .s3-progress-label {
     font-size: 0.8125rem;
     color: var(--color-text-secondary);
-    margin-bottom: 4px;
+}
+
+.s3-progress-cancel {
+    font-size: 0.75rem;
+    padding: 1px 6px;
+    background: none;
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+
+.s3-progress-cancel:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-text-secondary);
 }
 
 .s3-progress-track {
