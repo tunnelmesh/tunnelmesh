@@ -1928,6 +1928,7 @@
         const viewToggleBtn = document.getElementById('s3-view-toggle-btn');
         const closeBtn = document.getElementById('s3-close-btn');
         const renameBtn = document.getElementById('s3-rename-btn');
+        const downloadSelectedBtn = document.getElementById('s3-download-selected-btn');
         const countEl = document.getElementById('s3-selection-count');
 
         const isViewing = state.currentFile !== null;
@@ -1946,6 +1947,14 @@
             if (fileActions) fileActions.style.display = 'none';
             if (viewToggleBtn) viewToggleBtn.style.display = 'inline-flex';
             if (renameBtn) renameBtn.style.display = selCount === 1 ? 'inline-flex' : 'none';
+            // Hide download button when all selected items are folders (nothing to download)
+            if (downloadSelectedBtn) {
+                const hasFile = [...state.selectedItems].some((id) => {
+                    const item = state.currentItems.find((i) => (i.key || i.name) === id);
+                    return item && !item.isFolder && !item.isBucket;
+                });
+                downloadSelectedBtn.style.display = hasFile ? 'inline-flex' : 'none';
+            }
             if (countEl) countEl.textContent = `${selCount} selected`;
         } else {
             // BROWSING + NO SELECTION state
@@ -2442,7 +2451,14 @@
         track.appendChild(fill);
 
         bar.append(header, track);
-        document.getElementById('s3-section')?.appendChild(bar);
+        // Insert before the resize handle so the progress bar sits between the
+        // file listing and the drag handle, not below it.
+        const resizeHandle = document.getElementById('s3-resize-handle');
+        if (resizeHandle) {
+            resizeHandle.parentElement.insertBefore(bar, resizeHandle);
+        } else {
+            document.getElementById('s3-section')?.appendChild(bar);
+        }
         return { bar, label, fill, cancelBtn };
     }
 
@@ -2695,6 +2711,20 @@
         } catch (err) {
             console.error('Rename failed:', err);
             alert(`Rename failed: ${err.message}`);
+        }
+    }
+
+    function downloadSelected() {
+        if (!state.currentBucket || state.selectedItems.size === 0) return;
+        for (const itemId of state.selectedItems) {
+            const item = state.currentItems.find((i) => (i.key || i.name) === itemId);
+            if (!item || item.isFolder || item.isBucket) continue;
+            const a = document.createElement('a');
+            a.href = `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(item.key)}`;
+            a.download = item.key.split('/').pop();
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
         }
     }
 
@@ -2979,6 +3009,7 @@
         showLess,
         toggleSelection,
         renameSelected,
+        downloadSelected,
         deleteSelected,
         setAutosave,
         toggleFullscreen,
