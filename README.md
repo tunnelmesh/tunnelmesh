@@ -55,7 +55,7 @@ Full documentation is at **[read.tunnelmesh.io](https://read.tunnelmesh.io)**, c
 
 ## Docker Deployment
 
-Run tunnelmesh in containers for development, testing, or production. The docker-compose setup includes **scalable coordinators** for testing chunk-level replication between multiple coordinator nodes. See the **[Docker Deployment Guide](https://read.tunnelmesh.io)** for complete documentation.
+Run tunnelmesh in containers for development, testing, or production. The docker-compose setup includes **scalable coordinators** for testing chunk-level replication between multiple coordinator nodes. See the **[Docker Deployment Guide](https://read.tunnelmesh.io/docs/docker/)** for complete documentation.
 
 ```bash
 cd docker
@@ -74,7 +74,7 @@ make docker-test                             # Run connectivity tests
 
 ## Cloud Deployment
 
-Deploy to DigitalOcean App Platform with Terraform. See the **[Cloud Deployment Guide](https://read.tunnelmesh.io)** for
+Deploy to DigitalOcean App Platform with Terraform. See the **[Cloud Deployment Guide](https://read.tunnelmesh.io/docs/cloud-deployment/)** for
 complete documentation.
 
 ```bash
