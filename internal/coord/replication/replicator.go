@@ -178,12 +178,13 @@ type Replicator struct {
 	rateLimiter *rate.Limiter // Limits incoming replication messages per second
 
 	// Metrics (lock-free via atomics)
-	sentCount     atomic.Uint64
-	receivedCount atomic.Uint64
-	conflictCount atomic.Uint64
-	errorCount    atomic.Uint64
-	droppedCount  atomic.Uint64 // Operations dropped due to pending limit
-	rateLimited   atomic.Uint64 // Messages dropped due to rate limiting
+	sentCount        atomic.Uint64
+	receivedCount    atomic.Uint64
+	conflictCount    atomic.Uint64
+	errorCount       atomic.Uint64
+	droppedCount     atomic.Uint64 // Operations dropped due to pending limit
+	rateLimited      atomic.Uint64 // Messages dropped due to rate limiting
+	rateLimitLastLog atomic.Int64  // Unix nanoseconds of last rate-limit warn, for throttling
 
 	// Rebalancer (nil if not configured)
 	rebalancer *Rebalancer
@@ -252,8 +253,8 @@ type Config struct {
 	AckTimeout           time.Duration   // How long to wait for ACK before retrying (default: 10s)
 	RetryInterval        time.Duration   // How long to wait before retrying failed replication (default: 30s)
 	MaxPendingOperations int             // Maximum number of pending ACKs to track (0 = unlimited, default: 10k)
-	RateLimit            int             // Maximum incoming messages per second (0 = unlimited, default: 1000)
-	RateBurst            int             // Maximum burst size for rate limiter (default: 100)
+	RateLimit            int             // Maximum incoming messages per second (0 = unlimited, default: 5000)
+	RateBurst            int             // Maximum burst size for rate limiter (default: 500)
 	ApplyTimeout         time.Duration   // Timeout for applying replication to S3 (default: 30s)
 	AckSendTimeout       time.Duration   // Timeout for sending ACK messages (default: 5s)
 	SyncRequestTimeout   time.Duration   // Timeout for handling sync requests (default: 5min)
@@ -277,10 +278,10 @@ func NewReplicator(config Config) *Replicator {
 		config.MaxPendingOperations = 10000 // Default: 10k pending operations
 	}
 	if config.RateLimit == 0 {
-		config.RateLimit = 1000 // Default: 1000 messages/second
+		config.RateLimit = 5000 // Default: 5000 messages/second
 	}
 	if config.RateBurst == 0 {
-		config.RateBurst = 100 // Default: burst of 100 messages
+		config.RateBurst = 500 // Default: burst of 500 messages
 	}
 	if config.ApplyTimeout == 0 {
 		config.ApplyTimeout = 30 * time.Second
@@ -670,9 +671,16 @@ func (r *Replicator) handleIncomingMessage(from string, data []byte) error {
 	// Apply rate limiting to prevent abuse
 	if !r.rateLimiter.Allow() {
 		r.incrementRateLimitedCount()
-		r.logger.Warn().
-			Str("from", from).
-			Msg("Rate limit exceeded, dropping replication message")
+		// Emit at most one Warn per second to avoid flooding logs.
+		// The rateLimited counter records every drop for observability.
+		now := time.Now().UnixNano()
+		last := r.rateLimitLastLog.Load()
+		if now-last > int64(time.Second) && r.rateLimitLastLog.CompareAndSwap(last, now) {
+			r.logger.Warn().
+				Str("from", from).
+				Uint64("total_dropped", r.rateLimited.Load()).
+				Msg("Rate limit exceeded, dropping replication messages (suppressed to 1/sec)")
+		}
 		return fmt.Errorf("rate limit exceeded")
 	}
 
