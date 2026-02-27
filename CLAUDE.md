@@ -7,10 +7,10 @@ TunnelMesh is a P2P mesh networking tool written in Go that creates encrypted tu
 **This is a greenfield project** - breaking changes are allowed and encouraged when they improve the codebase. Backwards compatibility is not a constraint during active development.
 
 **Admin Access:**
-- Configured via `admin_peers` field in coordinator config
-- Supports peer names OR peer IDs (SHA256 of SSH key, first 8 bytes = 16 hex chars)
-- Peer IDs are preferred for security (immutable, tied to SSH key)
-- Matched peers are added to "admins" group on first join
+- Requires explicit `admin_peers` list in coordinator config — **no auto-admin bootstrap**; without it, no peer gets admin access
+- Supports peer IDs (SHA256 of SSH key, first 8 bytes = 16 hex chars) or peer names with glob patterns (*, ?, [...])
+- Peer IDs are preferred for security (immutable, tied to SSH key); name matching warns in logs
+- Matching peers are added to the `admins` group on their first registration with the coordinator
 - Network/routing functionality works without admin access
 - Admin access enables peer stats, mesh/data plane configuration
 
@@ -31,6 +31,8 @@ make test               # Run tests with -short (skips slow simulator stress tes
 make test-full          # Run ALL tests including slow simulator (used in CI merge jobs)
 make test-verbose       # Verbose test output (with -short)
 make test-race          # Run with race detector (with -short, ONLY for debugging concurrency)
+make test-js            # Run JavaScript tests (requires Bun)
+make test-all           # Run Go + JavaScript tests
 
 # Lint
 golangci-lint run       # Run linter
@@ -56,21 +58,40 @@ make deploy-update      # Update binaries on nodes
 
 ```
 cmd/                    # CLI entrypoints
-  tunnelmesh/           # Main binary
+  tunnelmesh/                         # Main binary
+  tunnelmesh-s3bench/                 # Story-driven S3 testing tool
+  tunnelmesh-benchmarker/             # Continuous benchmarking tool for Docker envs
+  tunnelmesh-prometheus-sd-generator/ # Prometheus file_sd target generator
 internal/               # Core packages
+  admin/                # Admin API handlers
+  auth/                 # Authentication, RBAC, users, groups, bindings, panels
+  benchmark/            # Performance benchmarking utilities
+  config/               # Configuration loading/parsing
+  docker/               # Docker manager, events watcher, port forwarding, metrics
+  dns/                  # Mesh DNS resolver
+  logging/              # Loki logging integration
+  mesh/                 # Mesh networking logic
+  metrics/              # Prometheus metrics
+  netmon/               # Network monitoring and change detection
+  peer/                 # Peer logic, connection FSM
+  portmap/              # NAT-PMP, PCP, UPnP
+  promsd/               # Prometheus service discovery generator
+  routing/              # Packet router, filter
+  s3bench/              # S3 benchmark scenario generation
+  svc/                  # System service management
+  coord/                # Coordinator server, API, relay
+  tracing/              # OpenTelemetry tracing
   transport/            # SSH, UDP, relay transports
     udp/                # Noise protocol, encryption, handshake
-  routing/              # Packet router, filter
-  peer/                 # Peer peer logic, connection FSM
-  coord/                # Coordinator server, API, relay
   tun/                  # TUN device (platform-specific)
-  dns/                  # Mesh DNS resolver
-  portmap/              # NAT-PMP, PCP, UPnP
-  metrics/              # Prometheus metrics
+  tunnel/               # Tunnel management
+  update/               # Binary update mechanism
+deploy/                 # Deployment scripts and configs
 pkg/proto/              # Protocol message definitions
 terraform/              # DigitalOcean infrastructure
 docker/                 # Container deployment
 monitoring/             # Prometheus, Grafana, Loki configs
+testutil/               # Shared test utilities
 ```
 
 ## Coding Conventions
@@ -135,15 +156,16 @@ Access control via existing RBAC system:
 4. **GroupBinding**: Same pattern, applied to groups
 
 **Default groups**:
-- `everyone`: visualizer, map, s3, shares
-- `all_admin_users`: peers, logs, filter, dns, users, groups, bindings, docker
+- `everyone` (via `DefaultPeerPanels()`): visualizer, map, alerts, s3, shares
+- `admins` (via `DefaultAdminPanels()`): peers, logs, filter, dns, peers-mgmt, groups, bindings, docker
 
 ### Built-in Panel IDs
 
-| Tab  | Panels                                                |
-|------|-------------------------------------------------------|
-| mesh | visualizer, map, peers, logs, filter, dns |
-| data | s3, shares, users, groups, bindings, docker           |
+| Tab  | Panels                                                     |
+|------|------------------------------------------------------------|
+| mesh | visualizer, map, alerts, peers, logs, filter               |
+| app  | s3, shares, docker                                         |
+| data | peers-mgmt, groups, bindings, dns                          |
 
 ### CSS Design Tokens
 
@@ -156,7 +178,7 @@ All styling uses CSS variables in `internal/coord/web/css/style.css`:
 --input-border-radius: 0px;
 
 /* Visualizer colors (for canvas rendering) */
---viz-node-online, --viz-node-offline, --viz-node-coordinator
+--viz-peer-online, --viz-peer-offline, --viz-peer-coordinator
 --viz-edge-online, --viz-edge-offline, --viz-label-text
 ```
 
@@ -237,7 +259,7 @@ docker run -d -p 8080:80 nginx
 
 ### Docker Panel
 
-The Docker panel (data tab) displays:
+The Docker panel (app tab) displays:
 - **Container list**: Name, image, status, uptime, ports, network mode
 - **Status badges**: Running (green), exited (red), other states
 - **Control actions**: Start, stop, restart buttons (admin-only)
@@ -360,14 +382,18 @@ tunnelmesh-s3bench run alien_invasion --time-scale 36
 
 ### Key Flags
 
-- `--coordinator <url>` - Enable mesh mode, upload to coordinator (e.g., `https://coord.example.com:8443`)
+- `--coordinator <url>` - Coordinator URL for mesh mode (e.g., `https://coord.example.com:8443`)
+- `--enable-mesh` - Enable Docker mesh orchestration mode
+- `--endpoint <url>` - S3 endpoint URL for standalone mode (default: `http://localhost:8080`)
 - `--ssh-key <path>` - SSH key for peer identity (default: `~/.tunnelmesh/s3bench_key`)
-- `--insecure-tls` - Skip TLS verification (default: true for self-signed certs)
+- `--insecure-tls` - Skip TLS certificate verification (default: true)
 - `--time-scale <N>` - Time scaling factor (1.0=realtime, 100.0=100x faster)
 - `--concurrency <N>` - Number of parallel users (default: 3)
 - `--json <file>` - Write results to JSON file
 - `--enable-adversary` - Enable adversarial simulation (default: true)
 - `--enable-workflows` - Enable workflow tests (default: true)
+- `--accordion` - Loop mode: run → cleanup → repeat (requires --coordinator)
+- `--count <N>` - Run N iterations then stop (implies --accordion)
 
 ### Mesh Integration Architecture
 
