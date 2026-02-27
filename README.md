@@ -1,7 +1,7 @@
 ![Admin Dashboard](docs/images/tunnelmesh_banner.webp)
 
 > [!WARNING]
-> **Highly experimental**: You're early, and parts of this project are still in flux.
+> **Highly experimental**: Stable but still tightening bolts. Not for Production use.
 
 # tunnelmesh
 
