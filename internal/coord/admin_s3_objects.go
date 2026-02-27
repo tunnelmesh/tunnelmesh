@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
+	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 )
 
 // S3VersionInfo represents a version for the API response.
@@ -28,9 +30,6 @@ type S3VersionInfo struct {
 type RestoreVersionRequest struct {
 	VersionID string `json:"version_id"`
 }
-
-// MaxS3ObjectSize is the maximum size for S3 object uploads (10MB).
-const MaxS3ObjectSize = 10 * 1024 * 1024
 
 // handleS3ListObjects returns objects in a bucket with optional prefix/delimiter.
 func (s *Server) handleS3ListObjects(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -141,13 +140,23 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 			r.Header.Get("X-TunnelMesh-Forwarded") == "" {
 			if target := s.objectPrimaryCoordinator(bucket, key); target != "" {
 				// Buffer body so we can retry locally if forward fails.
+				// Limit the read to maxObjectSize to prevent OOM on oversized uploads.
+				// NOTE: unlike the direct-upload path (which streams through PutObject with
+				// ~64 KB peak memory), this path buffers the entire body. With the default
+				// 1 GiB limit each concurrent forwarded upload can hold up to 1 GiB of RAM.
+				// Streaming forwarding would avoid this but requires a two-phase approach to
+				// handle the retry-local fallback.
 				var bodyBuf []byte
 				if r.Body != nil {
 					var err error
-					bodyBuf, err = io.ReadAll(r.Body)
+					bodyBuf, err = io.ReadAll(io.LimitReader(r.Body, s.maxObjectSize+1))
 					_ = r.Body.Close()
 					if err != nil {
 						s.jsonError(w, "failed to read request body", http.StatusInternalServerError)
+						return
+					}
+					if int64(len(bodyBuf)) > s.maxObjectSize {
+						s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 						return
 					}
 					r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
@@ -269,7 +278,7 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 	}
 
 	// Limit request body size to prevent DoS
-	r.Body = http.MaxBytesReader(w, r.Body, MaxS3ObjectSize)
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxObjectSize)
 
 	// Attempt to recover missing bucket for share (no-op if bucket exists).
 	// Recovery failure is logged but not returned: the subsequent PutObject will fail
@@ -308,7 +317,7 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 		var maxBytesErr *http.MaxBytesError
 		switch {
 		case errors.As(err, &maxBytesErr):
-			s.jsonError(w, "object too large (max 10MB)", http.StatusRequestEntityTooLarge)
+			s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 		case errors.Is(err, s3.ErrBucketNotFound):
 			s.jsonError(w, "bucket not found", http.StatusNotFound)
 		default:

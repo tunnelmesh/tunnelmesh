@@ -2509,10 +2509,20 @@ function s3Rename() {
 }
 window.s3Rename = s3Rename;
 
+function s3DownloadSelected() {
+    if (TM.s3explorer) TM.s3explorer.downloadSelected();
+}
+window.s3DownloadSelected = s3DownloadSelected;
+
 function s3DeleteSelected() {
     if (TM.s3explorer) TM.s3explorer.deleteSelected();
 }
 window.s3DeleteSelected = s3DeleteSelected;
+
+function s3UndeleteSelected() {
+    if (TM.s3explorer) TM.s3explorer.undeleteSelected();
+}
+window.s3UndeleteSelected = s3UndeleteSelected;
 
 function s3ToggleAutosave(enabled) {
     if (TM.s3explorer) TM.s3explorer.setAutosave(enabled);

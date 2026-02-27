@@ -32,6 +32,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/mesh"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -95,6 +96,7 @@ type Server struct {
 	listingIndexNotify chan struct{}                // Signal for immediate persist+load cycle
 	coordMetrics       *CoordMetrics                // Prometheus metrics for coordinator
 	metricsRegistry    prometheus.Registerer        // Prometheus registry for metrics (shared with peer metrics)
+	maxObjectSize      int64                        // Effective max bytes per object upload (from config, default 1GiB)
 	// S3 storage
 	s3Store             *s3.Store            // S3 file-based storage
 	s3Server            *s3.Server           // S3 HTTP server
@@ -1155,6 +1157,9 @@ func (s *Server) loadOrCreateCASKey(dataDir string) ([32]byte, error) {
 	return masterKey, nil
 }
 
+// defaultMaxObjectSize is the per-upload body limit when max_object_size is not configured.
+const defaultMaxObjectSize = 1 * 1024 * 1024 * 1024 // 1 GiB
+
 // initS3Storage initializes the S3 storage subsystem.
 func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) error {
 	// Require max_size to be configured for quota enforcement
@@ -1162,6 +1167,20 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 		return fmt.Errorf("s3.max_size must be configured (e.g., 10Gi) for quota enforcement")
 	}
 	quota := s3.NewQuotaManager(cfg.Coordinator.S3.MaxSize.Bytes())
+
+	// Set per-object upload limit (configurable, defaults to 1 GiB)
+	s.maxObjectSize = cfg.Coordinator.S3.MaxObjectSize.Bytes()
+	if s.maxObjectSize <= 0 {
+		s.maxObjectSize = defaultMaxObjectSize
+	}
+	// Warn if an individual object could exceed the total bucket quota. The quota
+	// manager will reject the upload, but the error will be confusing without this hint.
+	if s.maxObjectSize > cfg.Coordinator.S3.MaxSize.Bytes() {
+		log.Warn().
+			Str("max_object_size", bytesize.Size(s.maxObjectSize).String()).
+			Str("max_size", bytesize.Size(cfg.Coordinator.S3.MaxSize.Bytes()).String()).
+			Msg("s3.max_object_size exceeds s3.max_size: individual uploads cannot succeed once the bucket is non-empty")
+	}
 
 	// Load or create master key for CAS encryption
 	masterKey, err := s.loadOrCreateCASKey(cfg.Coordinator.S3.DataDir)

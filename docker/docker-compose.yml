@@ -49,6 +49,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 3s
+    restart: unless-stopped
 
   # Coordinator 2 - Secondary (optional, for replication testing)
   coord-2:
@@ -83,6 +84,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 3s
+    restart: unless-stopped
 
   # Coordinator 3 - Tertiary
   coord-3:
@@ -117,6 +119,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 3s
+    restart: unless-stopped
 
   alice:
     build:

@@ -1232,10 +1232,10 @@
                     const isSelected = state.selectedItems.has(itemId);
                     let rowClass = isSelected ? 's3-selected' : '';
                     if (isDeleted) rowClass += ' s3-recycled';
-                    // Show checkboxes for files/folders (not buckets), disabled for read-only or deleted
+                    // Show checkboxes for files/folders (not buckets), disabled for read-only
                     const checkbox = item.isBucket
                         ? ''
-                        : `<input type="checkbox" class="s3-checkbox" data-item-id="${escapeHtml(itemId)}" ${isSelected ? 'checked' : ''} ${state.writable && !isDeleted ? '' : 'disabled'} onclick="event.stopPropagation(); TM.s3explorer.toggleSelection('${escapeJsString(itemId)}')" />`;
+                        : `<input type="checkbox" class="s3-checkbox" data-item-id="${escapeHtml(itemId)}" ${isSelected ? 'checked' : ''} ${state.writable ? '' : 'disabled'} onclick="event.stopPropagation(); TM.s3explorer.toggleSelection('${escapeJsString(itemId)}')" />`;
                     const deletedBadge = isDeleted ? '<span class="s3-badge s3-badge-deleted">Deleted</span>' : '';
 
                     // Only show quota column for bucket list (not when inside a bucket)
@@ -1332,7 +1332,7 @@
                         : `<input type="checkbox" class="s3-icon-checkbox"
                         data-item-id="${escapeHtml(itemId)}"
                         ${isSelected ? 'checked' : ''}
-                        ${state.writable && !isDeleted ? '' : 'disabled'} />`;
+                        ${state.writable ? '' : 'disabled'} />`;
 
                     // Deleted badge
                     const deletedBadge = isDeleted ? '<span class="s3-badge s3-badge-deleted">Deleted</span>' : '';
@@ -1920,6 +1920,30 @@
      *
      * Call this after every state transition: navigate, open, close, toggle selection.
      */
+
+    /**
+     * Classifies the current selection into live/deleted/file categories.
+     * Pure function: accepts state parameters, returns classification object.
+     * Used by updateToolbar() and deleteSelected() to determine what actions apply.
+     *
+     * @param {Set<string>} selectedIds - set of selected item IDs (key or name)
+     * @param {Array} currentItems - array of items from current listing
+     * @returns {{ allItems, liveItems, deletedItems, liveFiles }}
+     *   allItems    - all resolved items (unknown IDs excluded)
+     *   liveItems   - non-deleted, non-bucket items (files + folders)
+     *   deletedItems - items with deletedAt set
+     *   liveFiles   - non-deleted, non-bucket, non-folder items (downloadable files)
+     */
+    function classifySelection(selectedIds, currentItems) {
+        const allItems = [...selectedIds]
+            .map((id) => currentItems.find((i) => (i.key || i.name) === id))
+            .filter(Boolean);
+        const liveItems = allItems.filter((item) => !item.deletedAt && !item.isBucket);
+        const deletedItems = allItems.filter((item) => item.deletedAt);
+        const liveFiles = liveItems.filter((item) => !item.isFolder);
+        return { allItems, liveItems, deletedItems, liveFiles };
+    }
+
     /* istanbul ignore next */
     function updateToolbar() {
         const browseActions = document.getElementById('s3-browse-actions');
@@ -1928,6 +1952,9 @@
         const viewToggleBtn = document.getElementById('s3-view-toggle-btn');
         const closeBtn = document.getElementById('s3-close-btn');
         const renameBtn = document.getElementById('s3-rename-btn');
+        const downloadSelectedBtn = document.getElementById('s3-download-selected-btn');
+        const deleteSelectedBtn = document.getElementById('s3-delete-selected-btn');
+        const undeleteSelectedBtn = document.getElementById('s3-undelete-selected-btn');
         const countEl = document.getElementById('s3-selection-count');
 
         const isViewing = state.currentFile !== null;
@@ -1941,11 +1968,21 @@
             if (viewToggleBtn) viewToggleBtn.style.display = 'none';
         } else if (selCount > 0) {
             // BROWSING + SELECTION state
+            const { liveItems, deletedItems, liveFiles } = classifySelection(state.selectedItems, state.currentItems);
+            const hasDeletedItem = deletedItems.length > 0;
+            const hasNonDeletedItem = liveItems.length > 0;
+            const hasNonDeletedFile = liveFiles.length > 0;
             if (browseActions) browseActions.style.display = 'none';
             if (selectionActions) selectionActions.style.display = 'flex';
             if (fileActions) fileActions.style.display = 'none';
             if (viewToggleBtn) viewToggleBtn.style.display = 'inline-flex';
-            if (renameBtn) renameBtn.style.display = selCount === 1 ? 'inline-flex' : 'none';
+            // Rename only for a single non-deleted item
+            if (renameBtn) renameBtn.style.display = selCount === 1 && !hasDeletedItem ? 'inline-flex' : 'none';
+            // Download only for non-deleted files
+            if (downloadSelectedBtn) downloadSelectedBtn.style.display = hasNonDeletedFile ? 'inline-flex' : 'none';
+            // Delete only for non-deleted items; Undelete only for deleted items
+            if (deleteSelectedBtn) deleteSelectedBtn.style.display = hasNonDeletedItem ? 'inline-flex' : 'none';
+            if (undeleteSelectedBtn) undeleteSelectedBtn.style.display = hasDeletedItem ? 'inline-flex' : 'none';
             if (countEl) countEl.textContent = `${selCount} selected`;
         } else {
             // BROWSING + NO SELECTION state
@@ -2420,31 +2457,113 @@
         event.target.value = '';
     }
 
+    function createProgressBar() {
+        const bar = document.createElement('div');
+        bar.id = 's3-upload-progress';
+
+        const header = document.createElement('div');
+        header.className = 's3-progress-header';
+        const label = document.createElement('div');
+        label.className = 's3-progress-label';
+        label.textContent = 'Uploading...';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 's3-progress-cancel';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        header.append(label, cancelBtn);
+
+        const track = document.createElement('div');
+        track.className = 's3-progress-track';
+        const fill = document.createElement('div');
+        fill.className = 's3-progress-fill';
+        track.appendChild(fill);
+
+        bar.append(header, track);
+        // Insert before the resize handle so the progress bar sits between the
+        // file listing and the drag handle, not below it.
+        const resizeHandle = document.getElementById('s3-resize-handle');
+        if (resizeHandle) {
+            resizeHandle.parentElement.insertBefore(bar, resizeHandle);
+        } else {
+            document.getElementById('s3-section')?.appendChild(bar);
+        }
+        return { bar, label, fill, cancelBtn };
+    }
+
+    function uploadFileWithProgress(file, key, onProgress, signal) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open(
+                'PUT',
+                `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(key)}`,
+            );
+            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) onProgress(e.loaded / e.total);
+            });
+            xhr.addEventListener('load', () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve();
+                } else {
+                    let msg = `HTTP ${xhr.status}`;
+                    try {
+                        const body = JSON.parse(xhr.responseText);
+                        if (body.message) msg = body.message;
+                    } catch (_) {
+                        // ignore parse errors
+                    }
+                    reject(new Error(msg));
+                }
+            });
+            xhr.addEventListener('error', () => reject(new Error('Network error')));
+            xhr.addEventListener('abort', () => reject(new DOMException('Upload cancelled', 'AbortError')));
+            // Listener is never explicitly removed, but the signal (and its listeners)
+            // is GC'd when the AbortController goes out of scope after uploadFiles()
+            // returns, so accumulation across files in the same batch is not a concern.
+            signal?.addEventListener('abort', () => xhr.abort());
+            xhr.send(file);
+        });
+    }
+
     async function uploadFiles(files) {
         if (!state.currentBucket) {
             showToast('Navigate into a bucket first', 'warning');
             return;
         }
+        if (!state.writable) {
+            showToast('Bucket is read-only', 'warning');
+            return;
+        }
+
+        const controller = new AbortController();
+        const { bar, label, fill, cancelBtn } = createProgressBar();
+        cancelBtn.addEventListener('click', () => controller.abort());
 
         for (const file of files) {
+            if (controller.signal.aborted) break;
             const key = state.currentPath + file.name;
 
             try {
-                const content = await file.arrayBuffer();
-                await fetch(
-                    `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(key)}`,
-                    {
-                        method: 'PUT',
-                        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-                        body: content,
+                await uploadFileWithProgress(
+                    file,
+                    key,
+                    (pct) => {
+                        label.textContent = `Uploading ${file.name}... ${Math.round(pct * 100)}%`;
+                        fill.style.width = `${pct * 100}%`;
                     },
+                    controller.signal,
                 );
                 showToast(`Uploaded ${file.name}`, 'success');
-            } catch (_err) {
-                showToast(`Failed to upload ${file.name}`, 'error');
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    showToast('Upload cancelled', 'warning');
+                    break;
+                }
+                showToast(`Failed to upload ${file.name}: ${err.message}`, 'error');
             }
         }
 
+        bar.remove();
         await renderFileListing();
     }
 
@@ -2452,8 +2571,13 @@
     // Drag and Drop
     // =========================================================================
 
+    let dragDropInitialized = false;
+
     /* istanbul ignore next */
     function initDragDrop() {
+        if (dragDropInitialized) return;
+        dragDropInitialized = true;
+
         const section = document.getElementById('s3-section');
         const dropZone = document.getElementById('s3-drop-zone');
 
@@ -2461,33 +2585,46 @@
 
         let dragCounter = 0;
 
-        section.addEventListener('dragenter', (e) => {
+        document.addEventListener('dragenter', (e) => {
+            if (!e.dataTransfer?.types?.includes('Files')) return;
             e.preventDefault();
             dragCounter++;
-            if (state.currentBucket) {
+            if (state.currentBucket && section.style.display !== 'none') {
                 dropZone.classList.add('active');
             }
         });
 
-        section.addEventListener('dragleave', (e) => {
+        document.addEventListener('dragleave', (e) => {
+            if (!e.dataTransfer?.types?.includes('Files')) return;
             e.preventDefault();
             dragCounter--;
-            if (dragCounter === 0) {
+            if (dragCounter <= 0) {
+                dragCounter = 0;
                 dropZone.classList.remove('active');
             }
         });
 
-        section.addEventListener('dragover', (e) => {
-            e.preventDefault();
+        document.addEventListener('dragover', (e) => {
+            if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
         });
 
-        section.addEventListener('drop', async (e) => {
+        document.addEventListener('drop', async (e) => {
             e.preventDefault();
             dragCounter = 0;
             dropZone.classList.remove('active');
 
-            if (!state.currentBucket) {
-                showToast('Navigate into a bucket first', 'warning');
+            // Only upload if s3 section is active and user is in a writable bucket
+            if (section.style.display === 'none') return;
+            if (e.dataTransfer?.files?.length > 0) {
+                if (!state.currentBucket) {
+                    showToast('Navigate into a bucket first', 'warning');
+                    return;
+                }
+                if (!state.writable) {
+                    showToast('Bucket is read-only', 'warning');
+                    return;
+                }
+            } else {
                 return;
             }
 
@@ -2550,6 +2687,22 @@
         return state.currentItems.find((item) => (item.key || item.name) === itemId);
     }
 
+    /**
+     * Validates a proposed rename operation.
+     * Pure function: no side effects, suitable for unit testing.
+     *
+     * @param {string} name - proposed new name
+     * @param {object} item - the item being renamed
+     * @returns {string|null} error message, or null if the rename is valid
+     */
+    function validateRename(name, item) {
+        if (!name || name.trim() === '') return 'Name cannot be empty';
+        if (name.includes('/')) return 'Name cannot contain /';
+        if (item.isBucket) return 'Buckets cannot be renamed';
+        if (item.isFolder) return 'Folders cannot be renamed';
+        return null;
+    }
+
     async function renameSelected() {
         const item = getSelectedItem();
         if (!item) return;
@@ -2558,19 +2711,9 @@
         const newName = prompt('Enter new name:', oldName);
         if (!newName || newName === oldName) return;
 
-        // Validate name
-        if (newName.includes('/')) {
-            alert('Name cannot contain /');
-            return;
-        }
-
-        if (item.isBucket) {
-            alert('Buckets cannot be renamed');
-            return;
-        }
-
-        if (item.isFolder) {
-            alert('Folders cannot be renamed (would require renaming all contents)');
+        const validationError = validateRename(newName, item);
+        if (validationError) {
+            showToast(validationError, 'error');
             return;
         }
 
@@ -2613,14 +2756,40 @@
 
             state.selectedItems.clear();
             await renderFileListing();
+            showToast(`Renamed to ${newName}`, 'success');
         } catch (err) {
             console.error('Rename failed:', err);
-            alert(`Rename failed: ${err.message}`);
+            showToast(`Rename failed: ${err.message}`, 'error');
+        }
+    }
+
+    // NOTE: downloads are triggered via sequential anchor clicks. Browsers typically
+    // allow 1-2 simultaneous file downloads and silently drop the rest when many are
+    // triggered at once. For large multi-file selections, a future enhancement could
+    // serve a server-side zip instead.
+    function downloadSelected() {
+        if (!state.currentBucket || state.selectedItems.size === 0) return;
+        for (const itemId of state.selectedItems) {
+            const item = state.currentItems.find((i) => (i.key || i.name) === itemId);
+            if (!item || item.isFolder || item.isBucket || item.deletedAt) continue;
+            const a = document.createElement('a');
+            a.href = `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(item.key)}`;
+            a.download = item.key.split('/').pop();
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
         }
     }
 
     async function deleteSelected() {
-        const count = state.selectedItems.size;
+        if (!state.writable) {
+            showToast('Bucket is read-only', 'warning');
+            return;
+        }
+
+        // Only operate on live (non-deleted) items; deleted items must be undeleted first
+        const { liveItems } = classifySelection(state.selectedItems, state.currentItems);
+        const count = liveItems.length;
         if (count === 0) return;
 
         const confirmMsg = count === 1 ? 'Delete this item?' : `Delete ${count} items?`;
@@ -2629,9 +2798,8 @@
 
         try {
             let deletedCount = 0;
-            for (const itemId of state.selectedItems) {
-                const item = state.currentItems.find((i) => (i.key || i.name) === itemId);
-                if (!item || item.isBucket) continue;
+            for (const item of liveItems) {
+                if (item.isBucket) continue;
 
                 // Handle folder deletion
                 if (item.isFolder) {
@@ -2670,6 +2838,43 @@
         } catch (err) {
             console.error('Delete failed:', err);
             showToast(`Delete failed: ${err.message}`, 'error');
+        }
+    }
+
+    async function undeleteSelected() {
+        if (!state.currentBucket || state.selectedItems.size === 0) return;
+        if (!state.writable) {
+            showToast('Bucket is read-only', 'warning');
+            return;
+        }
+
+        const { deletedItems } = classifySelection(state.selectedItems, state.currentItems);
+        if (deletedItems.length === 0) return;
+
+        const confirmMsg =
+            deletedItems.length === 1
+                ? `Restore "${deletedItems[0].name}"?`
+                : `Restore ${deletedItems.length} deleted items?`;
+
+        if (!confirm(confirmMsg)) return;
+
+        try {
+            let restoredCount = 0;
+            for (const item of deletedItems) {
+                const key = item.key || item.name;
+                await restoreRecycledObject(state.currentBucket, key);
+                restoredCount++;
+            }
+
+            state.selectedItems.clear();
+            updateSelectionUI();
+            if (restoredCount > 0) {
+                showToast(`Restored ${restoredCount} item${restoredCount > 1 ? 's' : ''}`, 'success');
+            }
+            await renderFileListing();
+        } catch (err) {
+            console.error('Undelete failed:', err);
+            showToast(`Restore failed: ${err.message}`, 'error');
         }
     }
 
@@ -2900,7 +3105,9 @@
         showLess,
         toggleSelection,
         renameSelected,
+        downloadSelected,
         deleteSelected,
+        undeleteSelected,
         setAutosave,
         toggleFullscreen,
         toggleView,
@@ -2928,6 +3135,8 @@
             detectJsonType,
             detectDatasheetMode,
             inferSchema,
+            validateRename,
+            classifySelection,
         },
     };
 });

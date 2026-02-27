@@ -48,6 +48,7 @@ type CoordinatorConfig struct {
 type S3Config struct {
 	DataDir                 string                 `yaml:"data_dir"`                   // Storage directory for S3 objects (default: {data_dir}/s3)
 	MaxSize                 bytesize.Size          `yaml:"max_size"`                   // Maximum storage size (e.g., "10Gi", "500Mi") - defaults to 1Gi
+	MaxObjectSize           bytesize.Size          `yaml:"max_object_size"`            // Maximum size per individual object upload (e.g., "1Gi", "500Mi") - defaults to 1Gi
 	ObjectExpiryDays        int                    `yaml:"object_expiry_days"`         // Days until objects expire (default: 9125 = 25 years)
 	ShareExpiryDays         int                    `yaml:"share_expiry_days"`          // Days until file shares expire (default: 365 = 1 year)
 	RecycleBinRetentionDays int                    `yaml:"recycle_bin_retention_days"` // Days to keep recycled items before deletion (default: 90)
