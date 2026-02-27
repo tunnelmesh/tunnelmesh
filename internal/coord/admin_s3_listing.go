@@ -85,44 +85,55 @@ func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op s
 			newIdx.Seq = old.Seq
 		}
 
-		// Get or create bucket listing (copy-on-write for the bucket too)
+		// Get or create bucket listing (copy-on-write for the bucket too).
+		// Each case only copies the slice(s) it actually mutates; unchanged slices
+		// are shared with the old listing (safe because CAS ensures no concurrent writes).
 		bl := newIdx.Buckets[bucket]
 		var newBL bucketListing
 		if bl != nil {
-			newBL.Objects = make([]S3ObjectInfo, len(bl.Objects))
-			copy(newBL.Objects, bl.Objects)
-			newBL.Recycled = make([]S3ObjectInfo, len(bl.Recycled))
-			copy(newBL.Recycled, bl.Recycled)
-		}
+			switch op {
+			case "put":
+				// upsertObjectList builds a new slice from bl.Objects directly.
+				// Recycled is unchanged — share the pointer.
+				if info != nil {
+					newBL.Objects = upsertObjectList(bl.Objects, key, *info)
+				} else {
+					newBL.Objects = bl.Objects
+				}
+				newBL.Recycled = bl.Recycled
 
-		switch op {
-		case "put":
-			if info != nil {
-				newBL.Objects = upsertObjectList(newBL.Objects, key, *info)
+			case "delete":
+				var removed *S3ObjectInfo
+				newBL.Objects, removed = removeFromObjectList(bl.Objects, key)
+				if removed != nil {
+					recycled := *removed
+					recycled.DeletedAt = time.Now().UTC().Format(time.RFC3339)
+					newBL.Recycled = upsertObjectList(bl.Recycled, key, recycled)
+				} else {
+					newBL.Recycled = bl.Recycled
+				}
+
+			case "undelete":
+				var removed *S3ObjectInfo
+				newBL.Recycled, removed = removeFromObjectList(bl.Recycled, key)
+				if removed != nil {
+					restored := *removed
+					restored.DeletedAt = ""
+					newBL.Objects = make([]S3ObjectInfo, len(bl.Objects)+1)
+					copy(newBL.Objects, bl.Objects)
+					newBL.Objects[len(bl.Objects)] = restored
+				} else {
+					newBL.Objects = bl.Objects
+				}
+
+			case "remove":
+				// Hard delete: remove from both live objects and recycled list
+				newBL.Objects, _ = removeFromObjectList(bl.Objects, key)
+				newBL.Recycled, _ = removeFromObjectList(bl.Recycled, key)
 			}
-
-		case "delete":
-			var removed *S3ObjectInfo
-			newBL.Objects, removed = removeFromObjectList(newBL.Objects, key)
-			if removed != nil {
-				recycled := *removed
-				recycled.DeletedAt = time.Now().UTC().Format(time.RFC3339)
-				newBL.Recycled = upsertObjectList(newBL.Recycled, key, recycled)
-			}
-
-		case "undelete":
-			var removed *S3ObjectInfo
-			newBL.Recycled, removed = removeFromObjectList(newBL.Recycled, key)
-			if removed != nil {
-				restored := *removed
-				restored.DeletedAt = ""
-				newBL.Objects = append(newBL.Objects, restored)
-			}
-
-		case "remove":
-			// Hard delete: remove from both live objects and recycled list
-			newBL.Objects, _ = removeFromObjectList(newBL.Objects, key)
-			newBL.Recycled, _ = removeFromObjectList(newBL.Recycled, key)
+		} else if op == "put" && info != nil {
+			// No existing bucket listing — seed with the new entry
+			newBL.Objects = []S3ObjectInfo{*info}
 		}
 
 		newIdx.Buckets[bucket] = &newBL
