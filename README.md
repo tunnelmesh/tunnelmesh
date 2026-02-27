@@ -35,38 +35,7 @@ routing.
 
 ## Architecture
 
-```
-┌─────────────────┐                      ┌─────────────────┐
-│   Peer Node A   │                      │   Peer Node B   │
-│   (10.42.0.1)   │                      │   (10.42.0.2)   │
-│                 │  Encrypted Tunnel    │                 │
-│  ┌───────────┐  │◄────────────────────►│  ┌───────────┐  │
-│  │ TUN Device│  │  (SSH/UDP/Relay)     │  │ TUN Device│  │
-│  │  Router   │  │                      │  │  Router   │  │
-│  │ Forwarder │  │                      │  │ Forwarder │  │
-│  │ Transport │  │                      │  │ Transport │  │
-│  └───────────┘  │                      │  └───────────┘  │
-└────────┬────────┘                      └────────┬────────┘
-         │                                        │
-         │  Register/Heartbeat/Discovery          │
-         │  Hole-punch Coordination               │
-         │                                        │
-         └──────────────┬─────────────────────────┘
-                        │
-                        ▼
-              ┌─────────────────┐
-              │  Coordination   │
-              │     Server      │
-              │                 │
-              │ • Peer Registry │
-              │ • IP Allocation │
-              │ • DNS Records   │
-              │ • Hole-punch    │
-              │ • Admin UI      │
-              │ • WebSocket     │
-              │   Relay         │
-              └─────────────────┘
-```
+![tunnelmesh architecture](docs/images/architecture.svg)
 
 **Key points:**
 - **Unified Architecture**: All nodes are peers; coordinators are admin peers with services enabled
