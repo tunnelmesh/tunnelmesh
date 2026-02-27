@@ -2423,13 +2423,17 @@
     function createProgressBar() {
         const bar = document.createElement('div');
         bar.id = 's3-upload-progress';
-        bar.innerHTML = `
-            <div class="s3-progress-label" id="s3-progress-label">Uploading...</div>
-            <div class="s3-progress-track">
-                <div class="s3-progress-fill" id="s3-progress-fill"></div>
-            </div>`;
+        const label = document.createElement('div');
+        label.className = 's3-progress-label';
+        label.textContent = 'Uploading...';
+        const track = document.createElement('div');
+        track.className = 's3-progress-track';
+        const fill = document.createElement('div');
+        fill.className = 's3-progress-fill';
+        track.appendChild(fill);
+        bar.append(label, track);
         document.getElementById('s3-section')?.appendChild(bar);
-        return bar;
+        return { bar, label, fill };
     }
 
     function uploadFileWithProgress(file, key, onProgress) {
@@ -2468,9 +2472,7 @@
             return;
         }
 
-        const bar = createProgressBar();
-        const label = document.getElementById('s3-progress-label');
-        const fill = document.getElementById('s3-progress-fill');
+        const { bar, label, fill } = createProgressBar();
 
         for (const file of files) {
             const key = state.currentPath + file.name;
@@ -2494,8 +2496,13 @@
     // Drag and Drop
     // =========================================================================
 
+    let dragDropInitialized = false;
+
     /* istanbul ignore next */
     function initDragDrop() {
+        if (dragDropInitialized) return;
+        dragDropInitialized = true;
+
         const section = document.getElementById('s3-section');
         const dropZone = document.getElementById('s3-drop-zone');
 
