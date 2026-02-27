@@ -1920,6 +1920,30 @@
      *
      * Call this after every state transition: navigate, open, close, toggle selection.
      */
+
+    /**
+     * Classifies the current selection into live/deleted/file categories.
+     * Pure function: accepts state parameters, returns classification object.
+     * Used by updateToolbar() and deleteSelected() to determine what actions apply.
+     *
+     * @param {Set<string>} selectedIds - set of selected item IDs (key or name)
+     * @param {Array} currentItems - array of items from current listing
+     * @returns {{ allItems, liveItems, deletedItems, liveFiles }}
+     *   allItems    - all resolved items (unknown IDs excluded)
+     *   liveItems   - non-deleted, non-bucket items (files + folders)
+     *   deletedItems - items with deletedAt set
+     *   liveFiles   - non-deleted, non-bucket, non-folder items (downloadable files)
+     */
+    function classifySelection(selectedIds, currentItems) {
+        const allItems = [...selectedIds]
+            .map((id) => currentItems.find((i) => (i.key || i.name) === id))
+            .filter(Boolean);
+        const liveItems = allItems.filter((item) => !item.deletedAt && !item.isBucket);
+        const deletedItems = allItems.filter((item) => item.deletedAt);
+        const liveFiles = liveItems.filter((item) => !item.isFolder);
+        return { allItems, liveItems, deletedItems, liveFiles };
+    }
+
     /* istanbul ignore next */
     function updateToolbar() {
         const browseActions = document.getElementById('s3-browse-actions');
@@ -1944,14 +1968,10 @@
             if (viewToggleBtn) viewToggleBtn.style.display = 'none';
         } else if (selCount > 0) {
             // BROWSING + SELECTION state
-            const selectedItems = [...state.selectedItems].map((id) =>
-                state.currentItems.find((i) => (i.key || i.name) === id),
-            );
-            const hasDeletedItem = selectedItems.some((item) => item?.deletedAt);
-            const hasNonDeletedItem = selectedItems.some((item) => item && !item.deletedAt);
-            const hasNonDeletedFile = selectedItems.some(
-                (item) => item && !item.deletedAt && !item.isFolder && !item.isBucket,
-            );
+            const { liveItems, deletedItems, liveFiles } = classifySelection(state.selectedItems, state.currentItems);
+            const hasDeletedItem = deletedItems.length > 0;
+            const hasNonDeletedItem = liveItems.length > 0;
+            const hasNonDeletedFile = liveFiles.length > 0;
             if (browseActions) browseActions.style.display = 'none';
             if (selectionActions) selectionActions.style.display = 'flex';
             if (fileActions) fileActions.style.display = 'none';
@@ -2507,6 +2527,10 @@
             showToast('Navigate into a bucket first', 'warning');
             return;
         }
+        if (!state.writable) {
+            showToast('Bucket is read-only', 'warning');
+            return;
+        }
 
         const controller = new AbortController();
         const { bar, label, fill, cancelBtn } = createProgressBar();
@@ -2586,11 +2610,18 @@
             dragCounter = 0;
             dropZone.classList.remove('active');
 
-            // Only upload if s3 section is active and user is in a bucket
-            if (section.style.display === 'none' || !state.currentBucket) {
-                if (e.dataTransfer?.files?.length > 0 && section.style.display !== 'none') {
+            // Only upload if s3 section is active and user is in a writable bucket
+            if (section.style.display === 'none') return;
+            if (e.dataTransfer?.files?.length > 0) {
+                if (!state.currentBucket) {
                     showToast('Navigate into a bucket first', 'warning');
+                    return;
                 }
+                if (!state.writable) {
+                    showToast('Bucket is read-only', 'warning');
+                    return;
+                }
+            } else {
                 return;
             }
 
@@ -2653,6 +2684,22 @@
         return state.currentItems.find((item) => (item.key || item.name) === itemId);
     }
 
+    /**
+     * Validates a proposed rename operation.
+     * Pure function: no side effects, suitable for unit testing.
+     *
+     * @param {string} name - proposed new name
+     * @param {object} item - the item being renamed
+     * @returns {string|null} error message, or null if the rename is valid
+     */
+    function validateRename(name, item) {
+        if (!name || name.trim() === '') return 'Name cannot be empty';
+        if (name.includes('/')) return 'Name cannot contain /';
+        if (item.isBucket) return 'Buckets cannot be renamed';
+        if (item.isFolder) return 'Folders cannot be renamed';
+        return null;
+    }
+
     async function renameSelected() {
         const item = getSelectedItem();
         if (!item) return;
@@ -2661,19 +2708,9 @@
         const newName = prompt('Enter new name:', oldName);
         if (!newName || newName === oldName) return;
 
-        // Validate name
-        if (newName.includes('/')) {
-            alert('Name cannot contain /');
-            return;
-        }
-
-        if (item.isBucket) {
-            alert('Buckets cannot be renamed');
-            return;
-        }
-
-        if (item.isFolder) {
-            alert('Folders cannot be renamed (would require renaming all contents)');
+        const validationError = validateRename(newName, item);
+        if (validationError) {
+            showToast(validationError, 'error');
             return;
         }
 
@@ -2716,9 +2753,10 @@
 
             state.selectedItems.clear();
             await renderFileListing();
+            showToast(`Renamed to ${newName}`, 'success');
         } catch (err) {
             console.error('Rename failed:', err);
-            alert(`Rename failed: ${err.message}`);
+            showToast(`Rename failed: ${err.message}`, 'error');
         }
     }
 
@@ -2726,7 +2764,7 @@
         if (!state.currentBucket || state.selectedItems.size === 0) return;
         for (const itemId of state.selectedItems) {
             const item = state.currentItems.find((i) => (i.key || i.name) === itemId);
-            if (!item || item.isFolder || item.isBucket) continue;
+            if (!item || item.isFolder || item.isBucket || item.deletedAt) continue;
             const a = document.createElement('a');
             a.href = `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(item.key)}`;
             a.download = item.key.split('/').pop();
@@ -2737,7 +2775,14 @@
     }
 
     async function deleteSelected() {
-        const count = state.selectedItems.size;
+        if (!state.writable) {
+            showToast('Bucket is read-only', 'warning');
+            return;
+        }
+
+        // Only operate on live (non-deleted) items; deleted items must be undeleted first
+        const { liveItems } = classifySelection(state.selectedItems, state.currentItems);
+        const count = liveItems.length;
         if (count === 0) return;
 
         const confirmMsg = count === 1 ? 'Delete this item?' : `Delete ${count} items?`;
@@ -2746,9 +2791,8 @@
 
         try {
             let deletedCount = 0;
-            for (const itemId of state.selectedItems) {
-                const item = state.currentItems.find((i) => (i.key || i.name) === itemId);
-                if (!item || item.isBucket) continue;
+            for (const item of liveItems) {
+                if (item.isBucket) continue;
 
                 // Handle folder deletion
                 if (item.isFolder) {
@@ -2793,10 +2837,7 @@
     async function undeleteSelected() {
         if (!state.currentBucket || state.selectedItems.size === 0) return;
 
-        const deletedItems = [...state.selectedItems]
-            .map((id) => state.currentItems.find((i) => (i.key || i.name) === id))
-            .filter((item) => item?.deletedAt);
-
+        const { deletedItems } = classifySelection(state.selectedItems, state.currentItems);
         if (deletedItems.length === 0) return;
 
         const confirmMsg =
@@ -3083,6 +3124,8 @@
             detectJsonType,
             detectDatasheetMode,
             inferSchema,
+            validateRename,
+            classifySelection,
         },
     };
 });

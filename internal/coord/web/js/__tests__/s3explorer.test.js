@@ -12,6 +12,8 @@ const {
     detectJsonType,
     detectDatasheetMode,
     inferSchema,
+    validateRename,
+    classifySelection,
 } = s3explorer._test;
 
 describe('getItemIcon', () => {
@@ -452,5 +454,174 @@ describe('inferSchema', () => {
         const data = [{ name: 'Alice' }];
         const result = inferSchema(data);
         expect(result.columns[0].width).toBe(150);
+    });
+});
+
+// =============================================================================
+// validateRename
+// =============================================================================
+
+describe('validateRename', () => {
+    const liveFile = { name: 'report.txt', key: 'docs/report.txt' };
+    const bucket = { name: 'mybucket', isBucket: true };
+    const folder = { name: 'myfolder', key: 'myfolder/', isFolder: true };
+
+    test('returns null for a valid rename', () => {
+        expect(validateRename('report-v2.txt', liveFile)).toBe(null);
+    });
+
+    test('allows extension change', () => {
+        expect(validateRename('report.md', liveFile)).toBe(null);
+    });
+
+    test('allows renaming to same name (no-op guard is caller responsibility)', () => {
+        // validateRename only validates constraints, not whether name changed
+        expect(validateRename('report.txt', liveFile)).toBe(null);
+    });
+
+    test('returns error for empty name', () => {
+        expect(validateRename('', liveFile)).toBeTruthy();
+    });
+
+    test('returns error for whitespace-only name', () => {
+        expect(validateRename('   ', liveFile)).toBeTruthy();
+        expect(validateRename('\t\n', liveFile)).toBeTruthy();
+    });
+
+    test('returns error when name contains a slash', () => {
+        expect(validateRename('path/file.txt', liveFile)).toBeTruthy();
+        expect(validateRename('/leading-slash', liveFile)).toBeTruthy();
+        expect(validateRename('trailing/', liveFile)).toBeTruthy();
+    });
+
+    test('returns error when trying to rename a bucket', () => {
+        expect(validateRename('newname', bucket)).toBeTruthy();
+    });
+
+    test('returns error when trying to rename a folder', () => {
+        expect(validateRename('newname', folder)).toBeTruthy();
+    });
+
+    test('returns a string (not just truthy) for every error case', () => {
+        expect(typeof validateRename('', liveFile)).toBe('string');
+        expect(typeof validateRename('a/b', liveFile)).toBe('string');
+        expect(typeof validateRename('ok', bucket)).toBe('string');
+        expect(typeof validateRename('ok', folder)).toBe('string');
+    });
+
+    test('valid name does not include slash even at end', () => {
+        expect(validateRename('validname/', liveFile)).toBeTruthy();
+    });
+});
+
+// =============================================================================
+// classifySelection
+// =============================================================================
+
+describe('classifySelection', () => {
+    // Shared fixture: a realistic listing inside a bucket
+    const items = [
+        { name: 'readme.md', key: 'readme.md' },
+        { name: 'data.json', key: 'data.json' },
+        { name: 'images/', key: 'images/', isFolder: true },
+        { name: 'archive/', key: 'archive/', isFolder: true },
+        { name: 'old.txt', key: 'old.txt', deletedAt: '2024-06-01T00:00:00Z' },
+        { name: 'draft.md', key: 'draft.md', deletedAt: '2024-07-15T12:00:00Z' },
+        { name: 'mybucket', isBucket: true },
+    ];
+
+    test('empty selection returns all empty arrays', () => {
+        const result = classifySelection(new Set(), items);
+        expect(result.allItems).toHaveLength(0);
+        expect(result.liveItems).toHaveLength(0);
+        expect(result.deletedItems).toHaveLength(0);
+        expect(result.liveFiles).toHaveLength(0);
+    });
+
+    test('single live file classified correctly', () => {
+        const result = classifySelection(new Set(['readme.md']), items);
+        expect(result.allItems).toHaveLength(1);
+        expect(result.liveItems).toHaveLength(1);
+        expect(result.deletedItems).toHaveLength(0);
+        expect(result.liveFiles).toHaveLength(1);
+    });
+
+    test('single deleted file classified correctly', () => {
+        const result = classifySelection(new Set(['old.txt']), items);
+        expect(result.allItems).toHaveLength(1);
+        expect(result.liveItems).toHaveLength(0);
+        expect(result.deletedItems).toHaveLength(1);
+        expect(result.liveFiles).toHaveLength(0);
+    });
+
+    test('live folder appears in liveItems but not liveFiles', () => {
+        const result = classifySelection(new Set(['images/']), items);
+        expect(result.liveItems).toHaveLength(1);
+        expect(result.liveFiles).toHaveLength(0);
+        expect(result.deletedItems).toHaveLength(0);
+    });
+
+    test('bucket excluded from liveItems and liveFiles', () => {
+        const result = classifySelection(new Set(['mybucket']), items);
+        expect(result.allItems).toHaveLength(1);
+        expect(result.liveItems).toHaveLength(0);
+        expect(result.liveFiles).toHaveLength(0);
+    });
+
+    test('mixed live and deleted files classified separately', () => {
+        const result = classifySelection(new Set(['readme.md', 'old.txt']), items);
+        expect(result.liveItems).toHaveLength(1);
+        expect(result.deletedItems).toHaveLength(1);
+        expect(result.liveFiles).toHaveLength(1);
+    });
+
+    test('multiple deleted items all appear in deletedItems', () => {
+        const result = classifySelection(new Set(['old.txt', 'draft.md']), items);
+        expect(result.deletedItems).toHaveLength(2);
+        expect(result.liveItems).toHaveLength(0);
+    });
+
+    test('mixed live files and live folder', () => {
+        const result = classifySelection(new Set(['readme.md', 'data.json', 'images/']), items);
+        expect(result.liveItems).toHaveLength(3); // 2 files + 1 folder
+        expect(result.liveFiles).toHaveLength(2); // only files
+    });
+
+    test('unknown item IDs are silently excluded', () => {
+        const result = classifySelection(new Set(['nonexistent.txt', 'also-missing']), items);
+        expect(result.allItems).toHaveLength(0);
+    });
+
+    test('mix of known and unknown IDs — unknowns excluded', () => {
+        const result = classifySelection(new Set(['readme.md', 'ghost.txt']), items);
+        expect(result.allItems).toHaveLength(1);
+        expect(result.liveItems).toHaveLength(1);
+    });
+
+    test('all categories correct for comprehensive selection', () => {
+        const ids = new Set(['readme.md', 'images/', 'old.txt', 'mybucket']);
+        const result = classifySelection(ids, items);
+        expect(result.allItems).toHaveLength(4);
+        expect(result.liveItems).toHaveLength(2); // readme.md + images/
+        expect(result.deletedItems).toHaveLength(1); // old.txt
+        expect(result.liveFiles).toHaveLength(1); // readme.md only
+    });
+
+    test('items matched by name when key is absent (bucket-level)', () => {
+        const bucketItems = [{ name: 'bucket-a', isBucket: true }];
+        const result = classifySelection(new Set(['bucket-a']), bucketItems);
+        expect(result.allItems).toHaveLength(1);
+        // buckets excluded from liveItems
+        expect(result.liveItems).toHaveLength(0);
+    });
+
+    test('deletedAt with different truthy values all treated as deleted', () => {
+        const mixed = [
+            { name: 'a.txt', key: 'a.txt', deletedAt: '2024-01-01T00:00:00Z' },
+            { name: 'b.txt', key: 'b.txt', deletedAt: 1704067200000 }, // timestamp
+        ];
+        const result = classifySelection(new Set(['a.txt', 'b.txt']), mixed);
+        expect(result.deletedItems).toHaveLength(2);
+        expect(result.liveItems).toHaveLength(0);
     });
 });
