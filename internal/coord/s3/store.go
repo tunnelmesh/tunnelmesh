@@ -2903,6 +2903,47 @@ func (s *Store) listObjectsUnsafe(bucket, prefix, marker string, maxKeys int) ([
 	return s.walkObjectMeta(metaDir, prefix, marker, maxKeys)
 }
 
+// ScanObjectsForReconcile walks all object metadata for a bucket without holding
+// any mutex. Intended exclusively for reconcileLocalIndex, which tolerates
+// concurrent-delete gaps (ENOENT from ReadFile is silently skipped; the CAS
+// merge loop fills in any entries added by incremental updates during the scan).
+// Must not be used for external S3 API responses where lock-safe consistency matters.
+func (s *Store) ScanObjectsForReconcile(ctx context.Context, bucket string) ([]ObjectMeta, error) {
+	metaDir := filepath.Join(s.bucketPath(bucket), "meta")
+	objs, _, _, err := s.walkObjectMeta(metaDir, "", "", 0)
+	return objs, err
+}
+
+// ScanRecycledForReconcile reads recycled entries for a bucket without holding
+// any mutex. Intended exclusively for reconcileLocalIndex — see ScanObjectsForReconcile.
+func (s *Store) ScanRecycledForReconcile(ctx context.Context, bucket string) ([]RecycledEntry, error) {
+	rbDir := s.recyclebinPath(bucket)
+	entries, err := os.ReadDir(rbDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read recyclebin dir: %w", err)
+	}
+
+	var result []RecycledEntry
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(rbDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var entry RecycledEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
 // walkObjectMeta walks the metadata directory and returns objects matching
 // the prefix/marker/maxKeys filters. Caller must hold at least s.mu.RLock —
 // os.ReadFile opens files without FILE_SHARE_DELETE on Windows, so a concurrent
@@ -2954,7 +2995,11 @@ func (s *Store) walkObjectMeta(metaDir, prefix, marker string, maxKeys int) ([]O
 		// Read metadata
 		data, err := os.ReadFile(path)
 		if err != nil {
-			s.logger.Warn().Err(err).Str("path", path).Msg("ListObjects: failed to read metadata file")
+			// Silently skip ENOENT: expected when called without a lock (reconcile path)
+			// if a concurrent DeleteObject removes the file between Walk and ReadFile.
+			if !os.IsNotExist(err) {
+				s.logger.Warn().Err(err).Str("path", path).Msg("ListObjects: failed to read metadata file")
+			}
 			return nil
 		}
 
