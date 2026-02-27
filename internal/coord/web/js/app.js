@@ -2519,6 +2519,11 @@ function s3DeleteSelected() {
 }
 window.s3DeleteSelected = s3DeleteSelected;
 
+function s3UndeleteSelected() {
+    if (TM.s3explorer) TM.s3explorer.undeleteSelected();
+}
+window.s3UndeleteSelected = s3UndeleteSelected;
+
 function s3ToggleAutosave(enabled) {
     if (TM.s3explorer) TM.s3explorer.setAutosave(enabled);
 }

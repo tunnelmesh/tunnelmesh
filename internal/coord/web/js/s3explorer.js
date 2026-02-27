@@ -1232,10 +1232,10 @@
                     const isSelected = state.selectedItems.has(itemId);
                     let rowClass = isSelected ? 's3-selected' : '';
                     if (isDeleted) rowClass += ' s3-recycled';
-                    // Show checkboxes for files/folders (not buckets), disabled for read-only or deleted
+                    // Show checkboxes for files/folders (not buckets), disabled for read-only
                     const checkbox = item.isBucket
                         ? ''
-                        : `<input type="checkbox" class="s3-checkbox" data-item-id="${escapeHtml(itemId)}" ${isSelected ? 'checked' : ''} ${state.writable && !isDeleted ? '' : 'disabled'} onclick="event.stopPropagation(); TM.s3explorer.toggleSelection('${escapeJsString(itemId)}')" />`;
+                        : `<input type="checkbox" class="s3-checkbox" data-item-id="${escapeHtml(itemId)}" ${isSelected ? 'checked' : ''} ${state.writable ? '' : 'disabled'} onclick="event.stopPropagation(); TM.s3explorer.toggleSelection('${escapeJsString(itemId)}')" />`;
                     const deletedBadge = isDeleted ? '<span class="s3-badge s3-badge-deleted">Deleted</span>' : '';
 
                     // Only show quota column for bucket list (not when inside a bucket)
@@ -1332,7 +1332,7 @@
                         : `<input type="checkbox" class="s3-icon-checkbox"
                         data-item-id="${escapeHtml(itemId)}"
                         ${isSelected ? 'checked' : ''}
-                        ${state.writable && !isDeleted ? '' : 'disabled'} />`;
+                        ${state.writable ? '' : 'disabled'} />`;
 
                     // Deleted badge
                     const deletedBadge = isDeleted ? '<span class="s3-badge s3-badge-deleted">Deleted</span>' : '';
@@ -1929,6 +1929,8 @@
         const closeBtn = document.getElementById('s3-close-btn');
         const renameBtn = document.getElementById('s3-rename-btn');
         const downloadSelectedBtn = document.getElementById('s3-download-selected-btn');
+        const deleteSelectedBtn = document.getElementById('s3-delete-selected-btn');
+        const undeleteSelectedBtn = document.getElementById('s3-undelete-selected-btn');
         const countEl = document.getElementById('s3-selection-count');
 
         const isViewing = state.currentFile !== null;
@@ -1942,19 +1944,25 @@
             if (viewToggleBtn) viewToggleBtn.style.display = 'none';
         } else if (selCount > 0) {
             // BROWSING + SELECTION state
+            const selectedItems = [...state.selectedItems].map((id) =>
+                state.currentItems.find((i) => (i.key || i.name) === id),
+            );
+            const hasDeletedItem = selectedItems.some((item) => item?.deletedAt);
+            const hasNonDeletedItem = selectedItems.some((item) => item && !item.deletedAt);
+            const hasNonDeletedFile = selectedItems.some(
+                (item) => item && !item.deletedAt && !item.isFolder && !item.isBucket,
+            );
             if (browseActions) browseActions.style.display = 'none';
             if (selectionActions) selectionActions.style.display = 'flex';
             if (fileActions) fileActions.style.display = 'none';
             if (viewToggleBtn) viewToggleBtn.style.display = 'inline-flex';
-            if (renameBtn) renameBtn.style.display = selCount === 1 ? 'inline-flex' : 'none';
-            // Hide download button when all selected items are folders (nothing to download)
-            if (downloadSelectedBtn) {
-                const hasFile = [...state.selectedItems].some((id) => {
-                    const item = state.currentItems.find((i) => (i.key || i.name) === id);
-                    return item && !item.isFolder && !item.isBucket;
-                });
-                downloadSelectedBtn.style.display = hasFile ? 'inline-flex' : 'none';
-            }
+            // Rename only for a single non-deleted item
+            if (renameBtn) renameBtn.style.display = selCount === 1 && !hasDeletedItem ? 'inline-flex' : 'none';
+            // Download only for non-deleted files
+            if (downloadSelectedBtn) downloadSelectedBtn.style.display = hasNonDeletedFile ? 'inline-flex' : 'none';
+            // Delete only for non-deleted items; Undelete only for deleted items
+            if (deleteSelectedBtn) deleteSelectedBtn.style.display = hasNonDeletedItem ? 'inline-flex' : 'none';
+            if (undeleteSelectedBtn) undeleteSelectedBtn.style.display = hasDeletedItem ? 'inline-flex' : 'none';
             if (countEl) countEl.textContent = `${selCount} selected`;
         } else {
             // BROWSING + NO SELECTION state
@@ -2782,6 +2790,42 @@
         }
     }
 
+    async function undeleteSelected() {
+        if (!state.currentBucket || state.selectedItems.size === 0) return;
+
+        const deletedItems = [...state.selectedItems]
+            .map((id) => state.currentItems.find((i) => (i.key || i.name) === id))
+            .filter((item) => item?.deletedAt);
+
+        if (deletedItems.length === 0) return;
+
+        const confirmMsg =
+            deletedItems.length === 1
+                ? `Restore "${deletedItems[0].name}"?`
+                : `Restore ${deletedItems.length} deleted items?`;
+
+        if (!confirm(confirmMsg)) return;
+
+        try {
+            let restoredCount = 0;
+            for (const item of deletedItems) {
+                const key = item.key || item.name;
+                await restoreRecycledObject(state.currentBucket, key);
+                restoredCount++;
+            }
+
+            state.selectedItems.clear();
+            updateSelectionUI();
+            if (restoredCount > 0) {
+                showToast(`Restored ${restoredCount} item${restoredCount > 1 ? 's' : ''}`, 'success');
+            }
+            await renderFileListing();
+        } catch (err) {
+            console.error('Undelete failed:', err);
+            showToast(`Restore failed: ${err.message}`, 'error');
+        }
+    }
+
     // =========================================================================
     // Initialization
     // =========================================================================
@@ -3011,6 +3055,7 @@
         renameSelected,
         downloadSelected,
         deleteSelected,
+        undeleteSelected,
         setAutosave,
         toggleFullscreen,
         toggleView,

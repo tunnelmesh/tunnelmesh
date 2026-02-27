@@ -108,7 +108,11 @@
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                                 <span>Download</span>
                             </button>
-                            <button class="s3-btn s3-btn-danger" onclick="s3DeleteSelected()" title="Delete selected">
+                            <button class="s3-btn" id="s3-undelete-selected-btn" onclick="s3UndeleteSelected()" title="Restore selected deleted files">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+                                <span>Undelete</span>
+                            </button>
+                            <button class="s3-btn s3-btn-danger" id="s3-delete-selected-btn" onclick="s3DeleteSelected()" title="Delete selected">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                                 <span>Delete</span>
                             </button>
