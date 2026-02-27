@@ -7,10 +7,10 @@ TunnelMesh is a P2P mesh networking tool written in Go that creates encrypted tu
 **This is a greenfield project** - breaking changes are allowed and encouraged when they improve the codebase. Backwards compatibility is not a constraint during active development.
 
 **Admin Access:**
-- Configured via `admin_peers` field in coordinator config
-- Supports peer names OR peer IDs (SHA256 of SSH key, first 8 bytes = 16 hex chars)
-- Peer IDs are preferred for security (immutable, tied to SSH key)
-- Matched peers are added to "admins" group on first join
+- Requires explicit `admin_peers` list in coordinator config — **no auto-admin bootstrap**; without it, no peer gets admin access
+- Supports peer IDs (SHA256 of SSH key, first 8 bytes = 16 hex chars) or peer names with glob patterns (*, ?, [...])
+- Peer IDs are preferred for security (immutable, tied to SSH key); name matching warns in logs
+- Matching peers are added to the `admins` group on their first registration with the coordinator
 - Network/routing functionality works without admin access
 - Admin access enables peer stats, mesh/data plane configuration
 
