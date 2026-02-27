@@ -32,6 +32,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/mesh"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -1166,6 +1167,14 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 	s.maxObjectSize = cfg.Coordinator.S3.MaxObjectSize.Bytes()
 	if s.maxObjectSize <= 0 {
 		s.maxObjectSize = defaultMaxObjectSize
+	}
+	// Warn if an individual object could exceed the total bucket quota. The quota
+	// manager will reject the upload, but the error will be confusing without this hint.
+	if s.maxObjectSize > cfg.Coordinator.S3.MaxSize.Bytes() {
+		log.Warn().
+			Str("max_object_size", bytesize.Size(s.maxObjectSize).String()).
+			Str("max_size", bytesize.Size(cfg.Coordinator.S3.MaxSize.Bytes()).String()).
+			Msg("s3.max_object_size exceeds s3.max_size: individual uploads cannot succeed once the bucket is non-empty")
 	}
 
 	// Load or create master key for CAS encryption

@@ -2551,7 +2551,7 @@ a.logs-container {
 .s3-progress-track {
     height: 4px;
     background: var(--color-border);
-    border-radius: 2px;
+    border-radius: 0;
     overflow: hidden;
 }
 

@@ -141,6 +141,11 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 			if target := s.objectPrimaryCoordinator(bucket, key); target != "" {
 				// Buffer body so we can retry locally if forward fails.
 				// Limit the read to maxObjectSize to prevent OOM on oversized uploads.
+				// NOTE: unlike the direct-upload path (which streams through PutObject with
+				// ~64 KB peak memory), this path buffers the entire body. With the default
+				// 1 GiB limit each concurrent forwarded upload can hold up to 1 GiB of RAM.
+				// Streaming forwarding would avoid this but requires a two-phase approach to
+				// handle the retry-local fallback.
 				var bodyBuf []byte
 				if r.Body != nil {
 					var err error

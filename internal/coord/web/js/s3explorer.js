@@ -2517,6 +2517,9 @@
             });
             xhr.addEventListener('error', () => reject(new Error('Network error')));
             xhr.addEventListener('abort', () => reject(new DOMException('Upload cancelled', 'AbortError')));
+            // Listener is never explicitly removed, but the signal (and its listeners)
+            // is GC'd when the AbortController goes out of scope after uploadFiles()
+            // returns, so accumulation across files in the same batch is not a concern.
             signal?.addEventListener('abort', () => xhr.abort());
             xhr.send(file);
         });
@@ -2760,6 +2763,10 @@
         }
     }
 
+    // NOTE: downloads are triggered via sequential anchor clicks. Browsers typically
+    // allow 1-2 simultaneous file downloads and silently drop the rest when many are
+    // triggered at once. For large multi-file selections, a future enhancement could
+    // serve a server-side zip instead.
     function downloadSelected() {
         if (!state.currentBucket || state.selectedItems.size === 0) return;
         for (const itemId of state.selectedItems) {
@@ -2836,6 +2843,10 @@
 
     async function undeleteSelected() {
         if (!state.currentBucket || state.selectedItems.size === 0) return;
+        if (!state.writable) {
+            showToast('Bucket is read-only', 'warning');
+            return;
+        }
 
         const { deletedItems } = classifySelection(state.selectedItems, state.currentItems);
         if (deletedItems.length === 0) return;
