@@ -39,17 +39,19 @@ routing.
 
 **Key points:**
 - **Unified Architecture**: All nodes are peers; coordinators are admin peers with services enabled
-- Multiple transport options: SSH, UDP (ChaCha20-Poly1305), or WebSocket relay, with automatic fallback
+- Traffic flows directly between peers via encrypted tunnels — UDP (ChaCha20-Poly1305), SSH, or WebSocket relay with automatic fallback
 - Coordinator peers handle discovery, registration, and NAT traversal coordination
 - Peers behind NAT use hole-punching or relay as fallback
 
 ## Documentation
 
-- **[Getting Started](https://read.tunnelmesh.io)** — Installation, setup, and first mesh
-- **[Admin Guide](https://read.tunnelmesh.io)** — Admin interface, RBAC, and mesh management
-- **[Configuration Reference](https://read.tunnelmesh.io)** — Full YAML config options for coordinators and peers
-- **[Security](https://read.tunnelmesh.io)** — Token management, file permissions, and secret storage
-- **[CLI Reference](https://read.tunnelmesh.io)** — All commands, flags, and walkthroughs
+Full documentation is at **[read.tunnelmesh.io](https://read.tunnelmesh.io)**, covering:
+
+- Getting Started — installation, setup, and first mesh
+- Admin Guide — admin interface, RBAC, and mesh management
+- Configuration Reference — full YAML config options for coordinators and peers
+- Security — token management, file permissions, and secret storage
+- CLI Reference — all commands, flags, and walkthroughs
 
 ## Docker Deployment
 
