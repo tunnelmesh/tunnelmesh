@@ -140,13 +140,18 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 			r.Header.Get("X-TunnelMesh-Forwarded") == "" {
 			if target := s.objectPrimaryCoordinator(bucket, key); target != "" {
 				// Buffer body so we can retry locally if forward fails.
+				// Limit the read to maxObjectSize to prevent OOM on oversized uploads.
 				var bodyBuf []byte
 				if r.Body != nil {
 					var err error
-					bodyBuf, err = io.ReadAll(r.Body)
+					bodyBuf, err = io.ReadAll(io.LimitReader(r.Body, s.maxObjectSize+1))
 					_ = r.Body.Close()
 					if err != nil {
 						s.jsonError(w, "failed to read request body", http.StatusInternalServerError)
+						return
+					}
+					if int64(len(bodyBuf)) > s.maxObjectSize {
+						s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 						return
 					}
 					r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
