@@ -220,7 +220,15 @@ docker-up: docker-build
 		sudo tunnelmesh context rm docker 2>/dev/null || true; \
 		echo "Joining mesh with coordinator at http://localhost:8081..."; \
 		sudo env "TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token)" tunnelmesh join http://localhost:8081 --context docker; \
-	fi
+	fi; \
+	echo ""; \
+	echo "=== Run s3bench against this environment ==="; \
+	echo "./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \\"; \
+	echo "    --coordinator http://localhost:8081 \\"; \
+	echo "    --auth-token \"$$TUNNELMESH_TOKEN\" \\"; \
+	echo "    --time-scale 500 \\"; \
+	echo "    --json results.json \\"; \
+	echo "    --accordion"
 
 docker-logs:
 	$(DOCKER_COMPOSE) logs -f
