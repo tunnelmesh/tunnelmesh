@@ -3913,7 +3913,7 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "docker_container_cpu_percent{peer=\"coordinator-1\"}",
+          "expr": "max by (container_id, container_name, image) (docker_container_cpu_percent)",
           "legendFormat": "{{container_name}}",
           "refId": "A"
         }
@@ -4005,7 +4005,7 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "docker_container_memory_bytes{peer=\"coordinator-1\"}",
+          "expr": "max by (container_id, container_name, image) (docker_container_memory_bytes)",
           "legendFormat": "{{container_name}}",
           "refId": "A"
         }
@@ -4097,7 +4097,7 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "docker_container_memory_percent{peer=\"coordinator-1\"}",
+          "expr": "max by (container_id, container_name, image) (docker_container_memory_percent)",
           "legendFormat": "{{container_name}}",
           "refId": "A"
         }
@@ -4189,7 +4189,7 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "docker_container_disk_bytes{peer=\"coordinator-1\"}",
+          "expr": "max by (container_id, container_name, image) (docker_container_disk_bytes)",
           "legendFormat": "{{container_name}}",
           "refId": "A"
         }
