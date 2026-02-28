@@ -12,8 +12,11 @@ import (
 	"github.com/rs/zerolog/log"
 	gossh "golang.org/x/crypto/ssh"
 
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/internal/transport"
 	"github.com/tunnelmesh/tunnelmesh/internal/tunnel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // Transport implements the SSH transport.
@@ -67,6 +70,13 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 		return nil, fmt.Errorf("no connectable address for peer %s", opts.PeerName)
 	}
 
+	ctx, span := tracing.Tracer("tunnelmesh/ssh").Start(ctx, "ssh.dial")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("peer.name", opts.PeerName),
+		attribute.String("ssh.addr", addr),
+	)
+
 	log.Debug().
 		Str("peer", opts.PeerName).
 		Str("addr", addr).
@@ -94,9 +104,13 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 
 	select {
 	case <-dialCtx.Done():
+		span.RecordError(dialCtx.Err())
+		span.SetStatus(otelcodes.Error, dialCtx.Err().Error())
 		return nil, dialCtx.Err()
 	case r := <-ch:
 		if r.err != nil {
+			span.RecordError(r.err)
+			span.SetStatus(otelcodes.Error, r.err.Error())
 			return nil, r.err
 		}
 
@@ -104,12 +118,15 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 		channel, reqs, err := r.client.OpenChannel(tunnel.ChannelType, []byte(opts.LocalName))
 		if err != nil {
 			_ = r.client.Close()
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, err.Error())
 			return nil, fmt.Errorf("open channel: %w", err)
 		}
 
 		// Discard channel requests
 		go gossh.DiscardRequests(reqs)
 
+		span.SetStatus(otelcodes.Ok, "")
 		conn := &Connection{
 			channel:    channel,
 			sshClient:  r.client,

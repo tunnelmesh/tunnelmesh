@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // NegotiatorConfig holds negotiator settings.
@@ -67,6 +70,18 @@ func (n *Negotiator) Negotiate(ctx context.Context, peerInfo *PeerInfo, dialOpts
 		return nil, fmt.Errorf("no transports available for peer %s", peerInfo.Name)
 	}
 
+	// Span covering the full negotiation — shows transport preference order and which succeeded.
+	orderStrs := make([]string, len(order))
+	for i, t := range order {
+		orderStrs[i] = string(t)
+	}
+	ctx, negotiateSpan := tracing.Tracer("tunnelmesh/transport").Start(ctx, "transport.negotiate")
+	defer negotiateSpan.End()
+	negotiateSpan.SetAttributes(
+		attribute.String("peer.name", peerInfo.Name),
+		attribute.StringSlice("transport.order", orderStrs),
+	)
+
 	log.Debug().
 		Str("peer", peerInfo.Name).
 		Interface("order", order).
@@ -97,6 +112,8 @@ func (n *Negotiator) Negotiate(ctx context.Context, peerInfo *PeerInfo, dialOpts
 			if attempt > 0 {
 				select {
 				case <-ctx.Done():
+					negotiateSpan.RecordError(ctx.Err())
+					negotiateSpan.SetStatus(otelcodes.Error, ctx.Err().Error())
 					return nil, ctx.Err()
 				case <-time.After(n.config.RetryDelay):
 				}
@@ -108,8 +125,22 @@ func (n *Negotiator) Negotiate(ctx context.Context, peerInfo *PeerInfo, dialOpts
 				Int("attempt", attempt+1).
 				Msg("attempting connection")
 
-			conn, err := transport.Dial(ctx, opts)
+			// Span per attempt — shows exactly which sub-step (and attempt number) failed or succeeded.
+			attemptCtx, attemptSpan := tracing.Tracer("tunnelmesh/transport").Start(ctx, "transport.attempt")
+			attemptSpan.SetAttributes(
+				attribute.String("peer.name", peerInfo.Name),
+				attribute.String("transport.type", string(transportType)),
+				attribute.Int("transport.attempt", attempt+1),
+			)
+
+			conn, err := transport.Dial(attemptCtx, opts)
 			if err == nil {
+				attemptSpan.SetStatus(otelcodes.Ok, "")
+				attemptSpan.End()
+
+				negotiateSpan.SetAttributes(attribute.String("transport.selected", string(transportType)))
+				negotiateSpan.SetStatus(otelcodes.Ok, "")
+
 				log.Info().
 					Str("peer", peerInfo.Name).
 					Str("transport", string(transportType)).
@@ -123,6 +154,10 @@ func (n *Negotiator) Negotiate(ctx context.Context, peerInfo *PeerInfo, dialOpts
 			}
 
 			lastErr = err
+			attemptSpan.RecordError(err)
+			attemptSpan.SetStatus(otelcodes.Error, err.Error())
+			attemptSpan.End()
+
 			log.Debug().
 				Err(err).
 				Str("peer", peerInfo.Name).
@@ -136,6 +171,8 @@ func (n *Negotiator) Negotiate(ctx context.Context, peerInfo *PeerInfo, dialOpts
 		}
 	}
 
+	negotiateSpan.RecordError(lastErr)
+	negotiateSpan.SetStatus(otelcodes.Error, "all transports failed")
 	return nil, fmt.Errorf("all transports failed for peer %s: %w", peerInfo.Name, lastErr)
 }
 
