@@ -203,6 +203,17 @@ docker-up: docker-build
 	echo "Generated auth token: $$TUNNELMESH_TOKEN"; \
 	printf "%s" "$$TUNNELMESH_TOKEN" > /tmp/tunnelmesh-docker-token; \
 	chmod 600 /tmp/tunnelmesh-docker-token; \
+	cleanup() { \
+		echo ""; \
+		printf "Clear volumes? [y/N] "; \
+		read clear_answer </dev/tty; \
+		if [ "$$clear_answer" = "y" ] || [ "$$clear_answer" = "Y" ]; then \
+			echo "Clearing volumes..."; \
+			TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) down -v; \
+		fi; \
+		rm -f /tmp/tunnelmesh-docker-token; \
+	}; \
+	trap cleanup INT; \
 	TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) up -d; \
 	echo "TunnelMesh Docker environment started"; \
 	echo ""; \
@@ -215,7 +226,7 @@ docker-up: docker-build
 	echo "Use 'make docker-logs-monitoring' to follow monitoring logs"; \
 	echo ""; \
 	echo "=== Join from this machine ==="; \
-	read -p "Run 'sudo tunnelmesh join --context docker'? [Y/n] " answer; \
+	read -p "Run 'sudo tunnelmesh join --context docker'? [Y/n] " answer </dev/tty; \
 	if [ "$$answer" != "n" ] && [ "$$answer" != "N" ]; then \
 		sudo tunnelmesh context rm docker 2>/dev/null || true; \
 		echo "Joining mesh in background..."; \
@@ -231,7 +242,7 @@ docker-up: docker-build
 	echo "    --time-scale 500 \\"; \
 	echo "    --json results.json \\"; \
 	echo "    --accordion"; \
-	read -p "Run s3bench now? [Y/n] " s3answer; \
+	read -p "Run s3bench now? [Y/n] " s3answer </dev/tty; \
 	if [ "$$s3answer" != "n" ] && [ "$$s3answer" != "N" ]; then \
 		./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \
 			--coordinator http://localhost:8081 \
