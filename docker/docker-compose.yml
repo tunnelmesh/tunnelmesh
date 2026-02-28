@@ -119,6 +119,8 @@ services:
     depends_on:
       coord-1:
         condition: service_healthy
+      coord-2:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 5s
