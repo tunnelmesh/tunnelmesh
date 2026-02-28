@@ -1,0 +1,17 @@
+# TunnelMesh Coordinator Configuration - Secondary
+# Used by coord-2 and coord-3 in the Docker testing rig.
+# Loki log shipping and Prometheus/Grafana monitoring URLs are intentionally
+# omitted: those components only run on coordinator-1, and starting them on
+# secondary coordinators wastes resources and produces unreachable-endpoint
+# errors (Loki/Prometheus aren't in coord-2/coord-3's network namespace).
+
+name: "${COORD_NAME}"
+private_key: "/root/.tunnelmesh/id_ed25519"
+
+coordinator:
+  enabled: true
+  listen: ":8080"
+  data_dir: "/var/lib/tunnelmesh"
+  admin_peers: ["coordinator-*", "mynode"]
+  service_ports: [9443]
+  locations: true

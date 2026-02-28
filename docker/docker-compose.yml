@@ -66,7 +66,7 @@ services:
     container_name: tunnelmesh-coord-2
     entrypoint: ["/bin/bash", "/scripts/coordinator-entrypoint.sh"]
     volumes:
-      - ./config/coordinator.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
+      - ./config/coordinator-secondary.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
       - ./scripts/coordinator-entrypoint.sh:/scripts/coordinator-entrypoint.sh:ro
       - coord-2-data:/var/lib/tunnelmesh
       - coord-2-keys:/root/.tunnelmesh
@@ -100,7 +100,7 @@ services:
     container_name: tunnelmesh-coord-3
     entrypoint: ["/bin/bash", "/scripts/coordinator-entrypoint.sh"]
     volumes:
-      - ./config/coordinator.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
+      - ./config/coordinator-secondary.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
       - ./scripts/coordinator-entrypoint.sh:/scripts/coordinator-entrypoint.sh:ro
       - coord-3-data:/var/lib/tunnelmesh
       - coord-3-keys:/root/.tunnelmesh
