@@ -478,6 +478,13 @@ func (r *Replicator) RemovePeer(coordMeshIP string) {
 	}
 }
 
+// HasPeer reports whether a coordinator is already an active replication target.
+func (r *Replicator) HasPeer(coordMeshIP string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.peers[coordMeshIP]
+}
+
 // GetPeers returns a copy of the current peer list.
 func (r *Replicator) GetPeers() []string {
 	r.mu.RLock()

@@ -60,6 +60,10 @@ type S3Metrics struct {
 	RebalanceObjectsEnqueuedTotal prometheus.Counter // tunnelmesh_s3_rebalance_objects_enqueued_total
 	RebalanceBytesTransferred     prometheus.Counter // tunnelmesh_s3_rebalance_bytes_transferred_total
 
+	// Replication transfer metrics (inter-coordinator, not client-facing)
+	ReplicationBytesSent     prometheus.Counter // tunnelmesh_s3_replication_bytes_sent_total
+	ReplicationBytesReceived prometheus.Counter // tunnelmesh_s3_replication_bytes_received_total
+
 	// Listing index drift metrics
 	ListingIndexStaleEntries prometheus.Gauge   // tunnelmesh_s3_listing_stale_entries (0 in steady state)
 	ListingIndexStaleCleaned prometheus.Counter // tunnelmesh_s3_listing_stale_cleaned_total
@@ -210,6 +214,15 @@ func InitS3Metrics(registry prometheus.Registerer) *S3Metrics {
 			RebalanceBytesTransferred: promauto.With(registry).NewCounter(prometheus.CounterOpts{
 				Name: "tunnelmesh_s3_rebalance_bytes_transferred_total",
 				Help: "Total bytes transferred during rebalance operations",
+			}),
+
+			ReplicationBytesSent: promauto.With(registry).NewCounter(prometheus.CounterOpts{
+				Name: "tunnelmesh_s3_replication_bytes_sent_total",
+				Help: "Total bytes sent to peer coordinators for replication",
+			}),
+			ReplicationBytesReceived: promauto.With(registry).NewCounter(prometheus.CounterOpts{
+				Name: "tunnelmesh_s3_replication_bytes_received_total",
+				Help: "Total bytes received from peer coordinators for replication",
 			}),
 
 			// Listing index drift metrics

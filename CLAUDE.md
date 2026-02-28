@@ -421,6 +421,20 @@ tunnelmesh-s3bench run alien_invasion --time-scale 36
 - `internal/s3bench/story/` - Story scenarios and characters
 - `internal/s3bench/documents/` - Document generation
 
+## Monitoring
+
+### Prometheus Alert Classification
+
+All alerts in `monitoring/prometheus/alerts.yml` are organised into exactly three Prometheus rule groups:
+
+| Group | Severity label | Intent |
+|-------|---------------|--------|
+| `warnings` | `warning` | Early indicators — degraded but not outage-level; human review within hours |
+| `critical` | `critical` | Service degradation requiring prompt intervention (minutes to hours) |
+| `page` | `page` | Immediate action required — active outage or imminent data loss |
+
+**Do not add a fourth group.** When adding a new alert, pick the group whose description fits best and set the `severity` label to match (`warning` / `critical` / `page`). Functional sub-topics (e.g. stats replication, S3, mesh) are expressed via the `category` label and inline comments — not via separate rule groups.
+
 ## Skills
 
 Three specialized skill files are available in `.claude/skills/`:

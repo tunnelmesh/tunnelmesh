@@ -69,6 +69,7 @@ type serverStats struct {
 // This separation ensures the admin interface (dashboards, monitoring, config) is never
 // exposed to the public internet, while the coordination API remains accessible for peers.
 type Server struct {
+	ctx                context.Context    // Server lifecycle context (cancelled on shutdown)
 	cancel             context.CancelFunc // Cancel function for server lifecycle (stops background operations)
 	wg                 sync.WaitGroup     // Tracks background goroutines for clean shutdown
 	cfg                *config.PeerConfig
@@ -310,6 +311,7 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	srv := &Server{
+		ctx:          ctx,
 		cancel:       cancel,
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
@@ -1857,8 +1859,36 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Check peer name instead of mesh IP to avoid race condition with storeCoordIPs()
 		// which happens asynchronously after registration completes
 		if req.Name != s.cfg.Name {
-			s.replicator.AddPeer(meshIP, req.Name)
-			log.Debug().Str("peer", req.Name).Str("mesh_ip", meshIP).Msg("added coordinator to replication targets")
+			isNewPeer := !s.replicator.HasPeer(meshIP)
+			if isNewPeer {
+				// Delay activation for newly-registering coordinators. The registration
+				// handler fires as soon as coord-2 calls /api/v1/register, but coord-2's
+				// mesh TUN route on coord-1 isn't established until after join_mesh completes
+				// (~10–30s later). Attempting HTTPS replication before the route exists
+				// exhausts all retries and silently drops objects. A 30s warmup absorbs the
+				// route-establishment window without blocking the registration response.
+				peerCopy, nameCopy := meshIP, req.Name
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					select {
+					case <-s.ctx.Done():
+						return
+					case <-time.After(30 * time.Second):
+					}
+					// Re-check after warmup: if coord re-registered during the 30s window,
+					// the synchronous path already called AddPeer — skip the duplicate.
+					if s.replicator.HasPeer(peerCopy) {
+						return
+					}
+					s.replicator.AddPeer(peerCopy, nameCopy)
+					log.Debug().Str("peer", nameCopy).Str("mesh_ip", peerCopy).Msg("activated new coordinator for replication after warmup")
+				}()
+				log.Debug().Str("peer", req.Name).Str("mesh_ip", meshIP).Msg("new coordinator registered, delaying replication activation 30s for TUN route warmup")
+			} else {
+				s.replicator.AddPeer(meshIP, req.Name)
+				log.Debug().Str("peer", req.Name).Str("mesh_ip", meshIP).Msg("added coordinator to replication targets")
+			}
 		} else {
 			log.Debug().Str("peer", req.Name).Msg("skipping self-replication (coordinator registering itself)")
 		}
@@ -2463,6 +2493,12 @@ func (s *Server) SetMetricsRegistry(registry prometheus.Registerer) {
 	s3Metrics := s3.InitS3Metrics(registry)
 	if s.s3Server != nil {
 		s.s3Server.SetMetrics(s3Metrics)
+	}
+	if s.meshTransport != nil {
+		s.meshTransport.SetReplicationMetrics(
+			s3Metrics.ReplicationBytesSent,
+			s3Metrics.ReplicationBytesReceived,
+		)
 	}
 
 	// Refresh storage metrics now that metrics are initialized.
