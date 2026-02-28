@@ -124,9 +124,33 @@ func (s *Server) handleS3GC(w http.ResponseWriter, r *http.Request) {
 		PurgeRecycleBin bool `json:"purge_recycle_bin"`
 		// Internal: set when forwarding to peers to prevent infinite recursion
 		NoForward bool `json:"no_forward"`
+		// ForceDeleteBuckets bypasses orphanedBucketGracePeriod for explicitly named fs+ buckets.
+		// Used by the share deletion handler to clean coord-2/3 without waiting for grace period.
+		ForceDeleteBuckets []string `json:"force_delete_buckets,omitempty"`
+		// BucketsOnly skips full GC; only processes ForceDeleteBuckets deletions.
+		BucketsOnly bool `json:"buckets_only,omitempty"`
 	}
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	// Phase -1: Force-delete explicitly named buckets (bypasses orphanedBucketGracePeriod).
+	// Used by the share deletion handler to clean coord-2/3 without waiting for grace period.
+	for _, bucket := range req.ForceDeleteBuckets {
+		if !strings.HasPrefix(bucket, s3.FileShareBucketPrefix) {
+			continue // Safety: only allow fs+ buckets via this mechanism
+		}
+		if err := s.s3Store.ForceDeleteBucket(r.Context(), bucket); err != nil {
+			log.Warn().Err(err).Str("bucket", bucket).Msg("force delete bucket during GC")
+		}
+	}
+	if req.BucketsOnly {
+		// Lightweight path: only bucket deletions, no full GC
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"deleted_buckets": len(req.ForceDeleteBuckets),
+		})
+		return
 	}
 
 	gcStart := time.Now()

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
@@ -646,4 +647,115 @@ func TestRelayManager_StoresReportedLatency(t *testing.T) {
 	require.NotNil(t, peer.peerLatencies, "peer latencies should be stored")
 	assert.Equal(t, int64(15), peer.peerLatencies["peer-a"])
 	assert.Equal(t, int64(28), peer.peerLatencies["peer-b"])
+}
+
+// TestPeerDisconnectCleansMetrics verifies that Prometheus gauge series for a peer
+// are deleted when the peer disconnects, preventing unbounded cardinality growth.
+func TestPeerDisconnectCleansMetrics(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+
+	// Inject test-specific metrics (unregistered, just for this test — bypasses singleton
+	// so we get a clean slate and don't pollute the shared default registry).
+	srv.coordMetrics = &CoordMetrics{
+		PeerRTTSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "test_disconnect_peer_rtt_seconds",
+		}, []string{"peer"}),
+		PeerLatencySeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "test_disconnect_peer_latency_seconds",
+		}, []string{"source", "target"}),
+		OnlinePeers:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_disconnect_online_peers"}),
+		TotalHeartbeats: prometheus.NewCounter(prometheus.CounterOpts{Name: "test_disconnect_heartbeats_total"}),
+	}
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	peerName := "test-peer"
+	jwtToken := registerPeerAndGetToken(t, ts.URL, peerName, cfg.AuthToken)
+
+	conn := connectRelay(t, ts.URL, peerName, jwtToken)
+
+	// Wait for server to register the connection
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	err = waitFor(ctx, 10*time.Millisecond, func() bool {
+		srv.relay.mu.Lock()
+		defer srv.relay.mu.Unlock()
+		return srv.relay.persistent[peerName] != nil
+	})
+	require.NoError(t, err, "connection not registered")
+
+	// Send heartbeat with RTT and peer latencies to populate metric series
+	stats := &proto.PeerStats{
+		CoordinatorRTTMs: 42,
+		PeerLatencies: map[string]int64{
+			"peer-b": 15000,
+			"peer-c": 28000,
+		},
+	}
+	statsJSON, _ := json.Marshal(stats)
+
+	msg := make([]byte, 1+2+len(statsJSON))
+	msg[0] = MsgTypeHeartbeat
+	msg[1] = byte(len(statsJSON) >> 8)
+	msg[2] = byte(len(statsJSON))
+	copy(msg[3:], statsJSON)
+
+	err = conn.WriteMessage(websocket.BinaryMessage, msg)
+	require.NoError(t, err)
+
+	// Read ack to ensure heartbeat was processed before we close
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	_, _, err = conn.ReadMessage()
+	require.NoError(t, err)
+
+	// Verify metric series were created before disconnect
+	chRTT := make(chan prometheus.Metric, 10)
+	srv.coordMetrics.PeerRTTSeconds.Collect(chRTT)
+	close(chRTT)
+	require.Len(t, drainMetricChan(chRTT), 1, "expected 1 RTT metric series before disconnect")
+
+	chLatency := make(chan prometheus.Metric, 10)
+	srv.coordMetrics.PeerLatencySeconds.Collect(chLatency)
+	close(chLatency)
+	require.Len(t, drainMetricChan(chLatency), 2, "expected 2 latency metric series before disconnect")
+
+	// Disconnect the peer
+	_ = conn.Close()
+
+	// Wait for disconnect to be processed (defer cleanup runs)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	err = waitFor(ctx2, 10*time.Millisecond, func() bool {
+		srv.relay.mu.Lock()
+		defer srv.relay.mu.Unlock()
+		return srv.relay.persistent[peerName] == nil
+	})
+	require.NoError(t, err, "peer should be unregistered after disconnect")
+
+	// Verify RTT metric series were cleaned up
+	chRTTAfter := make(chan prometheus.Metric, 10)
+	srv.coordMetrics.PeerRTTSeconds.Collect(chRTTAfter)
+	close(chRTTAfter)
+	assert.Empty(t, drainMetricChan(chRTTAfter), "RTT metric series should be deleted after peer disconnect")
+
+	// Verify latency metric series were cleaned up
+	chLatencyAfter := make(chan prometheus.Metric, 10)
+	srv.coordMetrics.PeerLatencySeconds.Collect(chLatencyAfter)
+	close(chLatencyAfter)
+	assert.Empty(t, drainMetricChan(chLatencyAfter), "latency metric series should be deleted after peer disconnect")
+}
+
+// drainMetricChan collects all metrics from a closed channel into a slice.
+func drainMetricChan(ch <-chan prometheus.Metric) []prometheus.Metric {
+	var result []prometheus.Metric
+	for m := range ch {
+		result = append(result, m)
+	}
+	return result
 }
