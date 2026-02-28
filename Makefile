@@ -203,17 +203,6 @@ docker-up: docker-build
 	echo "Generated auth token: $$TUNNELMESH_TOKEN"; \
 	printf "%s" "$$TUNNELMESH_TOKEN" > /tmp/tunnelmesh-docker-token; \
 	chmod 600 /tmp/tunnelmesh-docker-token; \
-	cleanup() { \
-		echo ""; \
-		printf "Clear volumes? [y/N] "; \
-		read clear_answer </dev/tty; \
-		if [ "$$clear_answer" = "y" ] || [ "$$clear_answer" = "Y" ]; then \
-			echo "Clearing volumes..."; \
-			TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) down -v; \
-		fi; \
-		rm -f /tmp/tunnelmesh-docker-token; \
-	}; \
-	trap cleanup INT; \
 	TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) up -d; \
 	echo "TunnelMesh Docker environment started"; \
 	echo ""; \
