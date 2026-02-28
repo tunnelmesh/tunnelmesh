@@ -2315,12 +2315,13 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "increase(tunnelmesh_s3_gc_runs_total[24h])",
-          "legendFormat": "GC Runs",
+          "expr": "increase(tunnelmesh_s3_gc_runs_total[1h])",
+          "legendFormat": "{{ peer }} GC runs",
+          "range": true,
           "refId": "A"
         }
       ],
-      "title": "GC Runs (24h)",
+      "title": "GC Runs (per hour)",
       "type": "timeseries"
     },
     {
