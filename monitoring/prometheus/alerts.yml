@@ -24,17 +24,6 @@ groups:
           summary: "Frequent reconnection attempts"
           description: "Reconnection rate indicates unstable connections"
 
-      # Mesh: Some peers disconnected
-      - alert: PeerDisconnected
-        expr: count(tunnelmesh_connection_state == 0) > 0
-        for: 5m
-        labels:
-          severity: warning
-          category: mesh
-        annotations:
-          summary: "Peer(s) disconnected"
-          description: "One or more peers have been disconnected for 5+ minutes"
-
       # Mesh: Tunnel health degraded
       - alert: UnhealthyTunnels
         expr: (sum(tunnelmesh_active_tunnels) - sum(tunnelmesh_healthy_tunnels)) > 2
@@ -114,6 +103,50 @@ groups:
         annotations:
           summary: "S3 listing index has phantom entries"
           description: "{{ $value }} object(s) in the listing index don't exist on disk — object browser may show files that return 404. Check for missed deletion callbacks."
+
+      # Stats: Docker stats collection stalled
+      - alert: DockerStatsCollectionFailed
+        expr: time() - tunnelmesh_docker_stats_last_collection_timestamp > 300
+        for: 2m
+        labels:
+          severity: warning
+          category: data
+        annotations:
+          summary: "Docker stats collection stalled on {{ $labels.peer }}"
+          description: "No Docker stats collected for 5+ minutes"
+
+      # Stats: Docker stats collection errors
+      - alert: DockerStatsCollectionErrors
+        expr: rate(tunnelmesh_docker_stats_collection_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          category: data
+        annotations:
+          summary: "Docker stats collection errors on {{ $labels.peer }}"
+          description: "Collection failing with {{ $labels.error_type }} errors"
+
+      # Stats: Docker stats persistence failure
+      - alert: DockerStatsPersistenceFailed
+        expr: rate(tunnelmesh_docker_stats_persistence_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          category: data
+        annotations:
+          summary: "Docker stats S3 persistence failing"
+          description: "Cannot save Docker stats on {{ $labels.peer }}"
+
+      # Stats: Network stats save stalled
+      - alert: NetworkStatsSaveFailed
+        expr: time() - tunnelmesh_network_stats_last_save_timestamp > 600
+        for: 2m
+        labels:
+          severity: warning
+          category: data
+        annotations:
+          summary: "Network stats save stalled"
+          description: "Stats for {{ $labels.peer }} not saved for 10+ minutes"
 
       # Data: Elevated S3 error rate
       # Threshold: 0.1/s (6/min) indicates intermittent issues; 3min duration filters transient spikes
@@ -246,6 +279,39 @@ groups:
           summary: "S3 listing index severely out of sync"
           description: "{{ $value }} phantom entries in listing index — users see hundreds of files that return 404. Likely a ForceDeleteBucket or replication delete not updating the listing."
 
+      # Stats: Replication severely lagged
+      - alert: StatsReplicationLag
+        expr: time() - tunnelmesh_network_stats_last_save_timestamp > 3600
+        for: 5m
+        labels:
+          severity: critical
+          category: data
+        annotations:
+          summary: "Stats replication severely lagged"
+          description: "Stats for {{ $labels.peer }} stale by 1+ hour"
+
+      # Stats: Corruption detected
+      - alert: StatsCorruptionDetected
+        expr: rate(tunnelmesh_coordinator_stats_corruption_detected_total[1m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          category: data
+        annotations:
+          summary: "Stats file corruption detected"
+          description: "Corrupted {{ $labels.stats_type }} stats detected"
+
+      # Stats: Docker stats collection completely down
+      - alert: DockerStatsCollectionDown
+        expr: tunnelmesh_docker_stats_collection_enabled == 0
+        for: 5m
+        labels:
+          severity: critical
+          category: data
+        annotations:
+          summary: "Docker stats collection disabled"
+          description: "Stats collection not running on {{ $labels.peer }}"
+
       # Data: High S3 error rate
       # Threshold: >10% error rate indicates service degradation; 2min duration confirms persistent issue
       - alert: S3HighErrorRate
@@ -363,83 +429,3 @@ groups:
       #   annotations:
       #     summary: "Possible brute force attack"
       #     description: "Auth failure rate exceeds 10/s - possible credential brute force attack"
-
-  # Stats Replication Monitoring
-  - name: stats_replication
-    rules:
-      # Docker stats collection stalled
-      - alert: DockerStatsCollectionFailed
-        expr: time() - tunnelmesh_docker_stats_last_collection_timestamp > 300
-        for: 2m
-        labels:
-          severity: warning
-          category: data
-        annotations:
-          summary: "Docker stats collection stalled on {{ $labels.peer }}"
-          description: "No Docker stats collected for 5+ minutes"
-
-      # Docker stats collection errors
-      - alert: DockerStatsCollectionErrors
-        expr: rate(tunnelmesh_docker_stats_collection_errors_total[5m]) > 0.1
-        for: 3m
-        labels:
-          severity: warning
-          category: data
-        annotations:
-          summary: "Docker stats collection errors on {{ $labels.peer }}"
-          description: "Collection failing with {{ $labels.error_type }} errors"
-
-      # Docker stats persistence failure
-      - alert: DockerStatsPersistenceFailed
-        expr: rate(tunnelmesh_docker_stats_persistence_errors_total[5m]) > 0.1
-        for: 3m
-        labels:
-          severity: warning
-          category: data
-        annotations:
-          summary: "Docker stats S3 persistence failing"
-          description: "Cannot save Docker stats on {{ $labels.peer }}"
-
-      # Network stats save stalled
-      - alert: NetworkStatsSaveFailed
-        expr: time() - tunnelmesh_network_stats_last_save_timestamp > 600
-        for: 2m
-        labels:
-          severity: warning
-          category: data
-        annotations:
-          summary: "Network stats save stalled"
-          description: "Stats for {{ $labels.peer }} not saved for 10+ minutes"
-
-      # Stats replication severely lagged (critical)
-      - alert: StatsReplicationLag
-        expr: time() - tunnelmesh_network_stats_last_save_timestamp > 3600
-        for: 5m
-        labels:
-          severity: critical
-          category: data
-        annotations:
-          summary: "Stats replication severely lagged"
-          description: "Stats for {{ $labels.peer }} stale by 1+ hour"
-
-      # Stats corruption detected (critical)
-      - alert: StatsCorruptionDetected
-        expr: rate(tunnelmesh_coordinator_stats_corruption_detected_total[1m]) > 0
-        for: 1m
-        labels:
-          severity: critical
-          category: data
-        annotations:
-          summary: "Stats file corruption detected"
-          description: "Corrupted {{ $labels.stats_type }} stats detected"
-
-      # Docker stats collection completely down (critical)
-      - alert: DockerStatsCollectionDown
-        expr: tunnelmesh_docker_stats_collection_enabled == 0
-        for: 5m
-        labels:
-          severity: critical
-          category: data
-        annotations:
-          summary: "Docker stats collection disabled"
-          description: "Stats collection not running on {{ $labels.peer }}"
