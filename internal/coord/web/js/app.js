@@ -574,7 +574,20 @@ function renderDnsTable() {
 
 // Prometheus alerts polling
 
+let prometheusRetryTimer = null;
 async function checkPrometheusAvailable() {
+    // If already enabled, just refresh alerts instead of re-checking
+    if (state.alertsEnabled) {
+        fetchAlerts();
+        return;
+    }
+
+    // Cancel any pending retry; we're running the check right now
+    if (prometheusRetryTimer) {
+        clearTimeout(prometheusRetryTimer);
+        prometheusRetryTimer = null;
+    }
+
     try {
         // Use alerts endpoint directly - if it works, Prometheus is available
         const resp = await fetch('/prometheus/api/v1/alerts');
@@ -585,11 +598,13 @@ async function checkPrometheusAvailable() {
             processAlertData(data);
             // Start polling
             setInterval(fetchAlerts, POLL_INTERVAL_MS);
+        } else {
+            console.warn(`Prometheus check: alerts endpoint returned HTTP ${resp.status} (Prometheus not ready?)`);
+            prometheusRetryTimer = setTimeout(checkPrometheusAvailable, 30000);
         }
     } catch (err) {
-        // Prometheus not available
-        console.error('Prometheus not available:', err.message);
-        state.alertsEnabled = false;
+        console.warn('Prometheus check failed:', err.message);
+        prometheusRetryTimer = setTimeout(checkPrometheusAvailable, 30000);
     }
 }
 
