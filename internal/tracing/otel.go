@@ -16,13 +16,12 @@ import (
 var globalTracerProvider *sdktrace.TracerProvider
 
 // InitOTel initialises the OpenTelemetry TracerProvider with an OTLP HTTP exporter
-// pointing at the given endpoint (e.g. "localhost:4318" for a local Tempo instance).
+// pointing at the given endpoint URL (e.g. "http://localhost:4318").
 // It is safe to call multiple times; subsequent calls replace the provider.
 // Call ShutdownOTel on program exit to flush pending spans.
 func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint string) error {
 	exp, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithEndpoint(otlpEndpoint),
-		otlptracehttp.WithInsecure(),
+		otlptracehttp.WithEndpointURL(otlpEndpoint),
 	)
 	if err != nil {
 		return fmt.Errorf("create OTLP exporter: %w", err)

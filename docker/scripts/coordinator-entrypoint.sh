@@ -107,6 +107,11 @@ else
     CMD="tunnelmesh join http://coordinator-1:8080 --config /etc/tunnelmesh/coordinator.yaml --log-level $LOG_LEVEL --latitude $LATITUDE --longitude $LONGITUDE --city $CITY_NAME"
 fi
 
+# Append OTLP endpoint if configured (set via docker-compose environment)
+if [ -n "${OTLP_ENDPOINT:-}" ]; then
+    CMD="$CMD --otlp-endpoint $OTLP_ENDPOINT"
+fi
+
 # Start the coordinator
 echo "Starting mesh coordinator..."
 echo "Command: $CMD"

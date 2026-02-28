@@ -86,7 +86,10 @@ export TUNNELMESH_TOKEN="${AUTH_TOKEN:-docker-test-token-123}"
 # Function to start the mesh daemon
 start_daemon() {
     echo "Starting mesh daemon..."
-    tunnelmesh join "$SERVER_URL" --config /etc/tunnelmesh/peer.yaml --latitude "$LATITUDE" --longitude "$LONGITUDE" --city "$CITY_NAME" &
+    OTLP_FLAG=""
+    [ -n "${OTLP_ENDPOINT:-}" ] && OTLP_FLAG="--otlp-endpoint $OTLP_ENDPOINT"
+    # shellcheck disable=SC2086
+    tunnelmesh join "$SERVER_URL" --config /etc/tunnelmesh/peer.yaml --latitude "$LATITUDE" --longitude "$LONGITUDE" --city "$CITY_NAME" $OTLP_FLAG &
     MESH_PID=$!
     echo "Daemon started with PID $MESH_PID"
 }
