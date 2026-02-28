@@ -70,7 +70,6 @@ services:
       - ./scripts/coordinator-entrypoint.sh:/scripts/coordinator-entrypoint.sh:ro
       - coord-2-data:/var/lib/tunnelmesh
       - coord-2-keys:/root/.tunnelmesh
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     cap_add:
       - NET_ADMIN
     devices:
@@ -105,7 +104,6 @@ services:
       - ./scripts/coordinator-entrypoint.sh:/scripts/coordinator-entrypoint.sh:ro
       - coord-3-data:/var/lib/tunnelmesh
       - coord-3-keys:/root/.tunnelmesh
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     cap_add:
       - NET_ADMIN
     devices:
