@@ -192,7 +192,7 @@ version:
 	@echo "Build:   $(BUILD_TIME)"
 
 # Docker Compose targets
-DOCKER_COMPOSE=docker compose -f docker/docker-compose.yml
+DOCKER_COMPOSE=docker compose -f docker/docker-compose.yml --profile monitoring
 
 docker-build:
 	$(DOCKER_COMPOSE) build
@@ -205,27 +205,56 @@ docker-up: docker-build
 	chmod 600 /tmp/tunnelmesh-docker-token; \
 	TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) up -d; \
 	echo "TunnelMesh Docker environment started"; \
-	echo "Use 'make docker-logs' to follow logs"; \
+	echo ""; \
+	echo "  Coordinator:  http://localhost:8081"; \
+	echo "  Grafana:      http://localhost:3000  (admin/admin)"; \
+	echo "  Prometheus:   http://localhost:8081/prometheus/"; \
+	echo ""; \
+	echo "Use 'make docker-logs' to follow all logs"; \
 	echo "Use 'make docker-logs-coords' to follow coordinator logs"; \
+	echo "Use 'make docker-logs-monitoring' to follow monitoring logs"; \
 	echo ""; \
 	echo "=== Join from this machine ==="; \
-	read -p "Run 'sudo tunnelmesh join --context docker'? [Y/n] " answer; \
+	read -p "Run 'sudo tunnelmesh join --context docker'? [Y/n] " answer </dev/tty; \
 	if [ "$$answer" != "n" ] && [ "$$answer" != "N" ]; then \
 		sudo tunnelmesh context rm docker 2>/dev/null || true; \
-		echo "Joining mesh with coordinator at http://localhost:8081..."; \
-		sudo env "TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token)" tunnelmesh join http://localhost:8081 --context docker; \
+		echo "Joining mesh in background..."; \
+		sudo env "TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token)" tunnelmesh join http://localhost:8081 --context docker & \
+		echo "Waiting for mesh connection to establish..."; \
+		sleep 8; \
+	fi; \
+	echo ""; \
+	echo "=== Run s3bench against this environment ==="; \
+	echo "./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \\"; \
+	echo "    --coordinator http://localhost:8081 \\"; \
+	echo "    --auth-token \"$$TUNNELMESH_TOKEN\" \\"; \
+	echo "    --time-scale 500 \\"; \
+	echo "    --json results.json \\"; \
+	echo "    --accordion"; \
+	read -p "Run s3bench now? [Y/n] " s3answer </dev/tty; \
+	if [ "$$s3answer" != "n" ] && [ "$$s3answer" != "N" ]; then \
+		./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \
+			--coordinator http://localhost:8081 \
+			--auth-token "$$TUNNELMESH_TOKEN" \
+			--time-scale 500 \
+			--json results.json \
+			--accordion; \
 	fi
 
-# View coordinator logs
+docker-logs:
+	$(DOCKER_COMPOSE) logs -f
+
+# View coordinator logs only
 docker-logs-coords:
 	$(DOCKER_COMPOSE) logs -f coord-1 coord-2 coord-3
+
+# View monitoring stack logs only (Prometheus, Grafana, Loki, sd-generator)
+docker-logs-monitoring:
+	$(DOCKER_COMPOSE) logs -f prometheus grafana loki sd-generator
 
 docker-down:
 	$(DOCKER_COMPOSE) down
 	@rm -f /tmp/tunnelmesh-docker-token
-
-docker-logs:
-	$(DOCKER_COMPOSE) logs -f
 
 docker-clean: docker-down
 	$(DOCKER_COMPOSE) down -v --rmi local
@@ -233,11 +262,14 @@ docker-clean: docker-down
 
 docker-test: docker-build
 	@echo "Starting Docker test environment..."
-	$(DOCKER_COMPOSE) up -d
+	@TUNNELMESH_TOKEN=$$(openssl rand -hex 32); \
+	printf "%s" "$$TUNNELMESH_TOKEN" > /tmp/tunnelmesh-docker-token; \
+	chmod 600 /tmp/tunnelmesh-docker-token; \
+	TUNNELMESH_TOKEN=$$TUNNELMESH_TOKEN $(DOCKER_COMPOSE) up -d
 	@echo "Waiting for mesh to stabilize (20s)..."
 	@sleep 20
 	@echo "\n=== Mesh Status ==="
-	$(DOCKER_COMPOSE) logs --tail=50 client 2>&1 | grep -E "(SUCCESS|FAILED|Pinging)" || true
+	$(DOCKER_COMPOSE) logs --tail=50 alice bob charlie 2>&1 | grep -E "(SUCCESS|FAILED|Pinging)" || true
 	@echo "\n=== Running containers ==="
 	$(DOCKER_COMPOSE) ps
 

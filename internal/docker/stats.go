@@ -37,6 +37,19 @@ func (m *Manager) StartPeriodicStatsCollection(ctx context.Context, s3Store *s3.
 		return
 	}
 
+	// Pre-initialize counters so their series exist in Prometheus from the first
+	// scrape. Without this, error counters that are never incremented (happy path)
+	// don't appear in the TSDB, causing rate() to return "no data" instead of 0,
+	// which breaks the success-rate division formula in Grafana.
+	if metricsRegistry != nil {
+		metricsRegistry.statsCollectionTotal.WithLabelValues(m.peerName).Add(0)
+		metricsRegistry.statsPersistenceTotal.WithLabelValues(m.peerName).Add(0)
+		for _, errType := range []string{"list_containers", "inspect_container", "get_stats", "get_networks"} {
+			metricsRegistry.statsCollectionErrors.WithLabelValues(m.peerName, errType).Add(0)
+		}
+		metricsRegistry.statsPersistenceErrors.WithLabelValues(m.peerName, "s3_write").Add(0)
+	}
+
 	log.Info().
 		Dur("interval", statsCollectionInterval).
 		Msg("Starting Docker stats collection")

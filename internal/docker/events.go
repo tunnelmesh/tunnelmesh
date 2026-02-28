@@ -144,6 +144,9 @@ func (m *Manager) watchEvents(ctx context.Context) error {
 				Str("container", event.ContainerID).
 				Str("type", event.Type).
 				Msg("Container stopped, port forwards will expire via TTL")
+			if event.Type == "destroy" {
+				m.cleanupContainerMetrics(event.ContainerID)
+			}
 		}
 	}, &m.wg, m.ctx)
 

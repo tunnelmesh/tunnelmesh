@@ -1,0 +1,23 @@
+# TunnelMesh Coordinator Configuration - Secondary
+# Used by coord-2 and coord-3 in the Docker testing rig.
+# Prometheus/Grafana monitoring URLs are omitted (only coord-1 runs those).
+# Loki ships to coordinator-1:3100 — Loki shares coord-1's network namespace
+# so it is reachable by hostname on the mesh-control bridge network.
+
+name: "${COORD_NAME}"
+private_key: "/root/.tunnelmesh/id_ed25519"
+
+coordinator:
+  enabled: true
+  listen: ":8080"
+  data_dir: "/var/lib/tunnelmesh"
+  admin_peers: ["coordinator-*", "mynode"]
+  service_ports: [9443]
+  locations: true
+
+# Ship logs to the central Loki running on coordinator-1
+loki:
+  enabled: true
+  url: "http://coordinator-1:3100"
+  batch_size: 100
+  flush_interval: "5s"

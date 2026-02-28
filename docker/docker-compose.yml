@@ -16,6 +16,12 @@
 # Coordinators discover each other automatically via the mesh and replicate
 # S3 data in real-time using the chunk-level replication protocol.
 #
+# The monitoring stack (Prometheus, Grafana, Loki, sd-generator) is assigned
+# to the "monitoring" profile and runs exclusively on coordinator-1's network
+# namespace. Use 'make docker-up' (includes --profile monitoring) or run
+# 'docker compose --profile monitoring up' to include it. Plain
+# 'docker compose up' starts coordinators + peers only.
+#
 # To wipe all coordinator data: docker compose down -v
 
 services:
@@ -60,11 +66,10 @@ services:
     container_name: tunnelmesh-coord-2
     entrypoint: ["/bin/bash", "/scripts/coordinator-entrypoint.sh"]
     volumes:
-      - ./config/coordinator.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
+      - ./config/coordinator-secondary.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
       - ./scripts/coordinator-entrypoint.sh:/scripts/coordinator-entrypoint.sh:ro
       - coord-2-data:/var/lib/tunnelmesh
       - coord-2-keys:/root/.tunnelmesh
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     cap_add:
       - NET_ADMIN
     devices:
@@ -95,11 +100,10 @@ services:
     container_name: tunnelmesh-coord-3
     entrypoint: ["/bin/bash", "/scripts/coordinator-entrypoint.sh"]
     volumes:
-      - ./config/coordinator.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
+      - ./config/coordinator-secondary.yaml.template:/etc/tunnelmesh/coordinator.yaml.template:ro
       - ./scripts/coordinator-entrypoint.sh:/scripts/coordinator-entrypoint.sh:ro
       - coord-3-data:/var/lib/tunnelmesh
       - coord-3-keys:/root/.tunnelmesh
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     cap_add:
       - NET_ADMIN
     devices:
@@ -268,6 +272,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.9.1
     container_name: tunnelmesh-prometheus
+    profiles: ["monitoring"]
     # Share coord-1's network namespace to access mesh IPs via TUN
     network_mode: "service:coord-1"
     command:
@@ -300,6 +305,7 @@ services:
       context: ..
       dockerfile: monitoring/sd_generator/Dockerfile
     container_name: tunnelmesh-sd-generator
+    profiles: ["monitoring"]
     # Share coord-1's network to reach coord API and resolve mesh DNS
     network_mode: "service:coord-1"
     environment:
@@ -326,6 +332,7 @@ services:
   grafana:
     image: grafana/grafana:12.3.3
     container_name: tunnelmesh-grafana
+    profiles: ["monitoring"]
     # Share coord-1's network namespace
     network_mode: "service:coord-1"
     environment:
@@ -362,6 +369,7 @@ services:
   loki:
     image: grafana/loki:3.6.7
     container_name: tunnelmesh-loki
+    profiles: ["monitoring"]
     # Share coord-1's network namespace to receive logs from mesh peers
     network_mode: "service:coord-1"
     command: -config.file=/etc/loki/local-config.yaml

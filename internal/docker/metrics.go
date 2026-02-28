@@ -201,18 +201,45 @@ func (m *Manager) recordStats(stats ContainerStats, containerInfo *ContainerInfo
 	metricsRegistry.pids.With(labels).Set(float64(stats.PIDs))
 }
 
+// cleanupContainerMetrics removes ALL Prometheus metric series for a container.
+// Call this only when a container is fully removed (destroy event) to ensure
+// no orphaned series remain. Do NOT call this for routine state updates —
+// use targeted DeletePartialMatch on containerInfo only (see recordContainerInfo).
+func (m *Manager) cleanupContainerMetrics(containerID string) {
+	if metricsRegistry == nil {
+		return
+	}
+	partial := prometheus.Labels{"peer": m.peerName, "container_id": containerID}
+	metricsRegistry.containerInfo.DeletePartialMatch(partial)
+	metricsRegistry.containerStatus.DeletePartialMatch(partial)
+	metricsRegistry.cpuPercent.DeletePartialMatch(partial)
+	metricsRegistry.memoryBytes.DeletePartialMatch(partial)
+	metricsRegistry.memoryLimit.DeletePartialMatch(partial)
+	metricsRegistry.memoryPercent.DeletePartialMatch(partial)
+	metricsRegistry.diskBytes.DeletePartialMatch(partial)
+	metricsRegistry.pids.DeletePartialMatch(partial)
+}
+
 // recordContainerInfo records Docker container info to Prometheus.
 func (m *Manager) recordContainerInfo(container *ContainerInfo) {
 	if metricsRegistry == nil {
 		return
 	}
 
+	// Delete the previous containerInfo series before re-recording so that stale
+	// status label combinations (e.g. old status="running" after transition to
+	// "exited") don't accumulate as orphaned series. Only containerInfo needs this
+	// treatment — the stats gauges and containerStatus have stable label sets and
+	// must not be wiped here (they are updated on a separate 30s cycle).
+	partial := prometheus.Labels{"peer": m.peerName, "container_id": container.ID}
+	metricsRegistry.containerInfo.DeletePartialMatch(partial)
+
 	infoLabels := prometheus.Labels{
 		"peer":           m.peerName,
 		"container_id":   container.ID,
 		"container_name": container.Name,
 		"image":          container.Image,
-		"status":         container.Status,
+		"status":         container.State,
 		"network_mode":   container.NetworkMode,
 	}
 
