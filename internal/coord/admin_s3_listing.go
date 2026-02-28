@@ -318,7 +318,7 @@ func filterByPrefixDelimiter(objs []S3ObjectInfo, prefix, delimiter string) []S3
 // index to the system store and loads peer indexes for merged reads.
 func (s *Server) runListingIndexer(ctx context.Context) {
 	persistTicker := time.NewTicker(10 * time.Second)
-	reconcileTicker := time.NewTicker(60 * time.Second)
+	reconcileTicker := time.NewTicker(5 * time.Minute)
 	defer persistTicker.Stop()
 	defer reconcileTicker.Stop()
 

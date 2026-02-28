@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
@@ -759,6 +760,10 @@ func (s *Server) handlePersistentRelay(w http.ResponseWriter, r *http.Request) {
 		s.relay.UnregisterPersistent(peerName)
 		if s.coordMetrics != nil {
 			s.coordMetrics.OnlinePeers.Dec()
+			// Prevent cardinality leak: remove series for disconnected peer
+			s.coordMetrics.PeerRTTSeconds.DeleteLabelValues(peerName)
+			s.coordMetrics.PeerLatencySeconds.DeletePartialMatch(prometheus.Labels{"source": peerName})
+			s.coordMetrics.PeerLatencySeconds.DeletePartialMatch(prometheus.Labels{"target": peerName})
 		}
 		pc.Close()
 		log.Info().Str("peer", peerName).Msg("persistent relay connection closed")

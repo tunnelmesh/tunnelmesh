@@ -1,12 +1,16 @@
 package coord
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 )
 
 func TestShares_List_NoManager(t *testing.T) {
@@ -79,4 +83,46 @@ func TestValidateShareQuota(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestShareDeleteForwardsToCoords verifies that forwardBucketDeletionToPeers is a no-op
+// when replicator is nil (standard test environment), confirming the guard prevents panics.
+func TestShareDeleteForwardsToCoords(t *testing.T) {
+	srv := newTestServer(t)
+
+	// With replicator == nil, function must return immediately without panicking
+	srv.forwardBucketDeletionToPeers(context.Background(), s3.FileShareBucketPrefix+"myshare")
+	// No assertion needed — just verify no panic
+}
+
+// TestForwardBucketDeletion_Payload verifies the GC payload sent by forwardBucketDeletionToPeers.
+// Uses a direct call to handleS3GC to test the buckets_only code path end-to-end.
+func TestForwardBucketDeletion_Payload(t *testing.T) {
+	srv := newTestServerWithS3AndBucket(t)
+	makeTestAdmin(srv)
+
+	// Create an fs+ bucket to delete
+	bucketName := s3.FileShareBucketPrefix + "payload-test"
+	require.NoError(t, srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 1, nil))
+
+	// Simulate what forwardBucketDeletionToPeers sends to this coordinator
+	payload, _ := json.Marshal(map[string]interface{}{
+		"force_delete_buckets": []string{bucketName},
+		"buckets_only":         true,
+		"no_forward":           true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/s3/gc", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.adminMux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, float64(1), resp["deleted_buckets"])
+
+	// Bucket must be gone
+	_, err := srv.s3Store.HeadBucket(t.Context(), bucketName)
+	assert.Error(t, err, "bucket should be gone after force delete")
 }

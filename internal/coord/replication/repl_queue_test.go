@@ -333,12 +333,11 @@ func TestShutdownDrain(t *testing.T) {
 	err := rA.Stop()
 	require.NoError(t, err)
 
-	// Wait for async processing
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify the object was replicated during shutdown drain
-	exists := s3b.ChunkExists(context.Background(), "hash1")
-	assert.True(t, exists, "Chunk should be replicated during shutdown drain")
+	// Wait for rB to receive and store the chunk. Stop() drains the local send queue
+	// but delivery to rB is asynchronous — use Eventually so Windows isn't flaky.
+	assert.Eventually(t, func() bool {
+		return s3b.ChunkExists(context.Background(), "hash1")
+	}, 5*time.Second, 50*time.Millisecond, "Chunk should be replicated during shutdown drain")
 }
 
 func TestRunReplicationQueueWorker_SignalWakeup(t *testing.T) {

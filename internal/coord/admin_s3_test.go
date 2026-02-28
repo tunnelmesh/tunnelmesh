@@ -115,3 +115,67 @@ func TestUpdateBucket_QuotaBytes_NonAdminForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// TestForceDeleteBucketsViaGC verifies that the force_delete_buckets+buckets_only GC path
+// deletes explicitly named fs+ buckets immediately, bypassing orphanedBucketGracePeriod.
+func TestForceDeleteBucketsViaGC(t *testing.T) {
+	srv := newTestServerWithS3AndBucket(t)
+	makeTestAdmin(srv)
+
+	// Create a fresh fs+ bucket (simulates a young replicated share bucket on coord-2/3)
+	bucketName := s3.FileShareBucketPrefix + "accordion-share"
+	err := srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 2, nil)
+	require.NoError(t, err)
+
+	// Verify it exists
+	meta, err := srv.s3Store.HeadBucket(t.Context(), bucketName)
+	require.NoError(t, err)
+	require.NotNil(t, meta, "bucket should exist before GC")
+
+	// POST to /api/s3/gc with force_delete_buckets + buckets_only
+	body, _ := json.Marshal(map[string]interface{}{
+		"force_delete_buckets": []string{bucketName},
+		"buckets_only":         true,
+		"no_forward":           true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/s3/gc", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.adminMux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]interface{}
+	err = json.NewDecoder(rec.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, float64(1), resp["deleted_buckets"], "should report 1 deleted bucket")
+
+	// Verify the bucket is gone despite being just created (< 10 min old)
+	_, err = srv.s3Store.HeadBucket(t.Context(), bucketName)
+	assert.Error(t, err, "bucket should be deleted after force_delete_buckets GC")
+}
+
+// TestForceDeleteBuckets_NonFSPrefixIgnored verifies the safety check that only fs+ buckets
+// can be force-deleted via the GC endpoint (prevents accidental deletion of regular buckets).
+func TestForceDeleteBuckets_NonFSPrefixIgnored(t *testing.T) {
+	srv := newTestServerWithS3AndBucket(t)
+	makeTestAdmin(srv)
+
+	// POST with a non-fs+ bucket name — should be silently ignored
+	body, _ := json.Marshal(map[string]interface{}{
+		"force_delete_buckets": []string{"test-bucket"},
+		"buckets_only":         true,
+		"no_forward":           true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/s3/gc", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.adminMux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// test-bucket should still exist — non-fs+ buckets are ignored
+	meta, err := srv.s3Store.HeadBucket(t.Context(), "test-bucket")
+	require.NoError(t, err)
+	assert.NotNil(t, meta, "non-fs+ bucket should not be deleted by force_delete_buckets")
+}
