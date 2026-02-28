@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -256,8 +257,10 @@ func (s *Server) handleShareByName(w http.ResponseWriter, r *http.Request) {
 			// Explicitly purge the bucket on peer coordinators without waiting for
 			// PurgeOrphanedFileShareBuckets' 10-minute grace period to expire.
 			// In accordion scenarios this prevents per-iteration data accumulation.
+			// Use context.WithoutCancel so the goroutine isn't cancelled when the
+			// HTTP handler returns and the request context is done.
 			bucketName := s3.FileShareBucketPrefix + shareName
-			go s.forwardBucketDeletionToPeers(r.Context(), bucketName)
+			go s.forwardBucketDeletionToPeers(context.WithoutCancel(r.Context()), bucketName)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -269,8 +272,9 @@ func (s *Server) handleShareByName(w http.ResponseWriter, r *http.Request) {
 }
 
 // forwardBucketDeletionToPeers sends a lightweight GC request to peer coordinators
-// to force-delete a specific fs+ bucket, bypassing the orphanedBucketGracePeriod.
+// in parallel to force-delete a specific fs+ bucket, bypassing orphanedBucketGracePeriod.
 // This prevents per-iteration data accumulation in accordion scenarios.
+// ctx must not be derived from an HTTP request context (use context.WithoutCancel).
 func (s *Server) forwardBucketDeletionToPeers(ctx context.Context, bucketName string) {
 	if s.replicator == nil {
 		return
@@ -290,21 +294,27 @@ func (s *Server) forwardBucketDeletionToPeers(ctx context.Context, bucketName st
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // mesh-internal
 		},
 	}
+	var wg sync.WaitGroup
 	for _, peerIP := range peers {
-		gcURL := fmt.Sprintf("https://%s:443/api/s3/gc", peerIP)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, gcURL, bytes.NewReader(payload))
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Warn().Err(err).Str("peer", peerIP).Str("bucket", bucketName).Msg("failed to forward bucket deletion to peer")
-			continue
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			log.Debug().Str("peer", peerIP).Str("bucket", bucketName).Msg("forwarded bucket deletion to peer")
-		}
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			gcURL := fmt.Sprintf("https://%s:443/api/s3/gc", ip)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, gcURL, bytes.NewReader(payload))
+			if err != nil {
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Warn().Err(err).Str("peer", ip).Str("bucket", bucketName).Msg("failed to forward bucket deletion to peer")
+				return
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Debug().Str("peer", ip).Str("bucket", bucketName).Msg("forwarded bucket deletion to peer")
+			}
+		}(peerIP)
 	}
+	wg.Wait()
 }
