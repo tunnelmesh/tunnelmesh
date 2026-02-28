@@ -192,7 +192,7 @@ version:
 	@echo "Build:   $(BUILD_TIME)"
 
 # Docker Compose targets
-DOCKER_COMPOSE=docker compose -f docker/docker-compose.yml
+DOCKER_COMPOSE=docker compose -f docker/docker-compose.yml --profile monitoring
 
 docker-build:
 	$(DOCKER_COMPOSE) build
