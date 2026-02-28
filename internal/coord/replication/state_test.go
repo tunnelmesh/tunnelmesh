@@ -224,6 +224,14 @@ func TestState_DeleteBucket(t *testing.T) {
 	// Deleting the remaining bucket leaves state empty
 	state.DeleteBucket("bucket2")
 	assert.Equal(t, 0, state.Count())
+
+	// Bucket name that is a prefix of another bucket name must not collide.
+	// "data/" prefix must not match "data-archive/file.txt".
+	state.Update("data", "file.txt")
+	state.Update("data-archive", "file.txt")
+	state.DeleteBucket("data")
+	assert.Equal(t, 1, state.Count())
+	assert.Equal(t, uint64(1), state.Get("data-archive", "file.txt").Get("coord1"))
 }
 
 func TestState_Clear(t *testing.T) {
