@@ -1,0 +1,46 @@
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  trace_idle_period: 10s
+  max_block_bytes: 100_000_000
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    compaction_window: 1h
+    max_block_bytes: 100_000_000
+    block_retention: 72h
+    compacted_block_retention: 10m
+
+storage:
+  trace:
+    backend: local
+    block:
+      bloom_filter_false_positive: .05
+      index_downsample_bytes: 1000
+      encoding: snappy
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+    cache: none
+
+querier: {}
+
+query_frontend:
+  search:
+    duration_slo: 5s
+    throughput_bytes_slo: 1.073741824e+09
+  trace_by_id:
+    duration_slo: 5s

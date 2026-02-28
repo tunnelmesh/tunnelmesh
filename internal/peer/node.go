@@ -77,6 +77,13 @@ type MeshNode struct {
 
 	// Latency measurement
 	LatencyProber *LatencyProber
+
+	// OnConnectionSetup is an optional callback invoked after a connection is established or fails.
+	// transport: transport type used ("udp", "ssh", "relay", "unknown")
+	// result: "success" or "failure"
+	// durationSeconds: wall-clock time from dial to connected/failed
+	// traceID: hex OTel trace ID for Prometheus exemplar linking (empty if tracing disabled)
+	OnConnectionSetup func(transport, result string, durationSeconds float64, traceID string)
 }
 
 // NewMeshNode creates a new MeshNode with the given identity and client.

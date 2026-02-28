@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // PeerConnection manages the connection state for a single peer.
@@ -205,12 +208,37 @@ func (pc *PeerConnection) TransitionTo(target State, reason string, err error) e
 
 	pc.mu.Unlock()
 
-	// Log the transition
+	// Emit an OTel span for this state transition.
+	// Each transition is nearly instantaneous, so the span duration is ~0.
+	// Using background context means these are root spans — they won't be
+	// correlated into a single trace across transitions, but they carry the
+	// peer name and state labels for filtering in Tempo.
+	_, span := tracing.Tracer("tunnelmesh/connection").Start(
+		context.Background(),
+		"connection.transition",
+	)
+	span.SetAttributes(
+		attribute.String("peer.name", pc.peerName),
+		attribute.String("peer.mesh_ip", pc.meshIP),
+		attribute.String("transition.from", from.String()),
+		attribute.String("transition.to", target.String()),
+		attribute.String("transition.reason", reason),
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+	}
+	span.End()
+
+	// Log the transition (include trace_id for Loki → Tempo correlation)
+	sc := span.SpanContext()
 	logEvent := log.Debug().
 		Str("peer", pc.peerName).
 		Str("from", from.String()).
 		Str("to", target.String()).
-		Str("reason", reason)
+		Str("reason", reason).
+		Str("trace_id", sc.TraceID().String()).
+		Str("span_id", sc.SpanID().String())
 	if err != nil {
 		logEvent = logEvent.Err(err)
 	}

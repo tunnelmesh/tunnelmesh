@@ -368,6 +368,8 @@ services:
         condition: service_started
       loki:
         condition: service_started
+      tempo:
+        condition: service_started
     restart: unless-stopped
 
   loki:
@@ -387,6 +389,28 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    depends_on:
+      coord-1:
+        condition: service_healthy
+        restart: true
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tunnelmesh-tempo
+    profiles: ["monitoring"]
+    # Share coord-1's network namespace so peers can send traces to localhost:4318
+    network_mode: "service:coord-1"
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ../monitoring/tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       coord-1:
         condition: service_healthy
@@ -443,4 +467,5 @@ volumes:
   prometheus-data:
   grafana-data:
   loki-data:
+  tempo-data:
   benchmark-results:

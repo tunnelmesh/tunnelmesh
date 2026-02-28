@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // replQueueEntry represents a pending replication operation in the queue.
@@ -130,6 +133,15 @@ func (r *Replicator) processQueueEntry(ctx context.Context, entry *replQueueEntr
 // directly, instead relying on EnqueueReplication to propagate metadata so GC can
 // safely identify orphaned chunks.
 func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry, peers []string) {
+	ctx, span := tracing.Tracer("tunnelmesh/replication").Start(ctx, "replication.put")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("s3.bucket", entry.bucket),
+		attribute.String("s3.key", entry.key),
+		attribute.Int("replication.peer_count", len(peers)),
+		attribute.Int("replication.retry", entry.retries),
+	)
+
 	if r.chunkRegistry == nil {
 		// No chunk registry — fall back to file-level replication
 		return
@@ -159,12 +171,24 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 				Str("key", entry.key).
 				Int("retry", entry.retries).
 				Msg("Queued replication failed")
+			span.RecordError(res.err)
 			allSucceeded = false
 		}
 	}
 
 	if !allSucceeded {
+		span.SetStatus(otelcodes.Error, "one or more peers failed")
 		r.reEnqueueOnFailure(entry)
+	} else {
+		sc := span.SpanContext()
+		r.logger.Debug().
+			Str("bucket", entry.bucket).
+			Str("key", entry.key).
+			Int("peers", len(peers)).
+			Str("trace_id", sc.TraceID().String()).
+			Str("span_id", sc.SpanID().String()).
+			Msg("replication complete")
+		span.SetStatus(otelcodes.Ok, "")
 	}
 }
 
