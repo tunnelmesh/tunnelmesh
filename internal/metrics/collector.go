@@ -200,6 +200,8 @@ func (c *Collector) collectConnectionStats() {
 		return
 	}
 
+	c.metrics.ConnectionState.Reset() // Clear stale label combinations before repopulating
+
 	for _, info := range c.connections.AllInfo() {
 		transport := info.TransportType
 		if transport == "" {
