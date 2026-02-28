@@ -345,6 +345,11 @@ func (pc *PeerConnection) Info() ConnectionInfo {
 		ConnectedSince: pc.connectedSince,
 		ReconnectCount: pc.reconnectCount,
 		HasTunnel:      pc.tunnel != nil,
-		TransportType:  pc.transportType,
+		TransportType: func() string {
+			if pc.state == StateConnected {
+				return pc.transportType
+			}
+			return ""
+		}(),
 	}
 }

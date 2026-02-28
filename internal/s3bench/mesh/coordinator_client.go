@@ -18,10 +18,11 @@ import (
 
 // CoordinatorClient provides HTTP access to the coordinator's S3 API.
 type CoordinatorClient struct {
-	baseURL    string // Base URL for coordinator (https://10.42.0.1:443)
-	accessKey  string
-	secretKey  string
-	httpClient *http.Client
+	baseURL      string // Base URL for coordinator (https://10.42.0.1:443)
+	accessKey    string
+	secretKey    string
+	httpClient   *http.Client
+	gcRetryDelay time.Duration // delay between GC 429 retries; 0 means use default (15s)
 }
 
 // NewCoordinatorClient creates a new coordinator S3 API client.
@@ -313,6 +314,8 @@ type GCStats struct {
 
 // TriggerGC triggers on-demand garbage collection on the coordinator via POST /api/s3/gc.
 // Uses a 10-minute context timeout since GC can be slow under sustained load.
+// Retries on HTTP 429 (GC already in progress) since the periodic GC may briefly hold
+// the server-side lock; accordion mode would otherwise fail hard on the race.
 func (c *CoordinatorClient) TriggerGC(ctx context.Context, purgeRecycleBin bool) (*GCStats, error) {
 	// GC can take several minutes under sustained load; use a longer timeout
 	// than the default 60-second client. Context-based timeout respects parent
@@ -330,33 +333,57 @@ func (c *CoordinatorClient) TriggerGC(ctx context.Context, purgeRecycleBin bool)
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(gcCtx, http.MethodPost, requestURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	c.setBasicAuth(req)
-
 	// Use a client without its own Timeout so the context controls cancellation.
 	gcClient := &http.Client{Transport: c.httpClient.Transport}
 
-	resp, err := gcClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP POST %s: %w", requestURL, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("trigger GC failed: %d %s", resp.StatusCode, string(bodyBytes))
+	const maxRetries = 6
+	retryDelay := c.gcRetryDelay
+	if retryDelay == 0 {
+		retryDelay = 15 * time.Second
 	}
 
-	var stats GCStats
-	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-gcCtx.Done():
+				return nil, fmt.Errorf("trigger GC: %w", gcCtx.Err())
+			case <-time.After(retryDelay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(gcCtx, http.MethodPost, requestURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		c.setBasicAuth(req)
+
+		resp, err := gcClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("HTTP POST %s: %w", requestURL, err)
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("trigger GC failed: %d %s", resp.StatusCode, string(bodyBytes))
+		}
+
+		var stats GCStats
+		if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("decode response: %w", err)
+		}
+		_ = resp.Body.Close()
+		return &stats, nil
 	}
 
-	return &stats, nil
+	return nil, fmt.Errorf("trigger GC: server busy after %d retries", maxRetries)
 }
 
 // setBasicAuth sets HTTP Basic Auth header using S3 credentials.
