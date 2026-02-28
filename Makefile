@@ -218,8 +218,10 @@ docker-up: docker-build
 	read -p "Run 'sudo tunnelmesh join --context docker'? [Y/n] " answer; \
 	if [ "$$answer" != "n" ] && [ "$$answer" != "N" ]; then \
 		sudo tunnelmesh context rm docker 2>/dev/null || true; \
-		echo "Joining mesh with coordinator at http://localhost:8081..."; \
-		sudo env "TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token)" tunnelmesh join http://localhost:8081 --context docker; \
+		echo "Joining mesh in background..."; \
+		sudo env "TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token)" tunnelmesh join http://localhost:8081 --context docker & \
+		echo "Waiting for mesh connection to establish..."; \
+		sleep 8; \
 	fi; \
 	echo ""; \
 	echo "=== Run s3bench against this environment ==="; \
