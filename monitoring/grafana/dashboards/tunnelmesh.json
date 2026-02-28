@@ -2123,7 +2123,8 @@
       "targets": [
         {
           "expr": "tunnelmesh_s3_chunks_total",
-          "legendFormat": "Chunks",
+          "legendFormat": "{{ peer }}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -2470,12 +2471,14 @@
       "targets": [
         {
           "expr": "rate(tunnelmesh_s3_gc_versions_pruned_total[5m])",
-          "legendFormat": "Versions pruned",
+          "legendFormat": "{{ peer }} versions pruned",
+          "range": true,
           "refId": "A"
         },
         {
           "expr": "rate(tunnelmesh_s3_gc_chunks_deleted_total[5m])",
-          "legendFormat": "Chunks deleted",
+          "legendFormat": "{{ peer }} chunks deleted",
+          "range": true,
           "refId": "B"
         }
       ],
@@ -2658,7 +2661,8 @@
       "targets": [
         {
           "expr": "tunnelmesh_s3_versions_total",
-          "legendFormat": "Versions",
+          "legendFormat": "{{ peer }}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -2959,7 +2963,8 @@
       "targets": [
         {
           "expr": "increase(tunnelmesh_s3_rebalance_runs_total[5m])",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{ peer }}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -3049,7 +3054,8 @@
       "targets": [
         {
           "expr": "rate(tunnelmesh_s3_rebalance_chunks_moved_total[5m])",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{ peer }}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -3139,7 +3145,8 @@
       "targets": [
         {
           "expr": "rate(tunnelmesh_s3_rebalance_bytes_transferred_total[5m])",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{ peer }}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -3229,7 +3236,8 @@
       "targets": [
         {
           "expr": "increase(tunnelmesh_s3_rebalance_chunks_cleaned_total[5m])",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{ peer }}",
+          "range": true,
           "refId": "A"
         }
       ],
