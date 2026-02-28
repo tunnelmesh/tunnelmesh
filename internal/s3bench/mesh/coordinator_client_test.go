@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -510,6 +511,55 @@ func TestCoordinatorClient_TriggerGC(t *testing.T) {
 		_, err := client.TriggerGC(context.Background(), true)
 		if err == nil || !strings.Contains(err.Error(), "500") {
 			t.Errorf("Expected error containing '500', got: %v", err)
+		}
+	})
+
+	t.Run("retries on 429 then succeeds", func(t *testing.T) {
+		// Simulate periodic GC holding the lock: first two requests return 429,
+		// third succeeds. TriggerGC must retry transparently.
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := calls.Add(1)
+			if n <= 2 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"recycled_purged":1,"versions_pruned":0,"chunks_deleted":0,"bytes_reclaimed":0}`))
+		}))
+		defer server.Close()
+
+		client := &CoordinatorClient{
+			baseURL:      server.URL,
+			httpClient:   server.Client(),
+			accessKey:    "test",
+			secretKey:    "test",
+			gcRetryDelay: time.Millisecond, // no real delay in tests
+		}
+		stats, err := client.TriggerGC(context.Background(), true)
+		if err != nil {
+			t.Fatalf("Expected success after retries, got: %v", err)
+		}
+		if stats.RecycledPurged != 1 {
+			t.Errorf("Expected RecycledPurged=1, got %d", stats.RecycledPurged)
+		}
+		if calls.Load() != 3 {
+			t.Errorf("Expected 3 attempts (2×429 + 1×200), got %d", calls.Load())
+		}
+	})
+
+	t.Run("exhausts retries and returns error", func(t *testing.T) {
+		// Server always returns 429 — TriggerGC must give up after maxRetries.
+		server := newGCServer(t, http.StatusTooManyRequests, "")
+		defer server.Close()
+
+		client := &CoordinatorClient{baseURL: server.URL, httpClient: server.Client(), accessKey: "test", secretKey: "test"}
+		// Use a context that times out quickly so the retry delays don't block the test.
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_, err := client.TriggerGC(ctx, true)
+		if err == nil {
+			t.Fatal("Expected error when all retries exhausted")
 		}
 	})
 }
