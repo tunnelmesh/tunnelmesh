@@ -249,9 +249,17 @@ func GetS3Metrics() *S3Metrics {
 }
 
 // RecordRequest records a request metric.
-func (m *S3Metrics) RecordRequest(operation string, status string, durationSeconds float64) {
+// traceID should be the hex OTel trace ID for Prometheus exemplar linking (empty string disables exemplar).
+func (m *S3Metrics) RecordRequest(operation string, status string, durationSeconds float64, traceID string) {
 	m.RequestsTotal.WithLabelValues(operation, status).Inc()
-	m.RequestDuration.WithLabelValues(operation).Observe(durationSeconds)
+	obs := m.RequestDuration.WithLabelValues(operation)
+	if traceID != "" {
+		if ex, ok := obs.(prometheus.ExemplarObserver); ok {
+			ex.ObserveWithExemplar(durationSeconds, prometheus.Labels{"traceID": traceID})
+			return
+		}
+	}
+	obs.Observe(durationSeconds)
 }
 
 // RecordUpload records bytes uploaded.

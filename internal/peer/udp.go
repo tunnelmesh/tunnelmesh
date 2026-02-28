@@ -30,10 +30,11 @@ func (m *MeshNode) HandleIncomingUDP(ctx context.Context, listener transport.Lis
 func (m *MeshNode) HandleUDPSessionInvalidated(peerName string) {
 	log.Info().Str("peer", peerName).Msg("UDP session invalidated by peer, removing tunnel and triggering reconnection")
 
-	// Disconnect the peer (removes tunnel via LifecycleManager observer)
+	// Disconnect the peer (removes tunnel via LifecycleManager observer).
+	// This is called from the UDP receive loop — use Background context.
 	pc := m.Connections.Get(peerName)
 	if pc != nil {
-		_ = pc.Disconnect("session invalidated by peer", nil)
+		_ = pc.Disconnect(context.Background(), "session invalidated by peer", nil)
 	}
 
 	// Trigger peer discovery to reconnect

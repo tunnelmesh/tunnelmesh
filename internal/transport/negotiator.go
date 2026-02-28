@@ -158,11 +158,14 @@ func (n *Negotiator) Negotiate(ctx context.Context, peerInfo *PeerInfo, dialOpts
 			attemptSpan.SetStatus(otelcodes.Error, err.Error())
 			attemptSpan.End()
 
+			sc := attemptSpan.SpanContext()
 			log.Debug().
 				Err(err).
 				Str("peer", peerInfo.Name).
 				Str("transport", string(transportType)).
 				Int("attempt", attempt+1).
+				Str("trace_id", sc.TraceID().String()).
+				Str("span_id", sc.SpanID().String()).
 				Msg("connection attempt failed")
 		}
 

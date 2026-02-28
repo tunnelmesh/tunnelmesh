@@ -322,7 +322,7 @@ func TestMeshNode_HandleRelayPacketForAsymmetricDetection(t *testing.T) {
 	t.Run("peer with tunnel in grace period returns false", func(t *testing.T) {
 		// Create a properly connected peer (just connected, within grace period)
 		pc := node.Connections.GetOrCreate("peer3", "10.0.0.3")
-		err := pc.Connected(&mockTunnel{}, "test", "test connection")
+		err := pc.Connected(context.Background(), &mockTunnel{}, "test", "test connection")
 		require.NoError(t, err)
 
 		// Should have tunnel and non-zero ConnectedSince

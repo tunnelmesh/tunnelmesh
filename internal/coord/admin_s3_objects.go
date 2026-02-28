@@ -14,7 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // S3VersionInfo represents a version for the API response.
@@ -133,7 +136,7 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 		return
 	}
 
-	s.withS3AdminMetrics(w, operation, func(w http.ResponseWriter) {
+	s.withS3AdminMetrics(w, r, operation, func(w http.ResponseWriter) {
 		// Forward writes and deletes proactively to primary coordinator.
 		// Reads try local first, then forward on miss (see handleS3GetObject/handleS3HeadObject).
 		if (r.Method == http.MethodPut || r.Method == http.MethodDelete) &&
@@ -520,8 +523,18 @@ func (s *Server) handleS3RestoreVersion(w http.ResponseWriter, r *http.Request, 
 
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	meta, err := s.s3Store.RestoreVersion(r.Context(), bucket, key, req.VersionID)
+	ctx, span := tracing.Tracer("tunnelmesh/s3").Start(r.Context(), "s3.restore_version")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("s3.bucket", bucket),
+		attribute.String("s3.key", key),
+		attribute.String("s3.version_id", req.VersionID),
+	)
+
+	meta, err := s.s3Store.RestoreVersion(ctx, bucket, key, req.VersionID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		// Try forwarding to source on not-found (version may exist on another coordinator)
 		if (errors.Is(err, s3.ErrObjectNotFound) || errors.Is(err, s3.ErrBucketNotFound)) &&
 			r.Header.Get("X-TunnelMesh-Forwarded") == "" {
@@ -543,6 +556,7 @@ func (s *Server) handleS3RestoreVersion(w http.ResponseWriter, r *http.Request, 
 		}
 		return
 	}
+	span.SetStatus(otelcodes.Ok, "")
 
 	// Update listing index — triggers reconcile since we build info from RestoreVersion meta
 	restoredInfo := S3ObjectInfo{

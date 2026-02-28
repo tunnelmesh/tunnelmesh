@@ -194,16 +194,37 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 
 // processQueueDelete replicates a delete operation to all peers.
 func (r *Replicator) processQueueDelete(ctx context.Context, entry *replQueueEntry, peers []string) {
+	ctx, span := tracing.Tracer("tunnelmesh/replication").Start(ctx, "replication.delete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("s3.bucket", entry.bucket),
+		attribute.String("s3.key", entry.key),
+		attribute.Int("replication.peer_count", len(peers)),
+		attribute.Int("replication.retry", entry.retries),
+	)
+
 	entryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	if err := r.ReplicateDelete(entryCtx, entry.bucket, entry.key); err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		r.logger.Error().Err(err).
 			Str("bucket", entry.bucket).
 			Str("key", entry.key).
 			Int("retry", entry.retries).
 			Msg("Queued delete replication failed")
 		r.reEnqueueOnFailure(entry)
+	} else {
+		sc := span.SpanContext()
+		span.SetStatus(otelcodes.Ok, "")
+		r.logger.Debug().
+			Str("bucket", entry.bucket).
+			Str("key", entry.key).
+			Int("peers", len(peers)).
+			Str("trace_id", sc.TraceID().String()).
+			Str("span_id", sc.SpanID().String()).
+			Msg("delete replication complete")
 	}
 }
 

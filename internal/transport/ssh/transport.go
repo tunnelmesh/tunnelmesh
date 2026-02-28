@@ -104,13 +104,28 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 
 	select {
 	case <-dialCtx.Done():
-		span.RecordError(dialCtx.Err())
-		span.SetStatus(otelcodes.Error, dialCtx.Err().Error())
-		return nil, dialCtx.Err()
+		dialErr := dialCtx.Err()
+		span.RecordError(dialErr)
+		span.SetStatus(otelcodes.Error, dialErr.Error())
+		sc := span.SpanContext()
+		log.Debug().Err(dialErr).
+			Str("peer", opts.PeerName).
+			Str("addr", addr).
+			Str("trace_id", sc.TraceID().String()).
+			Str("span_id", sc.SpanID().String()).
+			Msg("SSH dial timeout")
+		return nil, dialErr
 	case r := <-ch:
 		if r.err != nil {
 			span.RecordError(r.err)
 			span.SetStatus(otelcodes.Error, r.err.Error())
+			sc := span.SpanContext()
+			log.Debug().Err(r.err).
+				Str("peer", opts.PeerName).
+				Str("addr", addr).
+				Str("trace_id", sc.TraceID().String()).
+				Str("span_id", sc.SpanID().String()).
+				Msg("SSH dial failed")
 			return nil, r.err
 		}
 

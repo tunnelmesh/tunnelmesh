@@ -1258,7 +1258,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	forwarder.SetOnDeadTunnel(func(peerName string) {
 		if pc := node.Connections.Get(peerName); pc != nil {
 			log.Debug().Str("peer", peerName).Msg("forwarder detected dead tunnel, disconnecting peer")
-			_ = pc.Disconnect("tunnel write failed", nil)
+			_ = pc.Disconnect(context.Background(), "tunnel write failed", nil)
 		}
 	})
 

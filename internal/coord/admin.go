@@ -46,7 +46,7 @@ func (r *adminStatusRecorder) getStatus() int {
 // withS3AdminMetrics wraps an admin S3 handler with metrics instrumentation.
 // Uses the shared S3 metrics singleton so admin API requests appear in the same
 // Prometheus metrics as direct S3 API requests.
-func (s *Server) withS3AdminMetrics(w http.ResponseWriter, operation string, fn func(http.ResponseWriter)) {
+func (s *Server) withS3AdminMetrics(w http.ResponseWriter, r *http.Request, operation string, fn func(http.ResponseWriter)) {
 	m := s3.GetS3Metrics()
 	startTime := time.Now()
 	rec := &adminStatusRecorder{ResponseWriter: w}
@@ -54,7 +54,8 @@ func (s *Server) withS3AdminMetrics(w http.ResponseWriter, operation string, fn 
 		if m != nil {
 			duration := time.Since(startTime).Seconds()
 			status := s3.ClassifyS3Status(rec.getStatus())
-			m.RecordRequest(operation, status, duration)
+			traceID := s3.TraceIDFromContext(r.Context())
+			m.RecordRequest(operation, status, duration, traceID)
 		}
 	}()
 	fn(rec)
@@ -295,11 +296,11 @@ func (s *Server) setupAdminRoutes() {
 	s.adminMux.HandleFunc("/api/s3/buckets", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			s.withS3AdminMetrics(w, "listBuckets", func(w http.ResponseWriter) {
+			s.withS3AdminMetrics(w, r, "listBuckets", func(w http.ResponseWriter) {
 				s.handleListBuckets(w, r)
 			})
 		case http.MethodPost:
-			s.withS3AdminMetrics(w, "createBucket", func(w http.ResponseWriter) {
+			s.withS3AdminMetrics(w, r, "createBucket", func(w http.ResponseWriter) {
 				s.handleCreateBucket(w, r)
 			})
 		default:
@@ -315,7 +316,7 @@ func (s *Server) setupAdminRoutes() {
 		// Only intercept DELETE; GET (list) and GET /{key} (content) are handled by handleS3Proxy.
 		if strings.HasSuffix(path, "/recyclebin") && r.Method == http.MethodDelete {
 			bucket := strings.TrimSuffix(path, "/recyclebin")
-			s.withS3AdminMetrics(w, "purgeRecycleBin", func(w http.ResponseWriter) {
+			s.withS3AdminMetrics(w, r, "purgeRecycleBin", func(w http.ResponseWriter) {
 				s.handlePurgeBucketRecycleBin(w, r, bucket)
 			})
 			return
@@ -332,11 +333,11 @@ func (s *Server) setupAdminRoutes() {
 
 		switch r.Method {
 		case http.MethodGet:
-			s.withS3AdminMetrics(w, "getBucket", func(w http.ResponseWriter) {
+			s.withS3AdminMetrics(w, r, "getBucket", func(w http.ResponseWriter) {
 				s.handleGetBucket(w, r, bucket)
 			})
 		case http.MethodPatch:
-			s.withS3AdminMetrics(w, "updateBucket", func(w http.ResponseWriter) {
+			s.withS3AdminMetrics(w, r, "updateBucket", func(w http.ResponseWriter) {
 				s.handleUpdateBucket(w, r, bucket)
 			})
 		default:

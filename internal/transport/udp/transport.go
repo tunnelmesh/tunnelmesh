@@ -1285,9 +1285,14 @@ func (t *Transport) initiateHandshake(ctx context.Context, peerName string, peer
 	// Wait for response via channel (routed by receiveLoop)
 	select {
 	case <-ctx.Done():
+		span.RecordError(ctx.Err())
+		span.SetStatus(otelcodes.Error, ctx.Err().Error())
 		return nil, ctx.Err()
 	case <-time.After(timeout):
-		return nil, fmt.Errorf("handshake timeout")
+		timeoutErr := fmt.Errorf("handshake timeout")
+		span.RecordError(timeoutErr)
+		span.SetStatus(otelcodes.Error, "handshake timeout")
+		return nil, timeoutErr
 	case resp := <-respChan:
 		// Verify it's from the expected peer
 		if resp.remoteAddr.String() != peerAddr.String() {

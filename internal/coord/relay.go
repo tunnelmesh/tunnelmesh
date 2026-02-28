@@ -838,6 +838,7 @@ func (s *Server) handlePersistentRelayMessage(sourcePeer string, data []byte) {
 		// Parse stats
 		var stats proto.PeerStats
 		if err := json.Unmarshal(statsJSON, &stats); err != nil {
+			hbSpan.RecordError(err)
 			log.Debug().Err(err).Str("peer", sourcePeer).Msg("failed to parse heartbeat stats")
 		}
 

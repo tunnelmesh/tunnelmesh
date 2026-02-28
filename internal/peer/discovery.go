@@ -261,7 +261,7 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 		_ = tun.Close()
 		return
 	}
-	if err := pc.Connected(tun, string(result.Transport), "transport negotiated: "+string(result.Transport)); err != nil {
+	if err := pc.Connected(connCtx, tun, string(result.Transport), "transport negotiated: "+string(result.Transport)); err != nil {
 		log.Warn().Err(err).Str("peer", peer.Name).Msg("failed to transition to connected state")
 		_ = tun.Close()
 		return
@@ -294,8 +294,9 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 		m.Forwarder.HandleTunnel(connCtx, peer.Name, tun)
 	}
 
-	// Disconnect when tunnel handler exits (this removes tunnel via LifecycleManager observer)
-	_ = pc.Disconnect("tunnel handler exited", nil)
+	// Disconnect when tunnel handler exits (this removes tunnel via LifecycleManager observer).
+	// Use Background context — the connCtx is cancelled by this point.
+	_ = pc.Disconnect(context.Background(), "tunnel handler exited", nil)
 }
 
 // buildTransportPeerInfo builds a transport.PeerInfo from a proto.Peer.
