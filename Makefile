@@ -228,7 +228,16 @@ docker-up: docker-build
 	echo "    --auth-token \"$$TUNNELMESH_TOKEN\" \\"; \
 	echo "    --time-scale 500 \\"; \
 	echo "    --json results.json \\"; \
-	echo "    --accordion"
+	echo "    --accordion"; \
+	read -p "Run s3bench now? [Y/n] " s3answer; \
+	if [ "$$s3answer" != "n" ] && [ "$$s3answer" != "N" ]; then \
+		./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \
+			--coordinator http://localhost:8081 \
+			--auth-token "$$TUNNELMESH_TOKEN" \
+			--time-scale 500 \
+			--json results.json \
+			--accordion; \
+	fi
 
 docker-logs:
 	$(DOCKER_COMPOSE) logs -f
