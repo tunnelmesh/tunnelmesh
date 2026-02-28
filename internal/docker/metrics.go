@@ -201,18 +201,39 @@ func (m *Manager) recordStats(stats ContainerStats, containerInfo *ContainerInfo
 	metricsRegistry.pids.With(labels).Set(float64(stats.PIDs))
 }
 
+// cleanupContainerMetrics removes all Prometheus metric series for a container.
+// Handles cardinality cleanup when container state changes or container is removed.
+func (m *Manager) cleanupContainerMetrics(containerID string) {
+	if metricsRegistry == nil {
+		return
+	}
+	partial := prometheus.Labels{"peer": m.peerName, "container_id": containerID}
+	metricsRegistry.containerInfo.DeletePartialMatch(partial)
+	metricsRegistry.containerStatus.DeletePartialMatch(partial)
+	metricsRegistry.cpuPercent.DeletePartialMatch(partial)
+	metricsRegistry.memoryBytes.DeletePartialMatch(partial)
+	metricsRegistry.memoryLimit.DeletePartialMatch(partial)
+	metricsRegistry.memoryPercent.DeletePartialMatch(partial)
+	metricsRegistry.diskBytes.DeletePartialMatch(partial)
+	metricsRegistry.pids.DeletePartialMatch(partial)
+}
+
 // recordContainerInfo records Docker container info to Prometheus.
 func (m *Manager) recordContainerInfo(container *ContainerInfo) {
 	if metricsRegistry == nil {
 		return
 	}
 
+	// Clean up stale series from previous calls (e.g. state transitions like running→exited)
+	// before registering the new label combination, preventing unbounded cardinality growth.
+	m.cleanupContainerMetrics(container.ID)
+
 	infoLabels := prometheus.Labels{
 		"peer":           m.peerName,
 		"container_id":   container.ID,
 		"container_name": container.Name,
 		"image":          container.Image,
-		"status":         container.Status,
+		"status":         container.State,
 		"network_mode":   container.NetworkMode,
 	}
 
