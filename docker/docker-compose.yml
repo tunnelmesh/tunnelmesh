@@ -396,7 +396,7 @@ services:
     restart: unless-stopped
 
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.9.0
     container_name: tunnelmesh-tempo
     profiles: ["monitoring"]
     # Share coord-1's network namespace so peers can send traces to localhost:4318
