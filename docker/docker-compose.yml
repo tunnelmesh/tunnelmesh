@@ -88,7 +88,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 3s
+      start_period: 15s
     restart: unless-stopped
 
   # Coordinator 3 - Tertiary
@@ -122,7 +122,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 3s
+      start_period: 15s
     restart: unless-stopped
 
   alice:

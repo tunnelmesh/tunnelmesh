@@ -844,11 +844,11 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 			}
 		}()
 
-		// Wait for coordinator server to be ready (up to 5 seconds)
+		// Wait for coordinator server to be ready (up to 30 seconds)
 		localServerURL := "http://127.0.0.1" + cfg.Coordinator.Listen
 		healthURL := localServerURL + "/health"
 		ready := false
-		for i := 0; i < 50; i++ {
+		for i := 0; i < 300; i++ {
 			resp, err := http.Get(healthURL)
 			if err == nil {
 				_ = resp.Body.Close()
@@ -860,7 +860,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 			time.Sleep(100 * time.Millisecond)
 		}
 		if !ready {
-			return fmt.Errorf("coordinator server failed to become ready after 5 seconds")
+			return fmt.Errorf("coordinator server failed to become ready after 30 seconds")
 		}
 
 		// If no servers configured, use localhost coordinator

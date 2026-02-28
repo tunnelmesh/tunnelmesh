@@ -87,11 +87,20 @@ if [ "$(hostname)" = "coordinator-1" ]; then
 else
     # coordinator-2 and coordinator-3 join coordinator-1's mesh
     echo "Waiting for coordinator-1 to be ready..."
+    MAX_WAIT=60
+    WAIT_COUNT=0
     until curl -sf http://coordinator-1:8080/health > /dev/null 2>&1; do
-        echo "  coordinator-1 not ready, waiting..."
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+        if [ "$WAIT_COUNT" -ge "$MAX_WAIT" ]; then
+            echo "ERROR: coordinator-1 did not become ready after $((MAX_WAIT * 2))s, exiting"
+            exit 1
+        fi
+        echo "  coordinator-1 not ready (attempt $WAIT_COUNT/$MAX_WAIT), waiting..."
         sleep 2
     done
-    echo "coordinator-1 is ready! Joining mesh..."
+    echo "coordinator-1 is ready! Waiting 5s for coordinator to complete self-registration..."
+    sleep 5
+    echo "Joining mesh as secondary coordinator..."
 
     # Allow HTTP for Docker testing environment
     export TUNNELMESH_ALLOW_HTTP=true
