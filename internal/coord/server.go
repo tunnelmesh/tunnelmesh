@@ -2489,6 +2489,12 @@ func (s *Server) SetMetricsRegistry(registry prometheus.Registerer) {
 	if s.s3Server != nil {
 		s.s3Server.SetMetrics(s3Metrics)
 	}
+	if s.meshTransport != nil {
+		s.meshTransport.SetReplicationMetrics(
+			s3Metrics.ReplicationBytesSent,
+			s3Metrics.ReplicationBytesReceived,
+		)
+	}
 
 	// Refresh storage metrics now that metrics are initialized.
 	// StartPeriodicCleanup may have already run its startup update before

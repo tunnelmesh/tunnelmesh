@@ -1841,6 +1841,20 @@
           "legendFormat": "{{ peer }} rx",
           "range": true,
           "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(tunnelmesh_s3_replication_bytes_sent_total[1m])",
+          "legendFormat": "{{ peer }} repl-tx",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(tunnelmesh_s3_replication_bytes_received_total[1m])",
+          "legendFormat": "{{ peer }} repl-rx",
+          "range": true,
+          "refId": "D"
         }
       ],
       "title": "S3 Throughput",

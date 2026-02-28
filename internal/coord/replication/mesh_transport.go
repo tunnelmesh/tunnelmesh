@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )
 
@@ -18,10 +19,12 @@ import (
 type MeshTransport struct {
 	// Base URL pattern for coordinators: https://{meshIP}/api/replication/message
 	// Uses standard HTTPS port 443 (admin interface), which is mesh-only (not exposed to public internet)
-	httpClient *http.Client
-	handler    func(from string, data []byte) error
-	handlerMu  sync.RWMutex
-	logger     zerolog.Logger
+	httpClient       *http.Client
+	handler          func(from string, data []byte) error
+	handlerMu        sync.RWMutex
+	logger           zerolog.Logger
+	bytesSentCounter prometheus.Counter // optional; nil = no metrics
+	bytesRecvCounter prometheus.Counter // optional; nil = no metrics
 }
 
 // NewMeshTransport creates a new mesh-based transport for replication.
@@ -47,6 +50,13 @@ func NewMeshTransport(logger zerolog.Logger, tlsConfig *tls.Config) *MeshTranspo
 		},
 		logger: logger.With().Str("component", "mesh-transport").Logger(),
 	}
+}
+
+// SetReplicationMetrics wires Prometheus counters for bytes sent/received.
+// Safe to call after construction; nil counters disable metrics.
+func (mt *MeshTransport) SetReplicationMetrics(sent, received prometheus.Counter) {
+	mt.bytesSentCounter = sent
+	mt.bytesRecvCounter = received
 }
 
 // SetTLSConfig replaces the TLS configuration on the underlying HTTP transport.
@@ -93,6 +103,10 @@ func (mt *MeshTransport) SendToCoordinator(ctx context.Context, coordMeshIP stri
 		Int("status", resp.StatusCode).
 		Msg("replication message sent successfully")
 
+	if mt.bytesSentCounter != nil {
+		mt.bytesSentCounter.Add(float64(len(data)))
+	}
+
 	return nil
 }
 
@@ -120,5 +134,9 @@ func (mt *MeshTransport) HandleIncomingMessage(from string, data []byte) error {
 		Int("size", len(data)).
 		Msg("handling incoming replication message")
 
-	return handler(from, data)
+	err := handler(from, data)
+	if err == nil && mt.bytesRecvCounter != nil {
+		mt.bytesRecvCounter.Add(float64(len(data)))
+	}
+	return err
 }

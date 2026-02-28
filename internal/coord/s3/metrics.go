@@ -60,6 +60,10 @@ type S3Metrics struct {
 	RebalanceObjectsEnqueuedTotal prometheus.Counter // tunnelmesh_s3_rebalance_objects_enqueued_total
 	RebalanceBytesTransferred     prometheus.Counter // tunnelmesh_s3_rebalance_bytes_transferred_total
 
+	// Replication transfer metrics (inter-coordinator, not client-facing)
+	ReplicationBytesSent     prometheus.Counter // tunnelmesh_s3_replication_bytes_sent_total
+	ReplicationBytesReceived prometheus.Counter // tunnelmesh_s3_replication_bytes_received_total
+
 	// Listing index drift metrics
 	ListingIndexStaleEntries prometheus.Gauge   // tunnelmesh_s3_listing_stale_entries (0 in steady state)
 	ListingIndexStaleCleaned prometheus.Counter // tunnelmesh_s3_listing_stale_cleaned_total
@@ -212,6 +216,15 @@ func InitS3Metrics(registry prometheus.Registerer) *S3Metrics {
 				Help: "Total bytes transferred during rebalance operations",
 			}),
 
+			ReplicationBytesSent: promauto.With(registry).NewCounter(prometheus.CounterOpts{
+				Name: "tunnelmesh_s3_replication_bytes_sent_total",
+				Help: "Total bytes sent to peer coordinators for replication",
+			}),
+			ReplicationBytesReceived: promauto.With(registry).NewCounter(prometheus.CounterOpts{
+				Name: "tunnelmesh_s3_replication_bytes_received_total",
+				Help: "Total bytes received from peer coordinators for replication",
+			}),
+
 			// Listing index drift metrics
 			ListingIndexStaleEntries: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
 				Name: "tunnelmesh_s3_listing_stale_entries",
@@ -249,6 +262,16 @@ func (m *S3Metrics) RecordUpload(bytes int64) {
 // RecordDownload records bytes downloaded.
 func (m *S3Metrics) RecordDownload(bytes int64) {
 	m.BytesDownloaded.Add(float64(bytes))
+}
+
+// RecordReplicationSend records bytes sent to a peer coordinator for replication.
+func (m *S3Metrics) RecordReplicationSend(n int) {
+	m.ReplicationBytesSent.Add(float64(n))
+}
+
+// RecordReplicationReceive records bytes received from a peer coordinator for replication.
+func (m *S3Metrics) RecordReplicationReceive(n int) {
+	m.ReplicationBytesReceived.Add(float64(n))
 }
 
 // UpdateStorageMetrics updates storage-related gauges.

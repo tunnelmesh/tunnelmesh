@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )
 
@@ -476,6 +477,132 @@ func TestConcurrentHandleIncomingMessage(t *testing.T) {
 	defer mu.Unlock()
 	if callCount != iterations {
 		t.Errorf("expected %d calls, got %d", iterations, callCount)
+	}
+}
+
+func TestMeshTransport_MetricsBytesSent(t *testing.T) {
+	logger := zerolog.Nop()
+	mt := NewMeshTransport(logger, nil)
+
+	reg := prometheus.NewRegistry()
+	sentCounter := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_sent_total"})
+	recvCounter := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_recv_total"})
+	reg.MustRegister(sentCounter, recvCounter)
+
+	mt.SetReplicationMetrics(sentCounter, recvCounter)
+
+	data := []byte("replication payload data")
+	mockTransport := &mockRoundTripper{statusCode: http.StatusOK}
+	mt.httpClient.Transport = mockTransport
+
+	err := mt.SendToCoordinator(context.Background(), "10.42.0.2", data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Gather metrics and verify sent counter
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+
+	var sentValue float64
+	for _, mf := range mfs {
+		if mf.GetName() == "test_sent_total" {
+			sentValue = mf.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+
+	expected := float64(len(data))
+	if sentValue != expected {
+		t.Errorf("expected sent counter %.0f, got %.0f", expected, sentValue)
+	}
+}
+
+func TestMeshTransport_MetricsBytesReceived(t *testing.T) {
+	logger := zerolog.Nop()
+	mt := NewMeshTransport(logger, nil)
+
+	reg := prometheus.NewRegistry()
+	sentCounter := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_sent_total"})
+	recvCounter := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_recv_total"})
+	reg.MustRegister(sentCounter, recvCounter)
+
+	mt.SetReplicationMetrics(sentCounter, recvCounter)
+
+	data := []byte("incoming replication message")
+	mt.RegisterHandler(func(from string, d []byte) error {
+		return nil
+	})
+
+	err := mt.HandleIncomingMessage("coord-1", data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+
+	var recvValue float64
+	for _, mf := range mfs {
+		if mf.GetName() == "test_recv_total" {
+			recvValue = mf.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+
+	expected := float64(len(data))
+	if recvValue != expected {
+		t.Errorf("expected recv counter %.0f, got %.0f", expected, recvValue)
+	}
+}
+
+func TestMeshTransport_MetricsNotIncrementedOnHandlerError(t *testing.T) {
+	logger := zerolog.Nop()
+	mt := NewMeshTransport(logger, nil)
+
+	reg := prometheus.NewRegistry()
+	recvCounter := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_recv_total"})
+	reg.MustRegister(recvCounter)
+
+	mt.SetReplicationMetrics(nil, recvCounter)
+
+	mt.RegisterHandler(func(from string, data []byte) error {
+		return errors.New("handler error")
+	})
+
+	_ = mt.HandleIncomingMessage("coord-1", []byte("data"))
+
+	mfs, _ := reg.Gather()
+	for _, mf := range mfs {
+		if mf.GetName() == "test_recv_total" {
+			v := mf.GetMetric()[0].GetCounter().GetValue()
+			if v != 0 {
+				t.Errorf("expected recv counter 0 on handler error, got %.0f", v)
+			}
+		}
+	}
+}
+
+func TestMeshTransport_MetricsNilSafe(t *testing.T) {
+	logger := zerolog.Nop()
+	mt := NewMeshTransport(logger, nil)
+
+	// No SetReplicationMetrics call — counters remain nil.
+	// Verify no panic on send.
+	mockTransport := &mockRoundTripper{statusCode: http.StatusOK}
+	mt.httpClient.Transport = mockTransport
+	err := mt.SendToCoordinator(context.Background(), "10.42.0.2", []byte("data"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify no panic on receive.
+	mt.RegisterHandler(func(from string, data []byte) error { return nil })
+	err = mt.HandleIncomingMessage("coord-1", []byte("data"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
