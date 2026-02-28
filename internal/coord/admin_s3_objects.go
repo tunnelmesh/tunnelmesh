@@ -243,7 +243,10 @@ func (s *Server) handleS3GetObject(w http.ResponseWriter, r *http.Request, bucke
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 
-	_, _ = io.Copy(w, reader)
+	n, _ := io.Copy(w, reader)
+	if m := s3.GetS3Metrics(); m != nil && n > 0 {
+		m.RecordDownload(n)
+	}
 }
 
 // handleS3GetObjectVersion returns a specific version of an object.
@@ -261,7 +264,10 @@ func (s *Server) handleS3GetObjectVersion(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 	w.Header().Set("X-Version-Id", meta.VersionID)
 
-	_, _ = io.Copy(w, reader)
+	n, _ := io.Copy(w, reader)
+	if m := s3.GetS3Metrics(); m != nil && n > 0 {
+		m.RecordDownload(n)
+	}
 }
 
 // handleS3PutObject creates or updates an object.
@@ -324,6 +330,10 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 			s.jsonError(w, "failed to store object: "+err.Error(), http.StatusInternalServerError)
 		}
 		return
+	}
+
+	if m := s3.GetS3Metrics(); m != nil && meta.Size > 0 {
+		m.RecordUpload(meta.Size)
 	}
 
 	// Update listing index incrementally
@@ -684,5 +694,8 @@ func (s *Server) handleS3GetRecycledObject(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 
-	_, _ = io.Copy(w, reader)
+	n, _ := io.Copy(w, reader)
+	if m := s3.GetS3Metrics(); m != nil && n > 0 {
+		m.RecordDownload(n)
+	}
 }
