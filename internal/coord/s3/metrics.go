@@ -264,16 +264,6 @@ func (m *S3Metrics) RecordDownload(bytes int64) {
 	m.BytesDownloaded.Add(float64(bytes))
 }
 
-// RecordReplicationSend records bytes sent to a peer coordinator for replication.
-func (m *S3Metrics) RecordReplicationSend(n int) {
-	m.ReplicationBytesSent.Add(float64(n))
-}
-
-// RecordReplicationReceive records bytes received from a peer coordinator for replication.
-func (m *S3Metrics) RecordReplicationReceive(n int) {
-	m.ReplicationBytesReceived.Add(float64(n))
-}
-
 // UpdateStorageMetrics updates storage-related gauges.
 func (m *S3Metrics) UpdateStorageMetrics(buckets, objects int, storageBytes, quotaBytes int64) {
 	m.BucketsTotal.Set(float64(buckets))

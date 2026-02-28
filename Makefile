@@ -21,6 +21,9 @@ LDFLAGS=-ldflags "-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X m
 # Platforms for cross-compilation
 PLATFORMS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
+# Platform-specific release binary paths
+S3BENCH_BIN=./bin/release/tunnelmesh-s3bench-$(shell go env GOOS)-$(shell go env GOARCH)
+
 all: build
 
 # Build for current platform
@@ -220,12 +223,16 @@ docker-up: docker-build
 		sudo tunnelmesh context rm docker 2>/dev/null || true; \
 		echo "Joining mesh in background..."; \
 		sudo env "TUNNELMESH_TOKEN=$$(cat /tmp/tunnelmesh-docker-token)" tunnelmesh join http://localhost:8081 --context docker & \
+		JOIN_PID=$$!; \
 		echo "Waiting for mesh connection to establish..."; \
 		sleep 8; \
+		if ! kill -0 $$JOIN_PID 2>/dev/null; then \
+			wait $$JOIN_PID && echo "Warning: tunnelmesh join exited early (possible error)" || echo "Warning: tunnelmesh join failed (exit $$?)"; \
+		fi; \
 	fi; \
 	echo ""; \
 	echo "=== Run s3bench against this environment ==="; \
-	echo "./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \\"; \
+	echo "$(S3BENCH_BIN) run alien_invasion \\"; \
 	echo "    --coordinator http://localhost:8081 \\"; \
 	echo "    --auth-token \"$$TUNNELMESH_TOKEN\" \\"; \
 	echo "    --time-scale 500 \\"; \
@@ -233,7 +240,7 @@ docker-up: docker-build
 	echo "    --accordion"; \
 	read -p "Run s3bench now? [Y/n] " s3answer </dev/tty; \
 	if [ "$$s3answer" != "n" ] && [ "$$s3answer" != "N" ]; then \
-		./bin/release/tunnelmesh-s3bench-darwin-arm64 run alien_invasion \
+		$(S3BENCH_BIN) run alien_invasion \
 			--coordinator http://localhost:8081 \
 			--auth-token "$$TUNNELMESH_TOKEN" \
 			--time-scale 500 \

@@ -1876,6 +1876,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 						return
 					case <-time.After(30 * time.Second):
 					}
+					// Re-check after warmup: if coord re-registered during the 30s window,
+					// the synchronous path already called AddPeer — skip the duplicate.
+					if s.replicator.HasPeer(peerCopy) {
+						return
+					}
 					s.replicator.AddPeer(peerCopy, nameCopy)
 					log.Debug().Str("peer", nameCopy).Str("mesh_ip", peerCopy).Msg("activated new coordinator for replication after warmup")
 				}()

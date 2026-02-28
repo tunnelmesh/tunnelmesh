@@ -53,7 +53,10 @@ func NewMeshTransport(logger zerolog.Logger, tlsConfig *tls.Config) *MeshTranspo
 }
 
 // SetReplicationMetrics wires Prometheus counters for bytes sent/received.
-// Safe to call after construction; nil counters disable metrics.
+// Must be called before any replication traffic flows (i.e., before the
+// coordinator starts accepting peer registrations). The counter fields are
+// not protected by a mutex; calling this concurrently with SendToCoordinator
+// or HandleIncomingMessage is a data race. Nil counters disable metrics.
 func (mt *MeshTransport) SetReplicationMetrics(sent, received prometheus.Counter) {
 	mt.bytesSentCounter = sent
 	mt.bytesRecvCounter = received

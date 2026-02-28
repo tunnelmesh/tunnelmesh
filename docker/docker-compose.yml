@@ -58,6 +58,7 @@ services:
     restart: unless-stopped
 
   # Coordinator 2 - Secondary (optional, for replication testing)
+  # Docker socket intentionally omitted: Docker monitoring runs on coord-1 only.
   coord-2:
     build:
       context: ..
@@ -92,6 +93,7 @@ services:
     restart: unless-stopped
 
   # Coordinator 3 - Tertiary
+  # Docker socket intentionally omitted: Docker monitoring runs on coord-1 only.
   coord-3:
     build:
       context: ..
