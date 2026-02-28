@@ -4190,12 +4190,12 @@
       "pluginVersion": "12.3.2",
       "targets": [
         {
-          "expr": "docker_container_status",
+          "expr": "docker_container_status == 0",
           "legendFormat": "{{container_name}} ({{peer}})",
           "refId": "A"
         }
       ],
-      "title": "Container Status",
+      "title": "Stopped Containers",
       "type": "state-timeline"
     },
     {
