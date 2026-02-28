@@ -302,6 +302,7 @@ func (s *Server) forwardBucketDeletionToPeers(ctx context.Context, bucketName st
 			gcURL := fmt.Sprintf("https://%s:443/api/s3/gc", ip)
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, gcURL, bytes.NewReader(payload))
 			if err != nil {
+				log.Warn().Err(err).Str("peer", ip).Str("bucket", bucketName).Msg("failed to create bucket deletion request")
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
@@ -310,7 +311,7 @@ func (s *Server) forwardBucketDeletionToPeers(ctx context.Context, bucketName st
 				log.Warn().Err(err).Str("peer", ip).Str("bucket", bucketName).Msg("failed to forward bucket deletion to peer")
 				return
 			}
-			_ = resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode == http.StatusOK {
 				log.Debug().Str("peer", ip).Str("bucket", bucketName).Msg("forwarded bucket deletion to peer")
 			}
