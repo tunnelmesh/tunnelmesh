@@ -284,6 +284,11 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 		Float64("setup_duration_s", setupDuration).
 		Msg("tunnel established via transport layer")
 
+	// End the setup span now — HandleTunnel blocks for the entire tunnel lifetime
+	// (hours or days), so defer would never fire while the peer is connected.
+	// The defer above is still the safety net for all early-return error paths.
+	setupSpan.End()
+
 	// Handle incoming packets from this tunnel
 	if m.Forwarder != nil {
 		m.Forwarder.HandleTunnel(connCtx, peer.Name, tun)
