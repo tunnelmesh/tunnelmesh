@@ -445,3 +445,19 @@ func (a *ConnectionAdapter) Close() error {
 func (a *ConnectionAdapter) PeerName() string {
 	return a.peerName
 }
+
+// IsHealthy implements HealthChecker by delegating to the underlying connection
+// if it supports health checking. Returns false if the adapter is closed.
+func (a *ConnectionAdapter) IsHealthy() bool {
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if closed {
+		return false
+	}
+	if hc, ok := a.conn.(HealthChecker); ok {
+		return hc.IsHealthy()
+	}
+	// Underlying connection has no health check — assume healthy while not closed.
+	return true
+}
