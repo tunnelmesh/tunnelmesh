@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -111,6 +112,19 @@ func (s *State) Delete(bucket, key string) {
 
 	k := makeKey(bucket, key)
 	delete(s.vectors, k)
+}
+
+// DeleteBucket removes all version vectors for every key in the given bucket.
+// This should be called when an entire bucket is force-deleted (e.g. file share cleanup).
+func (s *State) DeleteBucket(bucket string) {
+	prefix := bucket + "/"
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.vectors {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.vectors, k)
+		}
+	}
 }
 
 // Count returns the number of tracked objects.
