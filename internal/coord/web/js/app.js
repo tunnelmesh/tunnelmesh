@@ -941,8 +941,6 @@ function displayTraces(data) {
         const serviceIdx = fields.findIndex((f) => f.name === 'traceService');
         const nameIdx = fields.findIndex((f) => f.name === 'traceName');
         const durationIdx = fields.findIndex((f) => f.name === 'traceDuration');
-        const spanCountIdx = fields.findIndex((f) => f.name === 'traceCount');
-
         if (traceIdIdx === -1 || startTimeIdx === -1) continue;
 
         const traceIds = values[traceIdIdx] || [];
@@ -953,7 +951,6 @@ function displayTraces(data) {
                 service: serviceIdx >= 0 ? values[serviceIdx]?.[i] || '' : '',
                 name: nameIdx >= 0 ? values[nameIdx]?.[i] || '' : '',
                 durationMs: durationIdx >= 0 ? values[durationIdx]?.[i] : null,
-                spanCount: spanCountIdx >= 0 ? values[spanCountIdx]?.[i] : null,
             });
         }
     }
@@ -997,7 +994,6 @@ function displayTraces(data) {
                 }),
             )}&orgId=1`;
 
-            const spanStr = trace.spanCount != null ? String(trace.spanCount) : '—';
             const shortId = escapeHtml(trace.traceID ? trace.traceID.substring(0, 8) : '—');
             const a = (content) => `<a class="trace-link" href="${traceUrl}">${content}</a>`;
 
@@ -1006,7 +1002,6 @@ function displayTraces(data) {
                 <td class="trace-id">${a(shortId)}</td>
                 <td class="trace-op">${a(escapeHtml(trace.name || '—'))}</td>
                 <td>${a(escapeHtml(trace.service || '—'))}</td>
-                <td class="trace-duration">${a(escapeHtml(spanStr))}</td>
                 <td class="trace-duration">${a(escapeHtml(durationStr))}</td>
             </tr>`;
         })
