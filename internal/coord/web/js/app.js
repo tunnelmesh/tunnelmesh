@@ -991,7 +991,7 @@ function displayTraces(data) {
                 JSON.stringify({
                     abc: {
                         datasource: dsUid,
-                        queries: [{ refId: 'A', query: trace.traceID, queryType: 'traceql' }],
+                        queries: [{ refId: 'A', query: trace.traceID, queryType: 'traceId' }],
                         range: { from: 'now-1h', to: 'now' },
                     },
                 }),
