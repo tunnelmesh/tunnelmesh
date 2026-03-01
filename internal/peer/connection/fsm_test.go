@@ -371,6 +371,31 @@ func TestPeerConnection_Info(t *testing.T) {
 	}
 }
 
+func TestPeerConnection_Info_TransportTypeGuardedByState(t *testing.T) {
+	pc := NewPeerConnection(PeerConnectionConfig{
+		PeerName: "test-peer",
+		MeshIP:   "10.0.0.1",
+	})
+
+	tunnel := &mockTunnel{}
+	_ = pc.Connected(context.Background(), tunnel, "udp", "connected via UDP")
+
+	// When Connected, TransportType should be returned.
+	info := pc.Info()
+	if info.TransportType != "udp" {
+		t.Errorf("Info().TransportType = %q while Connected, want %q", info.TransportType, "udp")
+	}
+
+	// Disconnect — transportType field is NOT cleared but state changes.
+	_ = pc.Disconnect(context.Background(), "test disconnect", nil)
+
+	// After disconnect, Info() must NOT expose the stale transport type.
+	info = pc.Info()
+	if info.TransportType != "" {
+		t.Errorf("Info().TransportType = %q after Disconnect, want empty string", info.TransportType)
+	}
+}
+
 func TestPeerConnection_AddObserver(t *testing.T) {
 	pc := NewPeerConnection(PeerConnectionConfig{
 		PeerName: "test-peer",

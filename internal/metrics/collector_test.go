@@ -754,6 +754,62 @@ func TestCollector_CollectFilterStats_NilFilter(t *testing.T) {
 	}
 }
 
+func TestCollector_CollectConnectionStats_StaleLabelsCleared(t *testing.T) {
+	Registry = prometheus.NewRegistry()
+	Registry.MustRegister(collectors.NewGoCollector())
+	Registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	m := InitMetrics("test-peer", "10.42.0.1", "1.0.0")
+
+	connMgr := &mockConnectionMgr{
+		infos: []connection.ConnectionInfo{
+			{PeerName: "peer-a", State: connection.StateConnecting, TransportType: ""},
+		},
+	}
+
+	c := NewCollector(m, CollectorConfig{
+		Connections: connMgr,
+	})
+
+	// First collect: peer-a is Connecting with transport="none".
+	c.Collect()
+
+	mfs, err := Registry.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "tunnelmesh_connection_state" {
+			require.Len(t, mf.GetMetric(), 1, "expected exactly 1 series after first collect")
+			labels := make(map[string]string)
+			for _, l := range mf.GetMetric()[0].GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			assert.Equal(t, "none", labels["transport"])
+		}
+	}
+
+	// Transition: peer-a is now Connected with transport="udp".
+	connMgr.infos = []connection.ConnectionInfo{
+		{PeerName: "peer-a", State: connection.StateConnected, TransportType: "udp"},
+	}
+
+	c.Collect()
+
+	mfs, err = Registry.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "tunnelmesh_connection_state" {
+			// After Reset(), only the new series must exist — no stale transport="none".
+			require.Len(t, mf.GetMetric(), 1, "stale transport label series must be cleared on re-collect")
+			labels := make(map[string]string)
+			for _, l := range mf.GetMetric()[0].GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			assert.Equal(t, "udp", labels["transport"], "expected transport=udp after transition")
+			assert.Equal(t, float64(connection.StateConnected), mf.GetMetric()[0].GetGauge().GetValue())
+		}
+	}
+}
+
 func TestCollector_CollectFilteredDrops(t *testing.T) {
 	Registry = prometheus.NewRegistry()
 	Registry.MustRegister(collectors.NewGoCollector())
