@@ -2,7 +2,10 @@ package proto
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -591,4 +594,63 @@ func TestPeerStats_LatencyWithConnections(t *testing.T) {
 	assert.Equal(t, int64(35), decoded.CoordinatorRTTMs)
 	assert.Equal(t, int64(20), decoded.PeerLatencies["peer-a"])
 	assert.Equal(t, "udp", decoded.Connections["peer-a"])
+}
+
+func TestGetExternalIPCaching(t *testing.T) {
+	// Count how many times the mock server is hit
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = fmt.Fprint(w, "1.2.3.4")
+	}))
+	defer srv.Close()
+
+	// Point the package-level service list at our mock
+	origServices := publicIPServices
+	publicIPServices = []string{srv.URL}
+	defer func() { publicIPServices = origServices }()
+
+	// Reset cache so this test starts clean
+	ResetExternalIPCache()
+
+	// First call: must hit the server
+	ip1 := GetExternalIP()
+	assert.Equal(t, "1.2.3.4", ip1)
+	assert.Equal(t, 1, hits, "first call should fetch from server")
+
+	// Second call: must use cache (no additional server hit)
+	ip2 := GetExternalIP()
+	assert.Equal(t, "1.2.3.4", ip2)
+	assert.Equal(t, 1, hits, "second call should use cache, not hit server again")
+
+	// After reset: must hit the server once more
+	ResetExternalIPCache()
+	ip3 := GetExternalIP()
+	assert.Equal(t, "1.2.3.4", ip3)
+	assert.Equal(t, 2, hits, "call after ResetExternalIPCache should re-fetch")
+}
+
+func TestGetExternalIPCachesEmptyResult(t *testing.T) {
+	// Server returns a non-IP response — GetExternalIP should cache ""
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	origServices := publicIPServices
+	publicIPServices = []string{srv.URL}
+	defer func() { publicIPServices = origServices }()
+
+	ResetExternalIPCache()
+
+	ip1 := GetExternalIP()
+	assert.Equal(t, "", ip1)
+	assert.Equal(t, 1, hits)
+
+	// Second call must not retry the server
+	ip2 := GetExternalIP()
+	assert.Equal(t, "", ip2)
+	assert.Equal(t, 1, hits, "empty result should also be cached")
 }

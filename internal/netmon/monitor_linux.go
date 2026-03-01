@@ -4,6 +4,7 @@ package netmon
 
 import (
 	"context"
+	"net"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -134,6 +135,18 @@ func (m *linuxMonitor) parseNetlinkMessage(msg *syscall.NetlinkMessage) *Event {
 					}
 				}
 			}
+
+			// Fallback: if IFA_LABEL absent (e.g., IPv6 events), resolve via interface index.
+			// IfAddrmsg layout: [Family(1)][Prefixlen(1)][Flags(1)][Scope(1)][Index(4)]
+			if ifName == "" && len(msg.Data) >= 8 {
+				idx := int(uint32(msg.Data[4]) |
+					uint32(msg.Data[5])<<8 |
+					uint32(msg.Data[6])<<16 |
+					uint32(msg.Data[7])<<24)
+				if iface, err := net.InterfaceByIndex(idx); err == nil {
+					ifName = iface.Name
+				}
+			}
 		}
 	}
 
@@ -146,7 +159,7 @@ func (m *linuxMonitor) parseNetlinkMessage(msg *syscall.NetlinkMessage) *Event {
 
 func (m *linuxMonitor) shouldIgnore(event *Event) bool {
 	if event.Interface == "" {
-		return false
+		return true // Unknown interface — safe to ignore
 	}
 
 	for _, pattern := range m.cfg.IgnoreInterfaces {

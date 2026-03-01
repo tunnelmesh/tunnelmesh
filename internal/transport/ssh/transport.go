@@ -155,10 +155,11 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 }
 
 // selectAddress chooses the best address to connect to.
+// Returns "" if the peer is not listening on SSH (SSHPort == 0).
 func (t *Transport) selectAddress(info *transport.PeerInfo) string {
 	port := info.SSHPort
 	if port == 0 {
-		port = 22
+		return "" // Peer explicitly registered with no SSH listener
 	}
 
 	// Prefer private IPs (same LAN)
