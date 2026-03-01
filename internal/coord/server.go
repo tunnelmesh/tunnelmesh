@@ -2263,7 +2263,7 @@ func (s *Server) handleReplicationMessage(w http.ResponseWriter, r *http.Request
 
 	// Handle via mesh transport (from was determined during auth above)
 	if s.meshTransport != nil {
-		if err := s.meshTransport.HandleIncomingMessage(from, data); err != nil {
+		if err := s.meshTransport.HandleIncomingMessage(r.Context(), from, data); err != nil {
 			log.Warn().Err(err).Str("from", from).Str("peer", peerName).Msg("failed to handle replication message")
 			s.jsonError(w, err.Error(), http.StatusInternalServerError)
 			return

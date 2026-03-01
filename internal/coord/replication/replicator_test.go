@@ -27,7 +27,7 @@ type mockTransport struct {
 	mu           sync.Mutex
 	sent         map[string][]byte // map[coordMeshIP]lastMessage
 	sentMessages []sentMessage     // all sent messages in order
-	handler      func(from string, data []byte) error
+	handler      func(ctx context.Context, from string, data []byte) error
 	sendErr      error // If set, SendToCoordinator will return this error
 }
 
@@ -51,7 +51,7 @@ func (m *mockTransport) SendToCoordinator(ctx context.Context, coordMeshIP strin
 	return nil
 }
 
-func (m *mockTransport) RegisterHandler(handler func(from string, data []byte) error) {
+func (m *mockTransport) RegisterHandler(handler func(ctx context.Context, from string, data []byte) error) {
 	m.handler = handler
 }
 
@@ -59,7 +59,7 @@ func (m *mockTransport) simulateReceive(from string, data []byte) error {
 	if m.handler == nil {
 		return fmt.Errorf("no handler registered")
 	}
-	return m.handler(from, data)
+	return m.handler(context.Background(), from, data)
 }
 
 func (m *mockTransport) getLastSent(coordMeshIP string) []byte {
@@ -431,12 +431,12 @@ func (m *mockS3Store) addObjectWithChunks(bucket, key string, chunks []string, c
 // testTransportBroker routes messages between multiple coordinators in tests.
 type testTransportBroker struct {
 	mu       sync.Mutex
-	handlers map[string]func(from string, data []byte) error // map[coordID]handler
+	handlers map[string]func(ctx context.Context, from string, data []byte) error // map[coordID]handler
 }
 
 func newTestTransportBroker() *testTransportBroker {
 	return &testTransportBroker{
-		handlers: make(map[string]func(from string, data []byte) error),
+		handlers: make(map[string]func(ctx context.Context, from string, data []byte) error),
 	}
 }
 
@@ -464,10 +464,10 @@ func (t *brokerTransport) SendToCoordinator(ctx context.Context, destCoordID str
 	}
 
 	// Deliver synchronously for deterministic tests
-	return handler(t.coordID, data)
+	return handler(ctx, t.coordID, data)
 }
 
-func (t *brokerTransport) RegisterHandler(handler func(from string, data []byte) error) {
+func (t *brokerTransport) RegisterHandler(handler func(ctx context.Context, from string, data []byte) error) {
 	t.broker.mu.Lock()
 	defer t.broker.mu.Unlock()
 	t.broker.handlers[t.coordID] = handler
@@ -1290,7 +1290,7 @@ func TestStripedReplicateObject_Distribution(t *testing.T) {
 		// Wrap the handler in the broker to intercept messages
 		broker.mu.Lock()
 		originalHandler := broker.handlers[peerID]
-		broker.handlers[peerID] = func(from string, data []byte) error {
+		broker.handlers[peerID] = func(ctx context.Context, from string, data []byte) error {
 			msg, err := UnmarshalMessage(data)
 			if err == nil && msg.Type == MessageTypeReplicateChunk {
 				var payload ReplicateChunkPayload
@@ -1304,7 +1304,7 @@ func TestStripedReplicateObject_Distribution(t *testing.T) {
 					mu.Unlock()
 				}
 			}
-			return originalHandler(from, data)
+			return originalHandler(ctx, from, data)
 		}
 		broker.mu.Unlock()
 	}
@@ -1381,7 +1381,7 @@ func TestStripedReplicateObject_SinglePeer(t *testing.T) {
 	// Wrap the handler in the broker to intercept messages
 	broker.mu.Lock()
 	originalHandler := broker.handlers["coord-peer1"]
-	broker.handlers["coord-peer1"] = func(from string, data []byte) error {
+	broker.handlers["coord-peer1"] = func(ctx context.Context, from string, data []byte) error {
 		msg, err := UnmarshalMessage(data)
 		if err == nil && msg.Type == MessageTypeReplicateChunk {
 			var payload ReplicateChunkPayload
@@ -1391,7 +1391,7 @@ func TestStripedReplicateObject_SinglePeer(t *testing.T) {
 				mu.Unlock()
 			}
 		}
-		return originalHandler(from, data)
+		return originalHandler(ctx, from, data)
 	}
 	broker.mu.Unlock()
 
@@ -1774,7 +1774,7 @@ func TestHandleReplicateChunk_AsyncACK(t *testing.T) {
 
 // blockingSendTransport blocks on SendToCoordinator until signaled.
 type blockingSendTransport struct {
-	handler    func(from string, data []byte) error
+	handler    func(ctx context.Context, from string, data []byte) error
 	ackStarted chan struct{}
 	ackBlocked chan struct{}
 }
@@ -1790,7 +1790,7 @@ func (t *blockingSendTransport) SendToCoordinator(_ context.Context, _ string, _
 	return nil
 }
 
-func (t *blockingSendTransport) RegisterHandler(handler func(from string, data []byte) error) {
+func (t *blockingSendTransport) RegisterHandler(handler func(ctx context.Context, from string, data []byte) error) {
 	t.handler = handler
 }
 
@@ -1798,7 +1798,7 @@ func (t *blockingSendTransport) simulateReceive(from string, data []byte) error 
 	if t.handler == nil {
 		return fmt.Errorf("no handler registered")
 	}
-	return t.handler(from, data)
+	return t.handler(context.Background(), from, data)
 }
 
 func TestAsyncSendAck_SemaphoreFallback(t *testing.T) {
@@ -2099,7 +2099,7 @@ func TestHandleReplicateChunk_CapacityOK(t *testing.T) {
 // allowing tests to verify concurrency limits.
 type blockingTransport struct {
 	mu         sync.Mutex
-	handler    func(from string, data []byte) error
+	handler    func(ctx context.Context, from string, data []byte) error
 	blockCh    chan struct{} // Sends block until this channel is closed
 	concurrent atomic.Int32  // Current number of concurrent sends
 	maxSeen    atomic.Int32  // Peak concurrent sends observed
@@ -2132,7 +2132,7 @@ func (bt *blockingTransport) SendToCoordinator(ctx context.Context, coordMeshIP 
 	}
 }
 
-func (bt *blockingTransport) RegisterHandler(handler func(from string, data []byte) error) {
+func (bt *blockingTransport) RegisterHandler(handler func(ctx context.Context, from string, data []byte) error) {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
 	bt.handler = handler

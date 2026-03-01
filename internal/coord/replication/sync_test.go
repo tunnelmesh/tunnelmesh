@@ -588,11 +588,11 @@ func TestFullSyncRoundtrip(t *testing.T) {
 	}()
 
 	// Wire up transports bidirectionally
-	transport1.RegisterHandler(func(from string, data []byte) error {
-		return coord1.handleIncomingMessage(from, data)
+	transport1.RegisterHandler(func(ctx context.Context, from string, data []byte) error {
+		return coord1.handleIncomingMessage(ctx, from, data)
 	})
-	transport2.RegisterHandler(func(from string, data []byte) error {
-		return coord2.handleIncomingMessage(from, data)
+	transport2.RegisterHandler(func(ctx context.Context, from string, data []byte) error {
+		return coord2.handleIncomingMessage(ctx, from, data)
 	})
 
 	// Coord2 requests sync from coord1

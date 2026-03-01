@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"golang.org/x/time/rate"
 )
 
@@ -29,8 +30,10 @@ type Transport interface {
 	// SendToCoordinator sends a message to another coordinator by mesh IP
 	SendToCoordinator(ctx context.Context, coordMeshIP string, data []byte) error
 
-	// RegisterHandler registers a handler for incoming replication messages
-	RegisterHandler(handler func(from string, data []byte) error)
+	// RegisterHandler registers a handler for incoming replication messages.
+	// The context carries the W3C trace context extracted from the HTTP request headers,
+	// allowing the receiving coordinator to create child spans under the sender's trace.
+	RegisterHandler(handler func(ctx context.Context, from string, data []byte) error)
 }
 
 // ObjectMeta represents S3 object metadata including chunk information.
@@ -680,7 +683,10 @@ func (r *Replicator) sendReplicateMessage(ctx context.Context, peer string, payl
 }
 
 // handleIncomingMessage processes incoming replication messages.
-func (r *Replicator) handleIncomingMessage(from string, data []byte) error {
+func (r *Replicator) handleIncomingMessage(ctx context.Context, from string, data []byte) error {
+	_, span := tracing.Tracer("tunnelmesh/replication").Start(ctx, "replication.receive")
+	defer span.End()
+
 	// Apply rate limiting to prevent abuse
 	if !r.rateLimiter.Allow() {
 		r.incrementRateLimitedCount()
