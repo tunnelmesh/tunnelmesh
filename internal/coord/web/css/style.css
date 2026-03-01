@@ -1316,47 +1316,22 @@ a.logs-container {
     background: var(--color-text-secondary);
 }
 
-.traces-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-}
-
+/* Only trace-specific override: sticky header for scrollable container */
 .traces-table thead th {
-    padding: 0.35rem 0.75rem;
-    text-align: left;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    background: var(--color-bg-primary);
-    border-bottom: 1px solid var(--color-border-primary);
     position: sticky;
     top: 0;
     z-index: 1;
 }
 
-.trace-row {
-    border-bottom: 1px solid var(--color-border-secondary);
-}
-
-.trace-row:last-child {
-    border-bottom: none;
-}
-
-.trace-row:hover {
-    background: var(--color-bg-secondary);
-}
-
+/* td padding is 0 so the <a> fills the whole cell; match global td padding inside the link */
 .trace-row td {
     padding: 0;
     white-space: nowrap;
-    color: var(--color-text-primary);
 }
 
-/* Full-cell anchor — padding lives here so the whole cell is a click target */
 .trace-link {
     display: block;
-    padding: 0.3rem 0.75rem;
+    padding: 0.75rem 1rem;
     color: inherit;
     text-decoration: none;
 }

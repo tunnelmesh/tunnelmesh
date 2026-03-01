@@ -999,8 +999,7 @@ function displayTraces(data) {
 
             const spanStr = trace.spanCount != null ? String(trace.spanCount) : '—';
             const shortId = escapeHtml(trace.traceID ? trace.traceID.substring(0, 8) : '—');
-            const a = (content) =>
-                `<a class="trace-link" href="${traceUrl}" target="_blank" rel="noopener noreferrer">${content}</a>`;
+            const a = (content) => `<a class="trace-link" href="${traceUrl}">${content}</a>`;
 
             return `<tr class="trace-row">
                 <td class="log-timestamp">${a(escapeHtml(ageStr))}</td>
