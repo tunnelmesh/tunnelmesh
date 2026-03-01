@@ -291,9 +291,10 @@ var publicIPServices = []string{
 }
 
 var (
-	extIPMu    sync.Mutex
-	extIPCache string
-	extIPValid bool
+	extIPMu         sync.Mutex
+	extIPCache      string
+	extIPValid      bool
+	extIPGeneration uint64
 )
 
 // GetExternalIP returns the cached external IP, fetching it once if not yet known.
@@ -301,9 +302,9 @@ var (
 // Returns empty string if the public IP cannot be determined.
 //
 // The HTTP fetch is performed outside the lock so concurrent callers do not
-// block for up to ~20s while network requests are in flight. A double-checked
-// write ensures only one result is stored even if two goroutines race on the
-// first call.
+// block for up to ~20s while network requests are in flight. A generation
+// counter prevents a fetch that started before a Reset from overwriting the
+// invalidated cache after the Reset completes.
 func GetExternalIP() string {
 	extIPMu.Lock()
 	if extIPValid {
@@ -311,13 +312,16 @@ func GetExternalIP() string {
 		extIPMu.Unlock()
 		return ip
 	}
+	gen := extIPGeneration
 	extIPMu.Unlock()
 
 	ip := fetchExternalIP()
 
 	extIPMu.Lock()
 	defer extIPMu.Unlock()
-	if !extIPValid { // first writer wins; ignore concurrent duplicate fetch
+	// Only store if the cache is still invalid AND the generation hasn't advanced
+	// (i.e. no Reset occurred while we were fetching).
+	if !extIPValid && extIPGeneration == gen {
 		extIPCache = ip
 		extIPValid = true // cache even "" — don't retry until network change
 	}
@@ -330,6 +334,7 @@ func ResetExternalIPCache() {
 	extIPMu.Lock()
 	extIPValid = false
 	extIPCache = ""
+	extIPGeneration++
 	extIPMu.Unlock()
 }
 
