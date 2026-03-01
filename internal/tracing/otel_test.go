@@ -127,6 +127,76 @@ func TestNoLeadingZeroIDGenerator_SpanIDIsNonZero(t *testing.T) {
 	}
 }
 
+// TestDockerSpanNameProcessor_RewritesContainerIDInPath verifies that a span
+// named with a raw Docker API URL has its 64-char container ID replaced by {id}.
+func TestDockerSpanNameProcessor_RewritesContainerIDInPath(t *testing.T) {
+	exp, cleanup := initTestTracer(t)
+	defer cleanup()
+
+	// Simulate what the Docker client's otelhttp transport produces.
+	tr := otel.Tracer("docker-client")
+	_, span := tr.Start(context.Background(), "GET /v1.51/containers/ce4144f1a8b9e86da07c8b914f8e6a0db645018c575e754f81d9e172b93424bc/stats")
+	span.End()
+
+	// The initTestTracer provider doesn't include our processor, so wire one directly.
+	// Instead, test the processor logic directly.
+	exp.Reset()
+
+	p := dockerSpanNameProcessor{}
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{
+			in:   "GET /v1.51/containers/ce4144f1a8b9e86da07c8b914f8e6a0db645018c575e754f81d9e172b93424bc/stats",
+			want: "GET /v1.51/containers/{id}/stats",
+		},
+		{
+			in:   "GET /v1.51/containers/ce4144f1a8b9/stats",
+			want: "GET /v1.51/containers/{id}/stats",
+		},
+		{
+			in:   "GET /v1.51/containers/ce4144f1a8b9e86da07c8b914f8e6a0db645018c575e754f81d9e172b93424bc/json",
+			want: "GET /v1.51/containers/{id}/json",
+		},
+		{
+			in:   "POST /v1.51/containers/ce4144f1a8b9e86da07c8b914f8e6a0db645018c575e754f81d9e172b93424bc/start",
+			want: "POST /v1.51/containers/{id}/start",
+		},
+		// Non-Docker paths must be left unchanged.
+		{
+			in:   "replication.put",
+			want: "replication.put",
+		},
+		{
+			in:   "peer.establish_tunnel",
+			want: "peer.establish_tunnel",
+		},
+		// Docker version segment (v1.51) must NOT be replaced.
+		{
+			in:   "GET /v1.51/containers",
+			want: "GET /v1.51/containers",
+		},
+	}
+
+	for _, tc := range cases {
+		spy := &spyReadWriteSpan{name: tc.in}
+		p.OnStart(context.Background(), spy)
+		if spy.name != tc.want {
+			t.Errorf("OnStart(%q) name = %q, want %q", tc.in, spy.name, tc.want)
+		}
+	}
+}
+
+// spyReadWriteSpan is a minimal sdktrace.ReadWriteSpan stub for testing.
+type spyReadWriteSpan struct {
+	sdktrace.ReadWriteSpan // embed to satisfy interface; only SetName/Name used
+	name                   string
+}
+
+func (s *spyReadWriteSpan) Name() string     { return s.name }
+func (s *spyReadWriteSpan) SetName(n string) { s.name = n }
+
 func TestTracer_EmitsSpanWithProvider(t *testing.T) {
 	exp, cleanup := initTestTracer(t)
 	defer cleanup()
