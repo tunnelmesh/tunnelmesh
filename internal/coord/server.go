@@ -442,6 +442,9 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 			MaxPendingOperations: 10000,
 			ChunkPipelineWindow:  5,               // Send up to 5 chunks concurrently per object
 			AutoSyncInterval:     5 * time.Minute, // Re-enqueue all objects every 5 minutes
+			// Independent jitter from GC/listing-reconcile is intentional:
+			// we want the three periodic ops to fire at unrelated times so
+			// they don't bunch up even when a coordinator restarts.
 			AutoSyncInitialDelay: 2*time.Minute + gcStaggerDelay(srv.cfg.Name) + jitterDuration(30*time.Second),
 		})
 
@@ -1125,8 +1128,7 @@ func (s *Server) setupRoutes(ctx context.Context) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := tracing.ExtractContext(r.Context(), r.Header)
-	s.mux.ServeHTTP(w, r.WithContext(ctx))
+	extractTraceMiddleware(s.mux).ServeHTTP(w, r)
 }
 
 func extractTraceMiddleware(next http.Handler) http.Handler {
