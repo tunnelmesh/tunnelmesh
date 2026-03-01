@@ -1102,8 +1102,7 @@ func (s *Server) setupRoutes(ctx context.Context) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := tracing.ExtractContext(r.Context(), r.Header)
-	s.mux.ServeHTTP(w, r.WithContext(ctx))
+	extractTraceMiddleware(s.mux).ServeHTTP(w, r)
 }
 
 // extractTraceMiddleware wraps the admin mux, which is served directly via
