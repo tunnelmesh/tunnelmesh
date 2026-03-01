@@ -285,7 +285,7 @@ func (r *Replicator) runAutoSyncWorker() {
 		case <-r.manifestSyncCh:
 		default:
 		}
-	case <-time.After(2 * time.Minute):
+	case <-time.After(r.autoSyncInitialDelay):
 	}
 
 	ticker := time.NewTicker(r.autoSyncInterval)

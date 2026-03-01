@@ -122,9 +122,10 @@ type Server struct {
 	// Callback for coordinator list changes (updates local DNS resolver)
 	coordIPsCb func([]string)
 	// Replication for multi-coordinator setup
-	replicator       *replication.Replicator    // S3 replication engine (nil if not enabled)
-	meshTransport    *replication.MeshTransport // Transport for replication messages
-	capacityRegistry *s3.CapacityRegistry       // Storage capacity tracking for replication
+	replicator              *replication.Replicator    // S3 replication engine (nil if not enabled)
+	meshTransport           *replication.MeshTransport // Transport for replication messages
+	capacityRegistry        *s3.CapacityRegistry       // Storage capacity tracking for replication
+	listingReconcileStagger time.Duration              // Stagger delay for listing reconcile (0 in tests)
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -440,6 +441,7 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 			MaxPendingOperations: 10000,
 			ChunkPipelineWindow:  5,               // Send up to 5 chunks concurrently per object
 			AutoSyncInterval:     5 * time.Minute, // Re-enqueue all objects every 5 minutes
+			AutoSyncInitialDelay: 2*time.Minute + gcStaggerDelay(srv.cfg.Name) + jitterDuration(30*time.Second),
 		})
 
 		// Wire replicator into S3 store for distributed reads (fetching remote chunks)
@@ -774,6 +776,21 @@ func gcStaggerDelay(coordName string) time.Duration {
 	return time.Duration(h.Sum32()%150) * time.Second
 }
 
+// jitterDuration returns a random duration in [0, max) to prevent synchronized
+// thundering herds when multiple coordinators start simultaneously with the same config.
+func jitterDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	n := uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+	return time.Duration(n % uint64(max))
+}
+
 // StartPeriodicCleanup launches a background goroutine for S3 storage maintenance.
 // It periodically:
 //   - Purges recycled objects past their retention period
@@ -790,9 +807,11 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		return
 	}
 
-	stagger := gcStaggerDelay(s.cfg.Name)
+	stagger := gcStaggerDelay(s.cfg.Name) + jitterDuration(30*time.Second)
 
 	log.Info().Str("coordinator", s.cfg.Name).Dur("stagger", stagger).Msg("GC stagger delay computed")
+
+	s.listingReconcileStagger = gcStaggerDelay(s.cfg.Name) + 30*time.Second + jitterDuration(30*time.Second)
 
 	// GC cycle body — shared between first run and ticker runs
 	runGCCycle := func() {

@@ -208,7 +208,8 @@ type Replicator struct {
 	chunkPipelineWindow int
 
 	// Auto-sync interval (0 = disabled)
-	autoSyncInterval time.Duration
+	autoSyncInterval     time.Duration
+	autoSyncInitialDelay time.Duration
 
 	// On-demand manifest sync trigger (buffered 1 — deduplicated).
 	manifestSyncCh chan struct{}
@@ -263,6 +264,7 @@ type Config struct {
 	MaxConcurrentSends   int             // Maximum concurrent outbound replication sends (default: 20)
 	ChunkPipelineWindow  int             // Maximum concurrent chunk sends per ReplicateObject (default: 5)
 	AutoSyncInterval     time.Duration   // How often to re-enqueue all objects for replication (default: 5min, 0 = disabled)
+	AutoSyncInitialDelay time.Duration   // Initial delay before first auto-sync (default: 2min). 0 uses default.
 	Context              context.Context // SECURITY FIX #3: Parent context for proper cancellation propagation
 }
 
@@ -306,6 +308,9 @@ func NewReplicator(config Config) *Replicator {
 	}
 	if config.AutoSyncInterval == 0 {
 		config.AutoSyncInterval = 5 * time.Minute // Default: 5 minutes
+	}
+	if config.AutoSyncInitialDelay == 0 {
+		config.AutoSyncInitialDelay = 2 * time.Minute
 	}
 
 	// SECURITY FIX #3: Use provided context or create a new one
@@ -351,6 +356,7 @@ func NewReplicator(config Config) *Replicator {
 		manifestSyncCh:         make(chan struct{}, 1),
 		chunkPipelineWindow:    config.ChunkPipelineWindow,
 		autoSyncInterval:       config.AutoSyncInterval,
+		autoSyncInitialDelay:   config.AutoSyncInitialDelay,
 		ctx:                    ctx,
 		cancel:                 cancel,
 	}
