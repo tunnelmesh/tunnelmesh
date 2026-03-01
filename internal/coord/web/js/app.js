@@ -945,8 +945,13 @@ function displayTraces(data) {
 
         const traceIds = values[traceIdIdx] || [];
         for (let i = 0; i < traceIds.length; i++) {
+            // Tempo search bug (issue #5395): the search API serialises trace IDs
+            // as plain integers, stripping a leading zero hex digit and returning a
+            // 31-char string. Left-padding to 32 chars restores the actual stored ID
+            // so the trace-by-ID lookup succeeds.
+            const rawID = values[traceIdIdx][i] || '';
             allTraces.push({
-                traceID: values[traceIdIdx][i],
+                traceID: rawID.padStart(32, '0'),
                 startTime: values[startTimeIdx]?.[i] || 0, // ms since epoch
                 service: serviceIdx >= 0 ? values[serviceIdx]?.[i] || '' : '',
                 name: nameIdx >= 0 ? values[nameIdx]?.[i] || '' : '',
