@@ -1231,7 +1231,8 @@ a.alert-tile {
     margin-bottom: 1.5rem;
 }
 
-#logs-section h2 {
+#logs-section h2,
+#traces-section h2 {
     font-size: 1rem;
     font-weight: 600;
     padding: 1rem;

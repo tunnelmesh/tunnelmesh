@@ -886,14 +886,31 @@ async function fetchTraces() {
     if (!state.tempoEnabled || !state.tempoDatasourceUid) return;
 
     try {
-        const now = Math.floor(Date.now() / 1000);
-        const oneHourAgo = now - 3600;
+        const now = Date.now(); // ms
+        const oneHourAgo = now - 3600000; // ms
 
-        const resp = await fetch(
-            `/grafana/api/datasources/uid/${state.tempoDatasourceUid}/resources/api/search?limit=20&start=${oneHourAgo}&end=${now}`,
-        );
+        // Use Grafana's unified query endpoint — the /resources/ proxy returns 404
+        // for Tempo in Grafana 12 (same issue as Loki). Response is DataFrame format.
+        const resp = await fetch('/grafana/api/ds/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                queries: [
+                    {
+                        refId: 'A',
+                        datasource: { uid: state.tempoDatasourceUid, type: 'tempo' },
+                        queryType: 'traceql',
+                        query: '{}',
+                        limit: 20,
+                        tableType: 'traces',
+                    },
+                ],
+                from: String(oneHourAgo),
+                to: String(now),
+            }),
+        });
         if (!resp.ok) {
-            console.error('Tempo search failed:', resp.status, await resp.text().catch(() => ''));
+            console.error('Tempo ds/query failed:', resp.status, await resp.text().catch(() => ''));
             return;
         }
 
@@ -909,9 +926,37 @@ function displayTraces(data) {
     const noTraces = document.getElementById('no-traces');
     if (!tracesContent) return;
 
-    const traces = data.traces || [];
+    // Parse Grafana DataFrame format from /api/ds/query for Tempo TraceQL queries.
+    // The Traces frame has fields: traceID(0), startTime(1,ms), traceService(2),
+    // traceName(3), traceDuration(4,ms nullable).
+    const frames = data.results?.A?.frames || [];
+    const allTraces = [];
 
-    if (traces.length === 0) {
+    for (const frame of frames) {
+        const fields = frame.schema?.fields || [];
+        const values = frame.data?.values || [];
+
+        const traceIdIdx = fields.findIndex((f) => f.name === 'traceID');
+        const startTimeIdx = fields.findIndex((f) => f.name === 'startTime');
+        const serviceIdx = fields.findIndex((f) => f.name === 'traceService');
+        const nameIdx = fields.findIndex((f) => f.name === 'traceName');
+        const durationIdx = fields.findIndex((f) => f.name === 'traceDuration');
+
+        if (traceIdIdx === -1 || startTimeIdx === -1) continue;
+
+        const traceIds = values[traceIdIdx] || [];
+        for (let i = 0; i < traceIds.length; i++) {
+            allTraces.push({
+                traceID: values[traceIdIdx][i],
+                startTime: values[startTimeIdx]?.[i] || 0, // ms since epoch
+                service: serviceIdx >= 0 ? (values[serviceIdx]?.[i] || '') : '',
+                name: nameIdx >= 0 ? (values[nameIdx]?.[i] || '') : '',
+                durationMs: durationIdx >= 0 ? values[durationIdx]?.[i] : null,
+            });
+        }
+    }
+
+    if (allTraces.length === 0) {
         tracesContent.innerHTML = '';
         if (noTraces) noTraces.style.display = 'block';
         return;
@@ -920,12 +965,9 @@ function displayTraces(data) {
     if (noTraces) noTraces.style.display = 'none';
 
     const now = Date.now();
-
-    const html = traces
+    const html = allTraces
         .map((trace) => {
-            // Tempo returns startTimeUnixNano as a string
-            const startMs = Number(trace.startTimeUnixNano) / 1e6;
-            const ageMs = now - startMs;
+            const ageMs = now - trace.startTime;
             let ageStr;
             if (ageMs < 60000) {
                 ageStr = `${Math.round(ageMs / 1000)}s ago`;
@@ -935,26 +977,34 @@ function displayTraces(data) {
                 ageStr = `${Math.round(ageMs / 3600000)}h ago`;
             }
 
-            const durationStr =
-                trace.durationMs >= 1000
-                    ? `${(trace.durationMs / 1000).toFixed(1)}s`
-                    : `${trace.durationMs}ms`;
+            let durationStr = '';
+            if (trace.durationMs != null) {
+                durationStr =
+                    trace.durationMs >= 1000
+                        ? `${(trace.durationMs / 1000).toFixed(1)}s`
+                        : `${Math.round(trace.durationMs)}ms`;
+            }
 
             const dsUid = state.tempoDatasourceUid || 'tempo';
             const traceUrl = `/grafana/explore?schemaVersion=1&panes=${encodeURIComponent(
                 JSON.stringify({
                     abc: {
                         datasource: dsUid,
-                        queries: [{ refId: 'A', query: trace.traceID, queryType: 'traceId' }],
+                        queries: [{ refId: 'A', query: trace.traceID, queryType: 'traceql' }],
                         range: { from: 'now-1h', to: 'now' },
                     },
                 }),
             )}&orgId=1`;
 
+            const servicePart = trace.service
+                ? `<span class="log-key">${escapeHtml(trace.service)}</span> `
+                : '';
+            const durationPart = durationStr ? ` &mdash; ${escapeHtml(durationStr)}` : '';
+
             return `<div class="log-entry">
             <span class="log-timestamp">${escapeHtml(ageStr)}</span>
-            <span class="log-level info">${escapeHtml(trace.rootTraceName || '')}</span>
-            <span class="log-message"><a href="${traceUrl}" target="_blank" rel="noopener">${escapeHtml(trace.rootServiceName || '')} &mdash; ${escapeHtml(durationStr)}</a></span>
+            <span class="log-level info">${escapeHtml(trace.name || trace.service || '')}</span>
+            <span class="log-message"><a href="${traceUrl}" target="_blank" rel="noopener">${servicePart}${durationPart}</a></span>
         </div>`;
         })
         .join('');
