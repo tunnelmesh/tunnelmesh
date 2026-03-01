@@ -112,6 +112,12 @@ func (m *MeshNode) DiscoverAndConnectPeers(ctx context.Context) {
 			continue
 		}
 
+		// Skip peers with no inbound transport endpoints — they cannot accept tunnels
+		if peer.SSHPort == 0 && peer.UDPPort == 0 {
+			log.Debug().Str("peer", peer.Name).Msg("skipping peer with no transport endpoints")
+			continue
+		}
+
 		// Skip if connection attempt already in progress
 		if m.Connections.IsConnecting(peer.Name) {
 			log.Debug().Str("peer", peer.Name).Msg("connection attempt already in progress, skipping")
