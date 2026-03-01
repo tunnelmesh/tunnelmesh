@@ -330,7 +330,6 @@ func (s *Server) runListingIndexer(ctx context.Context) {
 			return
 		case <-staggerTimer.C:
 		}
-		staggerTimer.Stop()
 	}
 	reconcileTicker := time.NewTicker(5 * time.Minute)
 	defer reconcileTicker.Stop()

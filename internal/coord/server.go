@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -786,8 +787,7 @@ func jitterDuration(max time.Duration) time.Duration {
 	if _, err := rand.Read(b[:]); err != nil {
 		return 0
 	}
-	n := uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
-		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+	n := binary.LittleEndian.Uint64(b[:])
 	return time.Duration(n % uint64(max))
 }
 
