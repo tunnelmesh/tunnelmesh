@@ -1508,16 +1508,39 @@ func TestServer_AdminPeers_GlobPatterns(t *testing.T) {
 	}
 }
 
+func TestJitterDuration(t *testing.T) {
+	t.Run("zero max returns zero", func(t *testing.T) {
+		assert.Equal(t, time.Duration(0), jitterDuration(0))
+	})
+
+	t.Run("negative max returns zero", func(t *testing.T) {
+		assert.Equal(t, time.Duration(0), jitterDuration(-1*time.Second))
+	})
+
+	t.Run("max=1 returns zero", func(t *testing.T) {
+		assert.Equal(t, time.Duration(0), jitterDuration(1))
+	})
+
+	t.Run("within range", func(t *testing.T) {
+		max := 30 * time.Second
+		for i := 0; i < 100; i++ {
+			d := jitterDuration(max)
+			assert.GreaterOrEqual(t, d, time.Duration(0), "jitter should be >= 0")
+			assert.Less(t, d, max, "jitter should be < max")
+		}
+	})
+}
+
 func TestGCStaggerDelay(t *testing.T) {
-	// %1800 produces 0–1799 seconds, i.e. up to 29m59s (< 30min)
-	maxStagger := 1799 * time.Second
+	// %150 produces 0–149 seconds (< 2m30s), under 50% of the 5-minute GC interval
+	maxStagger := 149 * time.Second
 
 	t.Run("within range", func(t *testing.T) {
 		names := []string{"coord1", "coord2", "coord3", "us-east-1", "eu-west-2"}
 		for _, name := range names {
 			d := gcStaggerDelay(name)
 			assert.GreaterOrEqual(t, d, time.Duration(0), "stagger for %q should be >= 0", name)
-			assert.LessOrEqual(t, d, maxStagger, "stagger for %q should be <= 29m59s", name)
+			assert.LessOrEqual(t, d, maxStagger, "stagger for %q should be <= 149s", name)
 		}
 	})
 

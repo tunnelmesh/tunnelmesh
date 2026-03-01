@@ -807,11 +807,15 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		return
 	}
 
-	stagger := gcStaggerDelay(s.cfg.Name) + jitterDuration(30*time.Second)
+	hashStagger := gcStaggerDelay(s.cfg.Name)
+	jitter := jitterDuration(30 * time.Second)
+	stagger := hashStagger + jitter
 
 	log.Info().Str("coordinator", s.cfg.Name).Dur("stagger", stagger).Msg("GC stagger delay computed")
 
-	s.listingReconcileStagger = gcStaggerDelay(s.cfg.Name) + 30*time.Second + jitterDuration(30*time.Second)
+	// Listing reconcile is offset 30s after GC using the same jitter value,
+	// so the gap between GC and listing reconcile is always exactly 30s.
+	s.listingReconcileStagger = hashStagger + 30*time.Second + jitter
 
 	// GC cycle body — shared between first run and ticker runs
 	runGCCycle := func() {

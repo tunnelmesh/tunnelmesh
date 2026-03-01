@@ -323,11 +323,14 @@ func (s *Server) runListingIndexer(ctx context.Context) {
 	// Stagger the first reconcile to avoid synchronized spikes across coordinators.
 	// s.listingReconcileStagger is 0 in tests — stagger is skipped.
 	if s.listingReconcileStagger > 0 {
+		staggerTimer := time.NewTimer(s.listingReconcileStagger)
 		select {
 		case <-ctx.Done():
+			staggerTimer.Stop()
 			return
-		case <-time.After(s.listingReconcileStagger):
+		case <-staggerTimer.C:
 		}
+		staggerTimer.Stop()
 	}
 	reconcileTicker := time.NewTicker(5 * time.Minute)
 	defer reconcileTicker.Stop()
