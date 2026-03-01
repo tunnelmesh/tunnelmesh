@@ -1131,6 +1131,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	extractTraceMiddleware(s.mux).ServeHTTP(w, r)
 }
 
+// extractTraceMiddleware wraps the admin mux, which is served directly via
+// http.Server.Handler and therefore bypasses Server.ServeHTTP.
 func extractTraceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := tracing.ExtractContext(r.Context(), r.Header)

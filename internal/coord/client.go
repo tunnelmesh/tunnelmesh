@@ -62,7 +62,7 @@ func (c *Client) Register(name, publicKey string, publicIPs, privateIPs []string
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := c.doRequest(http.MethodPost, "/api/v1/register", body)
+	resp, err := c.doRequestWithContext(context.Background(), http.MethodPost, "/api/v1/register", body)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (c *Client) RegisterWithRetry(ctx context.Context, name, publicKey string, 
 
 // ListPeers returns a list of all registered peers.
 func (c *Client) ListPeers() ([]proto.Peer, error) {
-	resp, err := c.doRequest(http.MethodGet, "/api/v1/peers", nil)
+	resp, err := c.doRequestWithContext(context.Background(), http.MethodGet, "/api/v1/peers", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (c *Client) ListPeers() ([]proto.Peer, error) {
 
 // Deregister removes this peer from the mesh.
 func (c *Client) Deregister(name string) error {
-	resp, err := c.doRequest(http.MethodDelete, "/api/v1/peers/"+name, nil)
+	resp, err := c.doRequestWithContext(context.Background(), http.MethodDelete, "/api/v1/peers/"+name, nil)
 	if err != nil {
 		return err
 	}
@@ -182,7 +182,7 @@ func (c *Client) Deregister(name string) error {
 
 // GetDNSRecords returns the current DNS records.
 func (c *Client) GetDNSRecords() ([]proto.DNSRecord, error) {
-	resp, err := c.doRequest(http.MethodGet, "/api/v1/dns", nil)
+	resp, err := c.doRequestWithContext(context.Background(), http.MethodGet, "/api/v1/dns", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -220,11 +220,6 @@ func (c *Client) doRequestWithContext(ctx context.Context, method, path string, 
 	return c.client.Do(req)
 }
 
-// doRequest keeps existing callers working; new callers should use doRequestWithContext.
-func (c *Client) doRequest(method, path string, body []byte) (*http.Response, error) {
-	return c.doRequestWithContext(context.Background(), method, path, body)
-}
-
 func (c *Client) parseError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 
@@ -260,7 +255,7 @@ func (c *Client) CheckRelayRequests() ([]string, error) {
 		return nil, nil // No JWT token yet, can't check relay status
 	}
 
-	resp, err := c.doRequestWithJWT(http.MethodGet, "/api/v1/relay-status", nil)
+	resp, err := c.doRequestWithJWTContext(context.Background(), http.MethodGet, "/api/v1/relay-status", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +275,6 @@ func (c *Client) CheckRelayRequests() ([]string, error) {
 	return result.RelayRequests, nil
 }
 
-// doRequestWithJWTContext makes an HTTP request with JWT authentication and context.
 func (c *Client) doRequestWithJWTContext(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -299,9 +293,4 @@ func (c *Client) doRequestWithJWTContext(ctx context.Context, method, path strin
 	tracing.InjectHeaders(ctx, req.Header)
 
 	return c.client.Do(req)
-}
-
-// doRequestWithJWT makes an HTTP request with JWT authentication.
-func (c *Client) doRequestWithJWT(method, path string, body []byte) (*http.Response, error) {
-	return c.doRequestWithJWTContext(context.Background(), method, path, body)
 }
