@@ -168,14 +168,19 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 				rec := &discardResponseWriter{header: make(http.Header)}
 				s.forwardS3Request(rec, r, target, bucket)
 				if rec.status == http.StatusOK || rec.status == http.StatusNoContent {
+					if recovered := s.forwardBreaker.RecordSuccess(target); recovered {
+						log.Info().Str("target", target).Msg("S3 forward recovered, circuit closed")
+					}
 					w.WriteHeader(rec.status)
 					s.updatePeerListingsAfterForward(bucket, key, target, r)
 					return
 				}
 				// Forward failed — fall through to handle locally.
-				log.Warn().Str("target", target).Int("status", rec.status).
-					Str("bucket", bucket).Str("key", key).
-					Msg("S3 forward failed, handling locally")
+				if firstFailure := s.forwardBreaker.RecordFailure(target); firstFailure {
+					log.Warn().Str("target", target).Int("status", rec.status).
+						Str("bucket", bucket).Str("key", key).
+						Msg("S3 forward failed, handling locally (circuit opening)")
+				}
 				if bodyBuf != nil {
 					r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
 				}

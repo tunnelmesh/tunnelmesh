@@ -91,6 +91,7 @@ type Server struct {
 	ipGeoCache         *IPGeoCache                  // IP geolocation cache for location fallback
 	coordIPs           atomic.Pointer[coordIPSet]   // Coordinator mesh IPs (original + sorted) for DNS and write forwarding
 	s3ForwardTransport *http.Transport              // Shared transport for S3 write forwarding (reuses connections)
+	forwardBreaker     coordForwardBreaker          // Circuit breaker for S3 write forwarding to peer coordinators
 	peerListings       atomic.Pointer[peerListings] // Pre-merged peer listing data (from system store)
 	localListingIndex  atomic.Pointer[listingIndex] // This coordinator's own listing index (in-memory)
 	listingIndexDirty  atomic.Bool                  // Whether local index needs persisting

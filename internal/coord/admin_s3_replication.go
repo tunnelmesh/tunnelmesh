@@ -5,8 +5,75 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sync"
 	"time"
 )
+
+// coordForwardBreaker is a per-target circuit breaker for S3 write forwarding.
+// When a target coordinator consistently returns errors, the circuit opens and
+// forwarding is skipped (falling through to local handling) until the backoff
+// expires. This prevents log floods and avoids the connection-timeout latency
+// on every upload when a peer coordinator is unreachable.
+type coordForwardBreaker struct {
+	mu    sync.Mutex
+	state map[string]*coordBreakerState
+}
+
+type coordBreakerState struct {
+	consecutiveFails int
+	cooldownUntil    time.Time
+}
+
+// IsOpen returns true if the circuit for the given target is currently open
+// (i.e. forwarding should be skipped). Once the cooldown expires the caller
+// will attempt a forward again (half-open probe).
+func (cb *coordForwardBreaker) IsOpen(target string) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	st := cb.state[target]
+	return st != nil && time.Now().Before(st.cooldownUntil)
+}
+
+// RecordFailure records a forwarding failure for target. Returns true on the
+// first failure (so the caller can decide to log at WARN level) and false on
+// subsequent failures while the circuit is already open.
+func (cb *coordForwardBreaker) RecordFailure(target string) (firstFailure bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state == nil {
+		cb.state = make(map[string]*coordBreakerState)
+	}
+	st := cb.state[target]
+	if st == nil {
+		st = &coordBreakerState{}
+		cb.state[target] = st
+	}
+	first := st.consecutiveFails == 0
+	st.consecutiveFails++
+	// Exponential backoff: 10s × 2^(n-1), capped at 5 min.
+	backoff := (10 * time.Second) << (st.consecutiveFails - 1)
+	if backoff > 5*time.Minute {
+		backoff = 5 * time.Minute
+	}
+	st.cooldownUntil = time.Now().Add(backoff)
+	return first
+}
+
+// RecordSuccess resets the circuit for target. Returns true if the circuit was
+// previously open (so the caller can log a recovery message).
+func (cb *coordForwardBreaker) RecordSuccess(target string) (wasOpen bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state == nil {
+		return false
+	}
+	st := cb.state[target]
+	if st == nil || st.consecutiveFails == 0 {
+		return false
+	}
+	delete(cb.state, target)
+	return true
+}
 
 // objectPrimaryCoordinator returns the mesh IP of the coordinator that should own
 // the given bucket/key combination. Returns "" if this coordinator is the primary
@@ -35,6 +102,9 @@ func (s *Server) objectPrimaryCoordinator(bucket, key string) string {
 
 	primary := sorted[primaryIdx]
 	if primary == selfIP {
+		return ""
+	}
+	if s.forwardBreaker.IsOpen(primary) {
 		return ""
 	}
 	return primary
