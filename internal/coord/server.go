@@ -1125,7 +1125,15 @@ func (s *Server) setupRoutes(ctx context.Context) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	ctx := tracing.ExtractContext(r.Context(), r.Header)
+	s.mux.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func extractTraceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := tracing.ExtractContext(r.Context(), r.Header)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // NFSPort is the standard NFS port used for file share access.
@@ -2582,7 +2590,7 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 	}
 
 	s.adminServer = &http.Server{
-		Handler: redirectToCanonicalDomain(s.adminMux),
+		Handler: redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
 	}
 
 	if tlsCert != nil {

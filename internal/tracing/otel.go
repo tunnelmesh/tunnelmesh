@@ -4,12 +4,14 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
@@ -161,6 +163,7 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 		cancel()
 	}
 	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 	globalTracerProvider = tp
 	globalTPMu.Unlock()
 	return nil
@@ -183,4 +186,17 @@ func ShutdownOTel(ctx context.Context) error {
 // Returns a no-op tracer when OTel has not been initialised.
 func Tracer(name string) trace.Tracer {
 	return otel.GetTracerProvider().Tracer(name)
+}
+
+// InjectHeaders writes W3C traceparent/tracestate from ctx into h.
+// No-op when no active span or propagator not yet registered.
+func InjectHeaders(ctx context.Context, h http.Header) {
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(h))
+}
+
+// ExtractContext returns a child of parent containing the remote span
+// context from the W3C headers in h. Returns parent unchanged if headers
+// are absent or invalid.
+func ExtractContext(parent context.Context, h http.Header) context.Context {
+	return otel.GetTextMapPropagator().Extract(parent, propagation.HeaderCarrier(h))
 }
