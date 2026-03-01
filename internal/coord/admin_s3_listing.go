@@ -318,8 +318,20 @@ func filterByPrefixDelimiter(objs []S3ObjectInfo, prefix, delimiter string) []S3
 // index to the system store and loads peer indexes for merged reads.
 func (s *Server) runListingIndexer(ctx context.Context) {
 	persistTicker := time.NewTicker(10 * time.Second)
-	reconcileTicker := time.NewTicker(5 * time.Minute)
 	defer persistTicker.Stop()
+
+	// Stagger the first reconcile to avoid synchronized spikes across coordinators.
+	// s.listingReconcileStagger is 0 in tests — stagger is skipped.
+	if s.listingReconcileStagger > 0 {
+		staggerTimer := time.NewTimer(s.listingReconcileStagger)
+		select {
+		case <-ctx.Done():
+			staggerTimer.Stop()
+			return
+		case <-staggerTimer.C:
+		}
+	}
+	reconcileTicker := time.NewTicker(5 * time.Minute)
 	defer reconcileTicker.Stop()
 
 	var lastPersist time.Time

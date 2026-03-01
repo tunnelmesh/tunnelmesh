@@ -19,6 +19,7 @@ type Resolver struct {
 	mu           sync.RWMutex
 	server       *dns.Server
 	shutdown     chan struct{}
+	started      chan struct{} // closed by NotifyStartedFunc when the UDP socket is bound
 }
 
 // NewResolver creates a new DNS resolver.
@@ -28,7 +29,14 @@ func NewResolver(_ string, ttl int) *Resolver {
 		ttl:      uint32(ttl),
 		records:  make(map[string]string),
 		shutdown: make(chan struct{}),
+		started:  make(chan struct{}),
 	}
+}
+
+// Started returns a channel that is closed once the UDP socket is bound and
+// the server is ready to accept queries. Useful in tests to avoid time.Sleep.
+func (r *Resolver) Started() <-chan struct{} {
+	return r.started
 }
 
 // AddRecord adds or updates a DNS record.
@@ -137,8 +145,9 @@ func (r *Resolver) ListRecords() map[string]string {
 // ListenAndServe starts the DNS server.
 func (r *Resolver) ListenAndServe(addr string) error {
 	r.server = &dns.Server{
-		Addr: addr,
-		Net:  "udp",
+		Addr:              addr,
+		Net:               "udp",
+		NotifyStartedFunc: func() { close(r.started) },
 	}
 
 	// Register handlers for all supported domain suffixes

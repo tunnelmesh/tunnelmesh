@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,9 +123,10 @@ type Server struct {
 	// Callback for coordinator list changes (updates local DNS resolver)
 	coordIPsCb func([]string)
 	// Replication for multi-coordinator setup
-	replicator       *replication.Replicator    // S3 replication engine (nil if not enabled)
-	meshTransport    *replication.MeshTransport // Transport for replication messages
-	capacityRegistry *s3.CapacityRegistry       // Storage capacity tracking for replication
+	replicator              *replication.Replicator    // S3 replication engine (nil if not enabled)
+	meshTransport           *replication.MeshTransport // Transport for replication messages
+	capacityRegistry        *s3.CapacityRegistry       // Storage capacity tracking for replication
+	listingReconcileStagger time.Duration              // Stagger delay for listing reconcile (0 in tests)
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -440,6 +442,10 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 			MaxPendingOperations: 10000,
 			ChunkPipelineWindow:  5,               // Send up to 5 chunks concurrently per object
 			AutoSyncInterval:     5 * time.Minute, // Re-enqueue all objects every 5 minutes
+			// Independent jitter from GC/listing-reconcile is intentional:
+			// we want the three periodic ops to fire at unrelated times so
+			// they don't bunch up even when a coordinator restarts.
+			AutoSyncInitialDelay: 2*time.Minute + gcStaggerDelay(srv.cfg.Name) + jitterDuration(30*time.Second),
 		})
 
 		// Wire replicator into S3 store for distributed reads (fetching remote chunks)
@@ -774,6 +780,20 @@ func gcStaggerDelay(coordName string) time.Duration {
 	return time.Duration(h.Sum32()%150) * time.Second
 }
 
+// jitterDuration returns a random duration in [0, max) to prevent synchronized
+// thundering herds when multiple coordinators start simultaneously with the same config.
+func jitterDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	n := binary.LittleEndian.Uint64(b[:])
+	return time.Duration(n % uint64(max))
+}
+
 // StartPeriodicCleanup launches a background goroutine for S3 storage maintenance.
 // It periodically:
 //   - Purges recycled objects past their retention period
@@ -790,9 +810,15 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		return
 	}
 
-	stagger := gcStaggerDelay(s.cfg.Name)
+	hashStagger := gcStaggerDelay(s.cfg.Name)
+	jitter := jitterDuration(30 * time.Second)
+	stagger := hashStagger + jitter
 
 	log.Info().Str("coordinator", s.cfg.Name).Dur("stagger", stagger).Msg("GC stagger delay computed")
+
+	// Listing reconcile is offset 30s after GC using the same jitter value,
+	// so the gap between GC and listing reconcile is always exactly 30s.
+	s.listingReconcileStagger = hashStagger + 30*time.Second + jitter
 
 	// GC cycle body — shared between first run and ticker runs
 	runGCCycle := func() {
@@ -1102,7 +1128,14 @@ func (s *Server) setupRoutes(ctx context.Context) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	extractTraceMiddleware(s.mux).ServeHTTP(w, r)
+}
+
+func extractTraceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := tracing.ExtractContext(r.Context(), r.Header)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // NFSPort is the standard NFS port used for file share access.
@@ -2559,7 +2592,7 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 	}
 
 	s.adminServer = &http.Server{
-		Handler: redirectToCanonicalDomain(s.adminMux),
+		Handler: redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
 	}
 
 	if tlsCert != nil {

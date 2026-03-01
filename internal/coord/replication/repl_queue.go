@@ -274,10 +274,13 @@ func (r *Replicator) runAutoSyncWorker() {
 	defer r.wg.Done()
 
 	// Initial delay to let the cluster stabilize, but wake early on on-demand trigger.
+	initialTimer := time.NewTimer(r.autoSyncInitialDelay)
 	select {
 	case <-r.ctx.Done():
+		initialTimer.Stop()
 		return
 	case <-r.manifestSyncCh:
+		initialTimer.Stop()
 		r.runAutoSyncCycle()
 		// Drain any trigger that arrived during the cycle — the cycle already
 		// captured the latest state, so an immediately queued trigger is redundant.
@@ -285,7 +288,7 @@ func (r *Replicator) runAutoSyncWorker() {
 		case <-r.manifestSyncCh:
 		default:
 		}
-	case <-time.After(2 * time.Minute):
+	case <-initialTimer.C:
 	}
 
 	ticker := time.NewTicker(r.autoSyncInterval)
