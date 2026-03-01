@@ -4,7 +4,6 @@ import (
 	"net"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
@@ -102,9 +101,7 @@ func TestResolver_DNSServer(t *testing.T) {
 			t.Logf("DNS server error: %v", err)
 		}
 	}()
-
-	// Wait for server to start
-	time.Sleep(100 * time.Millisecond)
+	<-r.Started()
 	defer func() { _ = r.Shutdown() }()
 
 	// Query the DNS server
@@ -131,8 +128,7 @@ func TestResolver_DNSServer_NXDOMAIN(t *testing.T) {
 	go func() {
 		_ = r.ListenAndServe(addr)
 	}()
-
-	time.Sleep(100 * time.Millisecond)
+	<-r.Started()
 	defer func() { _ = r.Shutdown() }()
 
 	c := new(dns.Client)
@@ -213,7 +209,7 @@ func TestResolver_DNSServer_MultipleARecords(t *testing.T) {
 	go func() {
 		_ = r.ListenAndServe(addr)
 	}()
-	time.Sleep(100 * time.Millisecond)
+	<-r.Started()
 	defer func() { _ = r.Shutdown() }()
 
 	c := new(dns.Client)
@@ -243,7 +239,7 @@ func TestResolver_DNSServer_AllCoordinatorsDeregistered(t *testing.T) {
 	go func() {
 		_ = r.ListenAndServe(addr)
 	}()
-	time.Sleep(100 * time.Millisecond)
+	<-r.Started()
 	defer func() { _ = r.Shutdown() }()
 
 	c := new(dns.Client)
