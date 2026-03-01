@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
 	"time"
 
@@ -12,6 +13,41 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// noLeadingZeroIDGenerator is a custom OpenTelemetry ID generator that ensures
+// trace IDs never start with a leading-zero hex digit (i.e. first byte ≥ 0x10).
+//
+// Workaround for https://github.com/grafana/tempo/issues/5395: Tempo's search
+// API returns trace IDs as plain integers, stripping any leading zero hex digit
+// and producing a 31-char string instead of the required 32 chars. Grafana's
+// trace-by-ID lookup then fails with "Not Found" because it passes the exact
+// search string to Tempo's stricter trace-retrieval path.
+//
+// The upstream fix (Tempo PR #6489, config option read.left_pad_trace_ids) was
+// merged 2026-02-18 and is not yet in a stable release. Until then, avoiding
+// trace IDs whose first nibble is 0 eliminates the problem class entirely.
+type noLeadingZeroIDGenerator struct{}
+
+func (g *noLeadingZeroIDGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
+	var tid trace.TraceID
+	var sid trace.SpanID
+	if _, err := cryptorand.Read(tid[:]); err != nil {
+		panic(fmt.Sprintf("tracing: trace ID generation failed: %v", err))
+	}
+	if _, err := cryptorand.Read(sid[:]); err != nil {
+		panic(fmt.Sprintf("tracing: span ID generation failed: %v", err))
+	}
+	tid[0] |= 0x10 // force first hex digit to 1–f, never 0
+	return tid, sid
+}
+
+func (g *noLeadingZeroIDGenerator) NewSpanID(_ context.Context, _ trace.TraceID) trace.SpanID {
+	var sid trace.SpanID
+	if _, err := cryptorand.Read(sid[:]); err != nil {
+		panic(fmt.Sprintf("tracing: span ID generation failed: %v", err))
+	}
+	return sid
+}
 
 var globalTracerProvider *sdktrace.TracerProvider
 
@@ -46,6 +82,8 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 		sdktrace.WithResource(res),
 		// Sample everything: connection-level events are low-frequency.
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
+		// Use custom ID generator to avoid Tempo search bug with leading-zero trace IDs.
+		sdktrace.WithIDGenerator(&noLeadingZeroIDGenerator{}),
 	)
 
 	if globalTracerProvider != nil {

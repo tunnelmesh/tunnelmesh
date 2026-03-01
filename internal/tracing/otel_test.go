@@ -93,6 +93,40 @@ func TestTracer_NoopBeforeInit(t *testing.T) {
 	span.End()
 }
 
+// TestNoLeadingZeroIDGenerator_TraceIDFirstNibbleNonZero verifies that all
+// generated trace IDs have a non-zero first hex digit (first byte ≥ 0x10).
+// This prevents the Tempo search API from returning 31-char IDs that Grafana
+// cannot look up (https://github.com/grafana/tempo/issues/5395).
+func TestNoLeadingZeroIDGenerator_TraceIDFirstNibbleNonZero(t *testing.T) {
+	g := &noLeadingZeroIDGenerator{}
+	ctx := context.Background()
+	for i := 0; i < 1000; i++ {
+		tid, _ := g.NewIDs(ctx)
+		if tid[0]&0xF0 == 0 {
+			t.Errorf("iteration %d: trace ID %x has leading-zero first nibble (byte[0]=%02x)", i, tid, tid[0])
+		}
+	}
+}
+
+// TestNoLeadingZeroIDGenerator_SpanIDIsNonZero verifies that generated span IDs
+// are non-zero (crypto/rand virtually never returns all-zero, but confirm the
+// generator doesn't accidentally zero the span ID).
+func TestNoLeadingZeroIDGenerator_SpanIDIsNonZero(t *testing.T) {
+	g := &noLeadingZeroIDGenerator{}
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		_, sid := g.NewIDs(ctx)
+		var zero [8]byte
+		if sid == zero {
+			t.Error("NewIDs returned zero span ID")
+		}
+		sid2 := g.NewSpanID(ctx, [16]byte{})
+		if sid2 == zero {
+			t.Error("NewSpanID returned zero span ID")
+		}
+	}
+}
+
 func TestTracer_EmitsSpanWithProvider(t *testing.T) {
 	exp, cleanup := initTestTracer(t)
 	defer cleanup()
