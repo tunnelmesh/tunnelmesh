@@ -31,7 +31,7 @@ routing.
 - **High Performance** - Zero-copy packet forwarding with lock-free routing table
 - **Internal Packet Filter** - Port-based firewall with per-peer rules, configurable via config, CLI, or admin UI
 - **S3 Compatible Storage** - Distributed and replicated across the mesh with erasure coding
-- **Observability Baked-in** - Prometheus, Grafana and Loki integrated into Admin dashboard
+- **Observability Baked-in** - Prometheus, Grafana, Loki, and Grafana Tempo integrated into Admin dashboard with distributed tracing via OpenTelemetry (OTLP)
 
 ## Architecture
 
@@ -68,7 +68,7 @@ make docker-test                             # Run connectivity tests
 **Multi-coordinator features:**
 - Coordinators discover each other via peer registration (no primary/replica distinction)
 - S3 chunks replicated peer-to-peer based on per-bucket replication factors
-- Each coordinator runs its own monitoring stack (Prometheus/Grafana/Loki)
+- Each coordinator runs its own monitoring stack (Prometheus/Grafana/Loki/Tempo)
 - Ephemeral storage (tmpfs) for testing - data resets on restart
 - Easy scaling for replication testing: `make docker-scale-coords`
 
