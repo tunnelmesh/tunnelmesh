@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -653,4 +655,100 @@ func TestGetExternalIPCachesEmptyResult(t *testing.T) {
 	ip2 := GetExternalIP()
 	assert.Equal(t, "", ip2)
 	assert.Equal(t, 1, hits, "empty result should also be cached")
+}
+
+func TestGetExternalIPConcurrent(t *testing.T) {
+	// Slow server so goroutines are guaranteed to overlap their fetches.
+	var hits atomic.Int64
+	ready := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		<-ready // block until released
+		_, _ = fmt.Fprint(w, "5.6.7.8")
+	}))
+	defer srv.Close()
+
+	origServices := publicIPServices
+	publicIPServices = []string{srv.URL}
+	defer func() { publicIPServices = origServices }()
+
+	ResetExternalIPCache()
+
+	const n = 10
+	results := make([]string, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			results[i] = GetExternalIP()
+		}(i)
+	}
+
+	// Let all goroutines start their fetch, then unblock the server.
+	time.Sleep(50 * time.Millisecond)
+	close(ready)
+	wg.Wait()
+
+	for i, r := range results {
+		assert.Equal(t, "5.6.7.8", r, "goroutine %d got unexpected result", i)
+	}
+	// Server may be hit by multiple concurrent goroutines that all raced past the
+	// initial cache check, but all should store/return the same value.
+	assert.GreaterOrEqual(t, hits.Load(), int64(1), "server should have been hit at least once")
+}
+
+func TestGetExternalIPGenerationCounter(t *testing.T) {
+	// Verify that a fetch started before ResetExternalIPCache does not overwrite
+	// the invalidated cache after the reset completes.
+	fetchStarted := make(chan struct{})
+	allowFetch := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(fetchStarted) // signal: fetch is in-flight
+		<-allowFetch        // block until test gives the go-ahead
+		_, _ = fmt.Fprint(w, "9.8.7.6")
+	}))
+	defer srv.Close()
+
+	origServices := publicIPServices
+	publicIPServices = []string{srv.URL}
+	defer func() { publicIPServices = origServices }()
+
+	ResetExternalIPCache()
+
+	// Start a fetch in the background.
+	done := make(chan string, 1)
+	go func() { done <- GetExternalIP() }()
+
+	// Wait until the fetch is in-flight, then reset (advances generation).
+	<-fetchStarted
+	ResetExternalIPCache()
+
+	// Now allow the stale fetch to complete.
+	close(allowFetch)
+	staleResult := <-done
+
+	// The stale fetch should NOT have been stored: cache must still be invalid.
+	extIPMu.Lock()
+	valid := extIPValid
+	extIPMu.Unlock()
+
+	assert.False(t, valid, "stale fetch result should not have been stored after reset")
+	assert.Equal(t, "", staleResult, "stale goroutine should return empty (cache still invalid after reset)")
+
+	// A fresh call after the reset should re-fetch correctly.
+	origServices2 := publicIPServices
+	var freshHits int
+	freshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		freshHits++
+		_, _ = fmt.Fprint(w, "1.1.1.1")
+	}))
+	defer freshSrv.Close()
+	publicIPServices = []string{freshSrv.URL}
+	defer func() { publicIPServices = origServices2 }()
+
+	fresh := GetExternalIP()
+	assert.Equal(t, "1.1.1.1", fresh)
+	assert.Equal(t, 1, freshHits)
 }

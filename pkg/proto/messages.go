@@ -291,22 +291,40 @@ var publicIPServices = []string{
 }
 
 var (
-	extIPMu    sync.Mutex
-	extIPCache string
-	extIPValid bool
+	extIPMu         sync.Mutex
+	extIPCache      string
+	extIPValid      bool
+	extIPGeneration uint64
 )
 
 // GetExternalIP returns the cached external IP, fetching it once if not yet known.
 // Call ResetExternalIPCache() to force a re-fetch (e.g., on network change).
 // Returns empty string if the public IP cannot be determined.
+//
+// The HTTP fetch is performed outside the lock so concurrent callers do not
+// block for up to ~20s while network requests are in flight. A generation
+// counter prevents a fetch that started before a Reset from overwriting the
+// invalidated cache after the Reset completes.
 func GetExternalIP() string {
 	extIPMu.Lock()
-	defer extIPMu.Unlock()
 	if extIPValid {
-		return extIPCache
+		ip := extIPCache
+		extIPMu.Unlock()
+		return ip
 	}
-	extIPCache = fetchExternalIP()
-	extIPValid = true // cache even "" — don't retry until network change
+	gen := extIPGeneration
+	extIPMu.Unlock()
+
+	ip := fetchExternalIP()
+
+	extIPMu.Lock()
+	defer extIPMu.Unlock()
+	// Only store if the cache is still invalid AND the generation hasn't advanced
+	// (i.e. no Reset occurred while we were fetching).
+	if !extIPValid && extIPGeneration == gen {
+		extIPCache = ip
+		extIPValid = true // cache even "" — don't retry until network change
+	}
 	return extIPCache
 }
 
@@ -316,6 +334,7 @@ func ResetExternalIPCache() {
 	extIPMu.Lock()
 	extIPValid = false
 	extIPCache = ""
+	extIPGeneration++
 	extIPMu.Unlock()
 }
 
@@ -331,20 +350,21 @@ func fetchExternalIP() string {
 		if err != nil {
 			continue
 		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusOK {
-			continue
+		var ip string
+		if resp.StatusCode == http.StatusOK {
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+			if err == nil {
+				candidate := strings.TrimSpace(string(body))
+				// Validate it's a valid IPv4 address
+				if parsed := net.ParseIP(candidate); parsed != nil && parsed.To4() != nil {
+					ip = candidate
+				}
+			}
 		}
+		_ = resp.Body.Close() // close inline — not deferred, to avoid accumulating open bodies
 
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
-		if err != nil {
-			continue
-		}
-
-		ip := strings.TrimSpace(string(body))
-		// Validate it's a valid IPv4 address
-		if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
+		if ip != "" {
 			return ip
 		}
 	}
