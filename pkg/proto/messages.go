@@ -299,14 +299,28 @@ var (
 // GetExternalIP returns the cached external IP, fetching it once if not yet known.
 // Call ResetExternalIPCache() to force a re-fetch (e.g., on network change).
 // Returns empty string if the public IP cannot be determined.
+//
+// The HTTP fetch is performed outside the lock so concurrent callers do not
+// block for up to ~20s while network requests are in flight. A double-checked
+// write ensures only one result is stored even if two goroutines race on the
+// first call.
 func GetExternalIP() string {
 	extIPMu.Lock()
-	defer extIPMu.Unlock()
 	if extIPValid {
-		return extIPCache
+		ip := extIPCache
+		extIPMu.Unlock()
+		return ip
 	}
-	extIPCache = fetchExternalIP()
-	extIPValid = true // cache even "" — don't retry until network change
+	extIPMu.Unlock()
+
+	ip := fetchExternalIP()
+
+	extIPMu.Lock()
+	defer extIPMu.Unlock()
+	if !extIPValid { // first writer wins; ignore concurrent duplicate fetch
+		extIPCache = ip
+		extIPValid = true // cache even "" — don't retry until network change
+	}
 	return extIPCache
 }
 
@@ -331,20 +345,21 @@ func fetchExternalIP() string {
 		if err != nil {
 			continue
 		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusOK {
-			continue
+		var ip string
+		if resp.StatusCode == http.StatusOK {
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+			if err == nil {
+				candidate := strings.TrimSpace(string(body))
+				// Validate it's a valid IPv4 address
+				if parsed := net.ParseIP(candidate); parsed != nil && parsed.To4() != nil {
+					ip = candidate
+				}
+			}
 		}
+		_ = resp.Body.Close() // close inline — not deferred, to avoid accumulating open bodies
 
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
-		if err != nil {
-			continue
-		}
-
-		ip := strings.TrimSpace(string(body))
-		// Validate it's a valid IPv4 address
-		if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
+		if ip != "" {
 			return ip
 		}
 	}

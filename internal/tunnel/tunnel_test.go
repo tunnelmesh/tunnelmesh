@@ -205,6 +205,51 @@ func TestDataChannel(t *testing.T) {
 	assert.Equal(t, serverData, buf[:n])
 }
 
+// mockTransportConn is a minimal ReadWriteCloserWithName for testing ConnectionAdapter.
+type mockTransportConn struct {
+	healthy bool
+	closed  bool
+}
+
+func (m *mockTransportConn) Read(p []byte) (int, error)  { return 0, nil }
+func (m *mockTransportConn) Write(p []byte) (int, error) { return len(p), nil }
+func (m *mockTransportConn) Close() error                { m.closed = true; return nil }
+func (m *mockTransportConn) PeerName() string            { return "mock-peer" }
+func (m *mockTransportConn) IsHealthy() bool             { return m.healthy }
+
+// mockNoHealthConn doesn't implement HealthChecker.
+type mockNoHealthConn struct{}
+
+func (m *mockNoHealthConn) Read(p []byte) (int, error)  { return 0, nil }
+func (m *mockNoHealthConn) Write(p []byte) (int, error) { return len(p), nil }
+func (m *mockNoHealthConn) Close() error                { return nil }
+func (m *mockNoHealthConn) PeerName() string            { return "no-health-peer" }
+
+func TestConnectionAdapterIsHealthy_DelegatesToUnderlying(t *testing.T) {
+	mock := &mockTransportConn{healthy: true}
+	adapter := NewConnectionAdapter(mock, "test-peer")
+
+	assert.True(t, adapter.IsHealthy(), "should be healthy when underlying is healthy")
+
+	mock.healthy = false
+	assert.False(t, adapter.IsHealthy(), "should be unhealthy when underlying is unhealthy")
+}
+
+func TestConnectionAdapterIsHealthy_AssumeHealthyWithNoChecker(t *testing.T) {
+	mock := &mockNoHealthConn{}
+	adapter := NewConnectionAdapter(mock, "test-peer")
+
+	assert.True(t, adapter.IsHealthy(), "should be assumed healthy when no health checker")
+}
+
+func TestConnectionAdapterIsHealthy_FalseWhenClosed(t *testing.T) {
+	mock := &mockTransportConn{healthy: true}
+	adapter := NewConnectionAdapter(mock, "test-peer")
+
+	require.NoError(t, adapter.Close())
+	assert.False(t, adapter.IsHealthy(), "should be unhealthy after close")
+}
+
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)
