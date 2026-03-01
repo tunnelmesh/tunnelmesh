@@ -949,8 +949,8 @@ function displayTraces(data) {
             allTraces.push({
                 traceID: values[traceIdIdx][i],
                 startTime: values[startTimeIdx]?.[i] || 0, // ms since epoch
-                service: serviceIdx >= 0 ? (values[serviceIdx]?.[i] || '') : '',
-                name: nameIdx >= 0 ? (values[nameIdx]?.[i] || '') : '',
+                service: serviceIdx >= 0 ? values[serviceIdx]?.[i] || '' : '',
+                name: nameIdx >= 0 ? values[nameIdx]?.[i] || '' : '',
                 durationMs: durationIdx >= 0 ? values[durationIdx]?.[i] : null,
             });
         }
@@ -977,13 +977,12 @@ function displayTraces(data) {
                 ageStr = `${Math.round(ageMs / 3600000)}h ago`;
             }
 
-            let durationStr = '';
-            if (trace.durationMs != null) {
-                durationStr =
-                    trace.durationMs >= 1000
-                        ? `${(trace.durationMs / 1000).toFixed(1)}s`
-                        : `${Math.round(trace.durationMs)}ms`;
-            }
+            const durationStr =
+                trace.durationMs == null
+                    ? '—'
+                    : trace.durationMs >= 1000
+                      ? `${(trace.durationMs / 1000).toFixed(1)}s`
+                      : `${Math.round(trace.durationMs)}ms`;
 
             const dsUid = state.tempoDatasourceUid || 'tempo';
             const traceUrl = `/grafana/explore?schemaVersion=1&panes=${encodeURIComponent(
@@ -996,16 +995,12 @@ function displayTraces(data) {
                 }),
             )}&orgId=1`;
 
-            const servicePart = trace.service
-                ? `<span class="log-key">${escapeHtml(trace.service)}</span> `
-                : '';
-            const durationPart = durationStr ? ` &mdash; ${escapeHtml(durationStr)}` : '';
-
-            return `<div class="log-entry">
-            <span class="log-timestamp">${escapeHtml(ageStr)}</span>
-            <span class="log-level info">${escapeHtml(trace.name || trace.service || '')}</span>
-            <span class="log-message"><a href="${traceUrl}" target="_blank" rel="noopener">${servicePart}${durationPart}</a></span>
-        </div>`;
+            return `<tr class="trace-row" onclick="window.open('${traceUrl}', '_blank', 'noopener,noreferrer')">
+                <td class="log-timestamp">${escapeHtml(ageStr)}</td>
+                <td class="trace-op">${escapeHtml(trace.name || '—')}</td>
+                <td>${escapeHtml(trace.service || '—')}</td>
+                <td class="trace-duration">${escapeHtml(durationStr)}</td>
+            </tr>`;
         })
         .join('');
 

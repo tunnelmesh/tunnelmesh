@@ -557,12 +557,22 @@
 
         <!-- Traces section - admin-only, shows recent distributed traces from Tempo -->
         <section id="traces-section" data-tab="mesh" class="logs-card" style="display: none;">
-            <h2 class="section-toggle" onclick="toggleSection(this)">Recent Traces</h2>
+            <h2 class="section-toggle" onclick="toggleSection(this)">Recent Traces <a id="traces-link" class="section-explore-link" href="/grafana/explore" onclick="event.stopPropagation()" title="Open in Grafana Explore" target="_blank" rel="noopener">↗</a></h2>
             <div class="collapsible-content">
-                <a id="traces-link" class="logs-container clickable-card" href="/grafana/explore">
-                    <div id="traces-content"></div>
+                <div class="traces-table-container">
+                    <table class="traces-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Operation</th>
+                                <th>Service</th>
+                                <th>Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody id="traces-content"></tbody>
+                    </table>
                     <div id="no-traces" class="empty-state">No traces available</div>
-                </a>
+                </div>
             </div>
         </section>
 

@@ -1225,7 +1225,8 @@ a.alert-tile {
 }
 
 /* Logs section */
-#logs-section {
+#logs-section,
+#traces-section {
     background: var(--color-bg-primary);
     border: 1px solid var(--color-border-primary);
     margin-bottom: 1.5rem;
@@ -1288,6 +1289,90 @@ a.logs-container {
 
 .log-entry:hover {
     background: var(--color-bg-secondary);
+}
+
+/* --- Traces table --- */
+
+.traces-table-container {
+    height: 300px;
+    overflow: auto;
+}
+
+.traces-table-container::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.traces-table-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.traces-table-container::-webkit-scrollbar-thumb {
+    background: var(--color-border-primary);
+    border-radius: 3px;
+}
+
+.traces-table-container::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-secondary);
+}
+
+.traces-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+
+.traces-table thead th {
+    padding: 0.35rem 0.75rem;
+    text-align: left;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    background: var(--color-bg-primary);
+    border-bottom: 1px solid var(--color-border-primary);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.trace-row {
+    cursor: pointer;
+    border-bottom: 1px solid var(--color-border-secondary);
+}
+
+.trace-row:last-child {
+    border-bottom: none;
+}
+
+.trace-row:hover {
+    background: var(--color-bg-secondary);
+}
+
+.trace-row td {
+    padding: 0.3rem 0.75rem;
+    white-space: nowrap;
+    color: var(--color-text-primary);
+}
+
+.trace-op {
+    color: var(--color-accent);
+}
+
+.trace-duration {
+    text-align: right;
+    color: var(--color-text-secondary);
+}
+
+.section-explore-link {
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    margin-left: 0.5rem;
+}
+
+.section-explore-link:hover {
+    color: var(--color-accent);
 }
 
 .log-timestamp {
