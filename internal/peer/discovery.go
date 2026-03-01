@@ -8,9 +8,12 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/internal/transport"
 	"github.com/tunnelmesh/tunnelmesh/internal/tunnel"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // RunPeerDiscovery periodically discovers peers and establishes tunnels.
@@ -172,6 +175,16 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 		return
 	}
 
+	// Start a trace span covering the entire tunnel setup (negotiate + transition).
+	ctx, setupSpan := tracing.Tracer("tunnelmesh/peer").Start(ctx, "peer.establish_tunnel")
+	defer setupSpan.End()
+	setupSpan.SetAttributes(
+		attribute.String("peer.name", peer.Name),
+		attribute.String("peer.mesh_ip", peer.MeshIP),
+		attribute.Bool("force_initiate", forceInitiate),
+	)
+	setupStart := time.Now()
+
 	// Create a cancellable context for this outbound connection
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -218,7 +231,16 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 			log.Debug().Str("peer", peer.Name).Msg("outbound connection cancelled (inbound connection established)")
 			return
 		}
-		log.Warn().Err(err).Str("peer", peer.Name).Msg("transport negotiation failed")
+		setupSpan.RecordError(err)
+		setupSpan.SetStatus(otelcodes.Error, err.Error())
+		sc := setupSpan.SpanContext()
+		if m.OnConnectionSetup != nil {
+			m.OnConnectionSetup("unknown", "failure", time.Since(setupStart).Seconds(), sc.TraceID().String())
+		}
+		log.Warn().Err(err).
+			Str("peer", peer.Name).
+			Str("trace_id", sc.TraceID().String()).
+			Msg("transport negotiation failed")
 		return
 	}
 
@@ -239,24 +261,42 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 		_ = tun.Close()
 		return
 	}
-	if err := pc.Connected(tun, string(result.Transport), "transport negotiated: "+string(result.Transport)); err != nil {
+	if err := pc.Connected(connCtx, tun, string(result.Transport), "transport negotiated: "+string(result.Transport)); err != nil {
 		log.Warn().Err(err).Str("peer", peer.Name).Msg("failed to transition to connected state")
 		_ = tun.Close()
 		return
 	}
 
+	// Record successful connection setup with exemplar linking to this trace.
+	setupSpan.SetAttributes(attribute.String("transport", string(result.Transport)))
+	setupSpan.SetStatus(otelcodes.Ok, "")
+	sc := setupSpan.SpanContext()
+	setupDuration := time.Since(setupStart).Seconds()
+	if m.OnConnectionSetup != nil {
+		m.OnConnectionSetup(string(result.Transport), "success", setupDuration, sc.TraceID().String())
+	}
+
 	log.Info().
 		Str("peer", peer.Name).
 		Str("transport", string(result.Transport)).
+		Str("trace_id", sc.TraceID().String()).
+		Str("span_id", sc.SpanID().String()).
+		Float64("setup_duration_s", setupDuration).
 		Msg("tunnel established via transport layer")
+
+	// End the setup span now — HandleTunnel blocks for the entire tunnel lifetime
+	// (hours or days), so defer would never fire while the peer is connected.
+	// The defer above is still the safety net for all early-return error paths.
+	setupSpan.End()
 
 	// Handle incoming packets from this tunnel
 	if m.Forwarder != nil {
 		m.Forwarder.HandleTunnel(connCtx, peer.Name, tun)
 	}
 
-	// Disconnect when tunnel handler exits (this removes tunnel via LifecycleManager observer)
-	_ = pc.Disconnect("tunnel handler exited", nil)
+	// Disconnect when tunnel handler exits (this removes tunnel via LifecycleManager observer).
+	// Use Background context — the connCtx is cancelled by this point.
+	_ = pc.Disconnect(context.Background(), "tunnel handler exited", nil)
 }
 
 // buildTransportPeerInfo builds a transport.PeerInfo from a proto.Peer.

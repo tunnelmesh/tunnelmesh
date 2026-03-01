@@ -19,3 +19,32 @@ datasources:
     editable: false
     jsonData:
       maxLines: 1000
+      # Derived fields: auto-link trace_id field in logs to Tempo traces
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"([a-f0-9]+)"'
+          url: "$${__value.raw}"
+          datasourceUid: P9AB0F2A7D4032C59
+          urlDisplayLabel: "View Trace"
+
+  - name: Tempo
+    type: tempo
+    uid: P9AB0F2A7D4032C59
+    access: proxy
+    url: http://localhost:3200
+    isDefault: false
+    editable: false
+    jsonData:
+      httpMethod: GET
+      serviceMap:
+        datasourceUid: PBFA97CFB590B2093
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      lokiSearch:
+        datasourceUid: P8E80F9AEF21F6940
+      traceQuery:
+        timeShiftEnabled: true
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"

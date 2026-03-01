@@ -49,6 +49,7 @@ services:
       - "8081:8080"  # Exposed to host for joining from host machine
     environment:
       - TUNNELMESH_TOKEN=${TUNNELMESH_TOKEN}
+      - OTLP_ENDPOINT=http://127.0.0.1:4318
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 5s
@@ -81,6 +82,7 @@ services:
       - "8082:8080"  # Different port for coordinator 2
     environment:
       - TUNNELMESH_TOKEN=${TUNNELMESH_TOKEN}
+      - OTLP_ENDPOINT=http://coordinator-1:4318
     depends_on:
       coord-1:
         condition: service_healthy
@@ -116,6 +118,7 @@ services:
       - "8083:8080"  # Different port for coordinator 3
     environment:
       - TUNNELMESH_TOKEN=${TUNNELMESH_TOKEN}
+      - OTLP_ENDPOINT=http://coordinator-1:4318
     depends_on:
       coord-1:
         condition: service_healthy
@@ -156,6 +159,7 @@ services:
       - TUNNELMESH_ALLOW_HTTP=true
       - PING_INTERVAL=2
       - DISCOVERY_INTERVAL=20
+      - OTLP_ENDPOINT=http://coordinator-1:4318
 
   bob:
     build:
@@ -184,6 +188,7 @@ services:
       - TUNNELMESH_ALLOW_HTTP=true
       - PING_INTERVAL=2
       - DISCOVERY_INTERVAL=20
+      - OTLP_ENDPOINT=http://coordinator-1:4318
 
   charlie:
     build:
@@ -212,6 +217,7 @@ services:
       - TUNNELMESH_ALLOW_HTTP=true
       - PING_INTERVAL=2
       - DISCOVERY_INTERVAL=20
+      - OTLP_ENDPOINT=http://coordinator-1:4318
 
   diana:
     build:
@@ -240,6 +246,7 @@ services:
       - TUNNELMESH_ALLOW_HTTP=true
       - PING_INTERVAL=2
       - DISCOVERY_INTERVAL=20
+      - OTLP_ENDPOINT=http://coordinator-1:4318
 
   eve:
     build:
@@ -268,6 +275,7 @@ services:
       - TUNNELMESH_ALLOW_HTTP=true
       - PING_INTERVAL=2
       - DISCOVERY_INTERVAL=20
+      - OTLP_ENDPOINT=http://coordinator-1:4318
 
   # Monitoring stack - shares coord-1's network namespace for mesh access
   # Note: These use network_mode: "service:coord-1" which binds to coord-1's container.
@@ -368,6 +376,8 @@ services:
         condition: service_started
       loki:
         condition: service_started
+      tempo:
+        condition: service_started
     restart: unless-stopped
 
   loki:
@@ -387,6 +397,28 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    depends_on:
+      coord-1:
+        condition: service_healthy
+        restart: true
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    container_name: tunnelmesh-tempo
+    profiles: ["monitoring"]
+    # Share coord-1's network namespace so peers can send traces to localhost:4318
+    network_mode: "service:coord-1"
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ../monitoring/tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       coord-1:
         condition: service_healthy
@@ -443,4 +475,5 @@ volumes:
   prometheus-data:
   grafana-data:
   loki-data:
+  tempo-data:
   benchmark-results:

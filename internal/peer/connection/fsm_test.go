@@ -2,6 +2,7 @@ package connection
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -106,7 +107,7 @@ func TestPeerConnection_TransitionTo(t *testing.T) {
 	})
 
 	// Valid transition: Disconnected -> Connecting
-	if err := pc.TransitionTo(StateConnecting, "dial started", nil); err != nil {
+	if err := pc.TransitionTo(context.Background(), StateConnecting, "dial started", nil); err != nil {
 		t.Fatalf("TransitionTo(Connecting) failed: %v", err)
 	}
 	if pc.State() != StateConnecting {
@@ -126,7 +127,7 @@ func TestPeerConnection_TransitionTo(t *testing.T) {
 	}
 
 	// Valid transition: Connecting -> Connected
-	if err := pc.TransitionTo(StateConnected, "handshake complete", nil); err != nil {
+	if err := pc.TransitionTo(context.Background(), StateConnected, "handshake complete", nil); err != nil {
 		t.Fatalf("TransitionTo(Connected) failed: %v", err)
 	}
 	if pc.State() != StateConnected {
@@ -134,7 +135,7 @@ func TestPeerConnection_TransitionTo(t *testing.T) {
 	}
 
 	// Invalid transition: Connected -> Connecting
-	if err := pc.TransitionTo(StateConnecting, "should fail", nil); err == nil {
+	if err := pc.TransitionTo(context.Background(), StateConnecting, "should fail", nil); err == nil {
 		t.Error("TransitionTo(Connecting) from Connected should fail")
 	}
 	if pc.State() != StateConnected {
@@ -150,9 +151,9 @@ func TestPeerConnection_TransitionWithError(t *testing.T) {
 		Observers: []Observer{recorder},
 	})
 
-	_ = pc.TransitionTo(StateConnecting, "dial", nil)
+	_ = pc.TransitionTo(context.Background(), StateConnecting, "dial", nil)
 	testErr := errors.New("connection refused")
-	_ = pc.TransitionTo(StateDisconnected, "dial failed", testErr)
+	_ = pc.TransitionTo(context.Background(), StateDisconnected, "dial failed", testErr)
 
 	if !errors.Is(pc.LastError(), testErr) {
 		t.Errorf("LastError() = %v, want %v", pc.LastError(), testErr)
@@ -190,7 +191,7 @@ func TestPeerConnection_Connected(t *testing.T) {
 	})
 
 	tunnel := &mockTunnel{}
-	if err := pc.Connected(tunnel, "test", "incoming connection"); err != nil {
+	if err := pc.Connected(context.Background(), tunnel, "test", "incoming connection"); err != nil {
 		t.Fatalf("Connected() failed: %v", err)
 	}
 
@@ -212,7 +213,7 @@ func TestPeerConnection_StartReconnecting(t *testing.T) {
 	})
 
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "test", "connected")
+	_ = pc.Connected(context.Background(), tunnel, "test", "connected")
 
 	err := errors.New("connection lost")
 	if err := pc.StartReconnecting("network error", err); err != nil {
@@ -235,7 +236,7 @@ func TestPeerConnection_ReconnectCount(t *testing.T) {
 
 	// Initial connect
 	tunnel1 := &mockTunnel{}
-	_ = pc.Connected(tunnel1, "test", "connected")
+	_ = pc.Connected(context.Background(), tunnel1, "test", "connected")
 	if pc.ReconnectCount() != 0 {
 		t.Errorf("ReconnectCount() = %d, want 0 after initial connect", pc.ReconnectCount())
 	}
@@ -243,7 +244,7 @@ func TestPeerConnection_ReconnectCount(t *testing.T) {
 	// Reconnect
 	_ = pc.StartReconnecting("network error", nil)
 	tunnel2 := &mockTunnel{}
-	_ = pc.Connected(tunnel2, "test", "reconnected")
+	_ = pc.Connected(context.Background(), tunnel2, "test", "reconnected")
 	if pc.ReconnectCount() != 1 {
 		t.Errorf("ReconnectCount() = %d, want 1 after first reconnect", pc.ReconnectCount())
 	}
@@ -251,7 +252,7 @@ func TestPeerConnection_ReconnectCount(t *testing.T) {
 	// Another reconnect
 	_ = pc.StartReconnecting("another error", nil)
 	tunnel3 := &mockTunnel{}
-	_ = pc.Connected(tunnel3, "test", "reconnected again")
+	_ = pc.Connected(context.Background(), tunnel3, "test", "reconnected again")
 	if pc.ReconnectCount() != 2 {
 		t.Errorf("ReconnectCount() = %d, want 2 after second reconnect", pc.ReconnectCount())
 	}
@@ -264,7 +265,7 @@ func TestPeerConnection_Close(t *testing.T) {
 	})
 
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "test", "connected")
+	_ = pc.Connected(context.Background(), tunnel, "test", "connected")
 
 	if err := pc.Close(); err != nil {
 		t.Fatalf("Close() failed: %v", err)
@@ -281,7 +282,7 @@ func TestPeerConnection_Close(t *testing.T) {
 	}
 
 	// Cannot transition from closed
-	if err := pc.TransitionTo(StateConnected, "should fail", nil); err == nil {
+	if err := pc.TransitionTo(context.Background(), StateConnected, "should fail", nil); err == nil {
 		t.Error("TransitionTo() from Closed should fail")
 	}
 }
@@ -293,7 +294,7 @@ func TestPeerConnection_CloseIdempotent(t *testing.T) {
 	})
 
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "test", "connected")
+	_ = pc.Connected(context.Background(), tunnel, "test", "connected")
 
 	// Close multiple times should not panic
 	_ = pc.Close()
@@ -312,9 +313,9 @@ func TestPeerConnection_Disconnect(t *testing.T) {
 	})
 
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "test", "connected")
+	_ = pc.Connected(context.Background(), tunnel, "test", "connected")
 
-	if err := pc.Disconnect("user requested", nil); err != nil {
+	if err := pc.Disconnect(context.Background(), "user requested", nil); err != nil {
 		t.Fatalf("Disconnect() failed: %v", err)
 	}
 
@@ -327,7 +328,7 @@ func TestPeerConnection_Disconnect(t *testing.T) {
 
 	// Can reconnect after Disconnect (unlike Close)
 	tunnel2 := &mockTunnel{}
-	if err := pc.Connected(tunnel2, "test", "reconnected"); err != nil {
+	if err := pc.Connected(context.Background(), tunnel2, "test", "reconnected"); err != nil {
 		t.Fatalf("Connected() after Disconnect() failed: %v", err)
 	}
 	if pc.State() != StateConnected {
@@ -356,7 +357,7 @@ func TestPeerConnection_Info(t *testing.T) {
 	}
 
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "test", "connected")
+	_ = pc.Connected(context.Background(), tunnel, "test", "connected")
 
 	info = pc.Info()
 	if info.State != StateConnected {
@@ -377,7 +378,7 @@ func TestPeerConnection_Info_TransportTypeGuardedByState(t *testing.T) {
 	})
 
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "udp", "connected via UDP")
+	_ = pc.Connected(context.Background(), tunnel, "udp", "connected via UDP")
 
 	// When Connected, TransportType should be returned.
 	info := pc.Info()
@@ -386,7 +387,7 @@ func TestPeerConnection_Info_TransportTypeGuardedByState(t *testing.T) {
 	}
 
 	// Disconnect — transportType field is NOT cleared but state changes.
-	_ = pc.Disconnect("test disconnect", nil)
+	_ = pc.Disconnect(context.Background(), "test disconnect", nil)
 
 	// After disconnect, Info() must NOT expose the stale transport type.
 	info = pc.Info()
@@ -404,7 +405,7 @@ func TestPeerConnection_AddObserver(t *testing.T) {
 	recorder := &transitionRecorder{}
 	pc.AddObserver(recorder)
 
-	_ = pc.TransitionTo(StateConnecting, "test", nil)
+	_ = pc.TransitionTo(context.Background(), StateConnecting, "test", nil)
 
 	if len(recorder.Transitions()) != 1 {
 		t.Errorf("Observer should receive 1 transition, got %d", len(recorder.Transitions()))
@@ -422,7 +423,7 @@ func TestPeerConnection_ConcurrentTransitions(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		wg.Go(func() {
 			_ = pc.StartConnecting("concurrent test")
-			_ = pc.Disconnect("concurrent test", nil)
+			_ = pc.Disconnect(context.Background(), "concurrent test", nil)
 		})
 	}
 
@@ -532,7 +533,7 @@ func TestPeerConnection_CancelFuncClearedOnConnected(t *testing.T) {
 
 	// Connect with a tunnel
 	tunnel := &mockTunnel{}
-	_ = pc.Connected(tunnel, "test", "test")
+	_ = pc.Connected(context.Background(), tunnel, "test", "test")
 
 	// The cancel function should have been cleared during transition to Connected
 	// Calling CancelOutbound should NOT cancel anything
@@ -603,14 +604,14 @@ func TestPeerConnection_ConnectedSinceZeroWhenNotConnected(t *testing.T) {
 	}
 
 	// Now transition to Connecting - should still return zero
-	_ = pc.TransitionTo(StateConnecting, "dial started", nil)
+	_ = pc.TransitionTo(context.Background(), StateConnecting, "dial started", nil)
 	connectedSince = pc.ConnectedSince()
 	if !connectedSince.IsZero() {
 		t.Errorf("ConnectedSince() = %v, want zero time when state is Connecting", connectedSince)
 	}
 
 	// Now properly connect - should have non-zero time
-	_ = pc.TransitionTo(StateConnected, "connected", nil)
+	_ = pc.TransitionTo(context.Background(), StateConnected, "connected", nil)
 	connectedSince = pc.ConnectedSince()
 	if connectedSince.IsZero() {
 		t.Error("ConnectedSince() should be non-zero after transitioning to Connected")

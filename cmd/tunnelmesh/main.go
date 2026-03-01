@@ -79,6 +79,8 @@ var (
 	// Server feature flags
 	// Tracing flag
 	enableTracing bool
+	// OTel / Tempo tracing
+	otlpEndpoint string
 
 	// Service mode flags (hidden, used when running as a service)
 	serviceRun     bool
@@ -167,6 +169,7 @@ Auth token must be set via TUNNELMESH_TOKEN environment variable.`,
 	joinCmd.Flags().StringVar(&exitPeerFlag, "exit-peer", "", "name of peer to route internet traffic through")
 	joinCmd.Flags().BoolVar(&allowExitTraffic, "allow-exit-traffic", false, "allow this peer to act as exit peer for other peers")
 	joinCmd.Flags().BoolVar(&enableTracing, "enable-tracing", false, "enable runtime tracing (exposes /debug/trace endpoint)")
+	joinCmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP HTTP endpoint for distributed tracing (e.g. localhost:4318)")
 	joinCmd.Flags().StringVar(&joinContext, "context", "", "save/update context with this name after joining")
 	joinCmd.Flags().StringVar(&keygenSeed, "keygen-seed", "", "seed for deterministic key generation (TESTING ONLY - reduces security)")
 	rootCmd.AddCommand(joinCmd)
@@ -634,13 +637,31 @@ func runJoin(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// Initialize tracing if enabled
+	// Initialize runtime tracing if enabled
 	if enableTracing {
 		if err := tracing.Init(true, tracing.DefaultBufferSize); err != nil {
 			log.Warn().Err(err).Msg("failed to initialize tracing")
 		} else {
 			log.Info().Msg("runtime tracing enabled")
 			defer tracing.Stop()
+		}
+	}
+
+	// Initialize OTel distributed tracing if an OTLP endpoint is configured
+	if otlpEndpoint != "" {
+		otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer otelCancel()
+		if err := tracing.InitOTel(otelCtx, "tunnelmesh", Version, otlpEndpoint); err != nil {
+			log.Warn().Err(err).Str("endpoint", otlpEndpoint).Msg("failed to initialize OTel tracing")
+		} else {
+			log.Info().Str("endpoint", otlpEndpoint).Msg("OTel distributed tracing enabled")
+			defer func() {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer shutCancel()
+				if err := tracing.ShutdownOTel(shutCtx); err != nil {
+					log.Warn().Err(err).Msg("OTel shutdown error")
+				}
+			}()
 		}
 	}
 
@@ -1237,7 +1258,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	forwarder.SetOnDeadTunnel(func(peerName string) {
 		if pc := node.Connections.Get(peerName); pc != nil {
 			log.Debug().Str("peer", peerName).Msg("forwarder detected dead tunnel, disconnecting peer")
-			_ = pc.Disconnect("tunnel write failed", nil)
+			_ = pc.Disconnect(context.Background(), "tunnel write failed", nil)
 		}
 	})
 
@@ -1596,6 +1617,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 
 	// Initialize metrics
 	peerMetrics := metrics.InitMetrics(cfg.Name, resp.MeshIP, Version)
+	node.OnConnectionSetup = peerMetrics.RecordConnectionSetup
 
 	// Initialize Loki log shipping if enabled
 	if cfg.Loki.Enabled && cfg.Loki.URL != "" {

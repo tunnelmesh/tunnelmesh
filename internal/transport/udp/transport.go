@@ -19,8 +19,11 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
 	"github.com/tunnelmesh/tunnelmesh/internal/portmap"
 	"github.com/tunnelmesh/tunnelmesh/internal/portmap/client"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/internal/transport"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // PacketQueueSize is the buffer size for the packet processing queue.
@@ -1212,6 +1215,12 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 
 // initiateHandshake performs the Noise IK handshake as initiator.
 func (t *Transport) initiateHandshake(ctx context.Context, peerName string, peerPublic [32]byte, peerAddr *net.UDPAddr, conn *net.UDPConn) (*Session, error) {
+	ctx, span := tracing.Tracer("tunnelmesh/udp").Start(ctx, "udp.handshake.initiate")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("peer.name", peerName),
+		attribute.String("peer.addr", peerAddr.String()),
+	)
 	// Register intent to connect BEFORE creating handshake state.
 	// This closes a race window where an incoming init could be processed
 	// before pendingOutboundPeers is set, bypassing the crossing handshake
@@ -1276,9 +1285,14 @@ func (t *Transport) initiateHandshake(ctx context.Context, peerName string, peer
 	// Wait for response via channel (routed by receiveLoop)
 	select {
 	case <-ctx.Done():
+		span.RecordError(ctx.Err())
+		span.SetStatus(otelcodes.Error, ctx.Err().Error())
 		return nil, ctx.Err()
 	case <-time.After(timeout):
-		return nil, fmt.Errorf("handshake timeout")
+		timeoutErr := fmt.Errorf("handshake timeout")
+		span.RecordError(timeoutErr)
+		span.SetStatus(otelcodes.Error, "handshake timeout")
+		return nil, timeoutErr
 	case resp := <-respChan:
 		// Verify it's from the expected peer
 		if resp.remoteAddr.String() != peerAddr.String() {
@@ -1334,11 +1348,15 @@ func (t *Transport) initiateHandshake(ctx context.Context, peerName string, peer
 		return nil, fmt.Errorf("session registration rejected but no existing session found")
 	}
 
+	sc := span.SpanContext()
 	log.Debug().
 		Str("peer", peerName).
 		Str("addr", peerAddr.String()).
+		Str("trace_id", sc.TraceID().String()).
+		Str("span_id", sc.SpanID().String()).
 		Msg("handshake completed")
 
+	span.SetStatus(otelcodes.Ok, "")
 	return session, nil
 }
 

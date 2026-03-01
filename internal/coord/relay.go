@@ -17,7 +17,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // relayPacketPool pools relay packet buffers to reduce GC pressure.
@@ -827,9 +829,16 @@ func (s *Server) handlePersistentRelayMessage(sourcePeer string, data []byte) {
 		}
 		statsJSON := data[3 : 3+statsLen]
 
+		// Span wraps the heartbeat processing (parse + store + metrics + ack).
+		// Using background context: heartbeats arrive on a hot loop but are low-frequency
+		// per-peer (~every 30s), so overhead is negligible.
+		_, hbSpan := tracing.Tracer("tunnelmesh/coord").Start(context.Background(), "coord.heartbeat")
+		hbSpan.SetAttributes(attribute.String("peer.name", sourcePeer))
+
 		// Parse stats
 		var stats proto.PeerStats
 		if err := json.Unmarshal(statsJSON, &stats); err != nil {
+			hbSpan.RecordError(err)
 			log.Debug().Err(err).Str("peer", sourcePeer).Msg("failed to parse heartbeat stats")
 		}
 
@@ -891,6 +900,15 @@ func (s *Server) handlePersistentRelayMessage(sourcePeer string, data []byte) {
 				log.Debug().Str("peer", sourcePeer).Msg("failed to send heartbeat ack: channel full")
 			}
 		}
+
+		// End heartbeat span and inject trace_id into log for Loki → Tempo correlation.
+		sc := hbSpan.SpanContext()
+		hbSpan.End()
+		log.Debug().
+			Str("peer", sourcePeer).
+			Str("trace_id", sc.TraceID().String()).
+			Str("span_id", sc.SpanID().String()).
+			Msg("heartbeat processed")
 
 		// Notify SSE clients of heartbeat
 		s.notifyHeartbeat(sourcePeer)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // statusRecorder wraps http.ResponseWriter to capture the HTTP status code.
@@ -80,7 +81,8 @@ func ClassifyS3StatusWithError(httpStatus int, err error) string {
 // withMetrics wraps an S3 handler with metrics instrumentation.
 // The handler function receives a statusRecorder as its http.ResponseWriter,
 // and metrics are automatically recorded when the handler returns.
-func (s *Server) withMetrics(w http.ResponseWriter, operation string, fn func(http.ResponseWriter)) {
+// traceIDFromContext extracts the OTel trace ID for exemplar linking.
+func (s *Server) withMetrics(w http.ResponseWriter, r *http.Request, operation string, fn func(http.ResponseWriter)) {
 	m := s.metrics.Load()
 	startTime := time.Now()
 	rec := &statusRecorder{ResponseWriter: w}
@@ -88,10 +90,27 @@ func (s *Server) withMetrics(w http.ResponseWriter, operation string, fn func(ht
 		if m != nil {
 			duration := time.Since(startTime).Seconds()
 			status := ClassifyS3Status(rec.getStatus())
-			m.RecordRequest(operation, status, duration)
+			traceID := traceIDFromContext(r.Context())
+			m.RecordRequest(operation, status, duration, traceID)
 		}
 	}()
 	fn(rec)
+}
+
+// traceIDFromContext extracts the OTel trace ID from the context for exemplar linking.
+// Returns empty string if tracing is not active or the trace is not sampled.
+func traceIDFromContext(ctx context.Context) string {
+	return TraceIDFromContext(ctx)
+}
+
+// TraceIDFromContext extracts the OTel trace ID from the context for exemplar linking.
+// Returns empty string if tracing is not active or the trace is not sampled.
+func TraceIDFromContext(ctx context.Context) string {
+	sc := trace.SpanFromContext(ctx).SpanContext()
+	if sc.IsValid() && sc.IsSampled() {
+		return sc.TraceID().String()
+	}
+	return ""
 }
 
 // RequestForwarder can forward S3 requests to the correct primary coordinator.
@@ -216,7 +235,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // handleService handles service-level operations (GET /).
 func (s *Server) handleService(w http.ResponseWriter, r *http.Request) {
-	s.withMetrics(w, "ListBuckets", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "ListBuckets", func(rec http.ResponseWriter) {
 		if r.Method != http.MethodGet {
 			s.writeError(rec, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not allowed")
 			return
@@ -302,7 +321,7 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 
 // createBucket handles PUT /{bucket}.
 func (s *Server) createBucket(w http.ResponseWriter, r *http.Request, bucket string) {
-	s.withMetrics(w, "CreateBucket", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "CreateBucket", func(rec http.ResponseWriter) {
 		userID, err := s.authorizer.AuthorizeRequest(r, "create", "buckets", bucket, "")
 		if err != nil {
 			s.handleAuthError(rec, err)
@@ -324,7 +343,7 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request, bucket str
 
 // deleteBucket handles DELETE /{bucket}.
 func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request, bucket string) {
-	s.withMetrics(w, "DeleteBucket", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "DeleteBucket", func(rec http.ResponseWriter) {
 		_, err := s.authorizer.AuthorizeRequest(r, "delete", "buckets", bucket, "")
 		if err != nil {
 			s.handleAuthError(rec, err)
@@ -349,7 +368,7 @@ func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request, bucket str
 
 // headBucket handles HEAD /{bucket}.
 func (s *Server) headBucket(w http.ResponseWriter, r *http.Request, bucket string) {
-	s.withMetrics(w, "HeadBucket", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "HeadBucket", func(rec http.ResponseWriter) {
 		_, err := s.authorizer.AuthorizeRequest(r, "get", "buckets", bucket, "")
 		if err != nil {
 			s.handleAuthError(rec, err)
@@ -371,7 +390,7 @@ func (s *Server) headBucket(w http.ResponseWriter, r *http.Request, bucket strin
 
 // listObjects handles GET /{bucket} (V1).
 func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket string) {
-	s.withMetrics(w, "ListObjects", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "ListObjects", func(rec http.ResponseWriter) {
 		userID, err := s.authorizer.AuthorizeRequest(r, "list", "objects", bucket, "")
 		if err != nil {
 			s.handleAuthError(rec, err)
@@ -431,7 +450,7 @@ func (s *Server) listObjects(w http.ResponseWriter, r *http.Request, bucket stri
 
 // listObjectsV2 handles GET /{bucket}?list-type=2.
 func (s *Server) listObjectsV2(w http.ResponseWriter, r *http.Request, bucket string) {
-	s.withMetrics(w, "ListObjectsV2", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "ListObjectsV2", func(rec http.ResponseWriter) {
 		userID, err := s.authorizer.AuthorizeRequest(r, "list", "objects", bucket, "")
 		if err != nil {
 			s.handleAuthError(rec, err)
@@ -509,7 +528,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 		if m != nil && !forwarded {
 			duration := time.Since(startTime).Seconds()
 			status := ClassifyS3StatusWithError(rec.getStatus(), storeErr)
-			m.RecordRequest("GetObject", status, duration)
+			m.RecordRequest("GetObject", status, duration, traceIDFromContext(r.Context()))
 		}
 	}()
 
@@ -571,7 +590,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 		if m != nil {
 			duration := time.Since(startTime).Seconds()
 			status := ClassifyS3StatusWithError(rec.getStatus(), storeErr)
-			m.RecordRequest("PutObject", status, duration)
+			m.RecordRequest("PutObject", status, duration, traceIDFromContext(r.Context()))
 		}
 	}()
 
@@ -625,7 +644,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 
 // deleteObject handles DELETE /{bucket}/{key}.
 func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	s.withMetrics(w, "DeleteObject", func(rec http.ResponseWriter) {
+	s.withMetrics(w, r, "DeleteObject", func(rec http.ResponseWriter) {
 		_, err := s.authorizer.AuthorizeRequest(r, "delete", "objects", bucket, key)
 		if err != nil {
 			s.handleAuthError(rec, err)
@@ -663,7 +682,7 @@ func (s *Server) headObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		if m != nil && !forwarded {
 			duration := time.Since(startTime).Seconds()
 			status := ClassifyS3Status(rec.getStatus())
-			m.RecordRequest("HeadObject", status, duration)
+			m.RecordRequest("HeadObject", status, duration, traceIDFromContext(r.Context()))
 		}
 	}()
 

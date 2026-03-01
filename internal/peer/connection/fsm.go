@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // PeerConnection manages the connection state for a single peer.
@@ -161,7 +164,9 @@ func (pc *PeerConnection) CancelOutbound() bool {
 // TransitionTo attempts to transition to the target state.
 // Returns an error if the transition is invalid.
 // On success, notifies all observers of the transition.
-func (pc *PeerConnection) TransitionTo(target State, reason string, err error) error {
+// ctx is used to parent the OTel span — callers with a meaningful trace context
+// should pass it; background goroutines should pass context.Background().
+func (pc *PeerConnection) TransitionTo(ctx context.Context, target State, reason string, err error) error {
 	pc.mu.Lock()
 
 	from := pc.state
@@ -205,12 +210,38 @@ func (pc *PeerConnection) TransitionTo(target State, reason string, err error) e
 
 	pc.mu.Unlock()
 
-	// Log the transition
+	// Emit an OTel span for this state transition.
+	// Each transition is nearly instantaneous, so the span duration is ~0.
+	// When ctx carries a span (e.g. from peer.establish_tunnel), this span
+	// becomes a child of that trace, making the full connection waterfall
+	// visible in Tempo. Background callers (lifecycle goroutines, Close) pass
+	// context.Background() so their transitions appear as root spans.
+	_, span := tracing.Tracer("tunnelmesh/connection").Start(
+		ctx,
+		"connection.transition",
+	)
+	span.SetAttributes(
+		attribute.String("peer.name", pc.peerName),
+		attribute.String("peer.mesh_ip", pc.meshIP),
+		attribute.String("transition.from", from.String()),
+		attribute.String("transition.to", target.String()),
+		attribute.String("transition.reason", reason),
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+	}
+	span.End()
+
+	// Log the transition (include trace_id for Loki → Tempo correlation)
+	sc := span.SpanContext()
 	logEvent := log.Debug().
 		Str("peer", pc.peerName).
 		Str("from", from.String()).
 		Str("to", target.String()).
-		Str("reason", reason)
+		Str("reason", reason).
+		Str("trace_id", sc.TraceID().String()).
+		Str("span_id", sc.SpanID().String())
 	if err != nil {
 		logEvent = logEvent.Err(err)
 	}
@@ -258,9 +289,10 @@ func (pc *PeerConnection) Close() error {
 		tunnelErr = tunnel.Close()
 	}
 
-	// Transition to closed (if not already)
+	// Transition to closed (if not already). Close is terminal and is called
+	// from background goroutines, so we use Background context.
 	if !state.IsTerminal() {
-		if err := pc.TransitionTo(StateClosed, "explicit close", tunnelErr); err != nil {
+		if err := pc.TransitionTo(context.Background(), StateClosed, "explicit close", tunnelErr); err != nil {
 			// Log but don't fail - we still want to clean up
 			log.Debug().
 				Str("peer", pc.peerName).
@@ -274,7 +306,9 @@ func (pc *PeerConnection) Close() error {
 
 // Disconnect transitions to Disconnected state and closes the tunnel.
 // Unlike Close(), the connection can be reused after Disconnect().
-func (pc *PeerConnection) Disconnect(reason string, err error) error {
+// ctx is propagated to the OTel span — callers with a meaningful trace context
+// should pass it; background callers should pass context.Background().
+func (pc *PeerConnection) Disconnect(ctx context.Context, reason string, err error) error {
 	pc.mu.Lock()
 	tunnel := pc.tunnel
 	pc.tunnel = nil
@@ -288,7 +322,7 @@ func (pc *PeerConnection) Disconnect(reason string, err error) error {
 
 	// Transition to disconnected (if valid)
 	if state.CanTransitionTo(StateDisconnected) {
-		return pc.TransitionTo(StateDisconnected, reason, err)
+		return pc.TransitionTo(ctx, StateDisconnected, reason, err)
 	}
 
 	return nil
@@ -296,14 +330,16 @@ func (pc *PeerConnection) Disconnect(reason string, err error) error {
 
 // StartConnecting transitions to Connecting state.
 func (pc *PeerConnection) StartConnecting(reason string) error {
-	return pc.TransitionTo(StateConnecting, reason, nil)
+	return pc.TransitionTo(context.Background(), StateConnecting, reason, nil)
 }
 
 // Connected transitions to Connected state and sets the tunnel.
 // transportType should be "udp", "ssh", "relay", etc.
-func (pc *PeerConnection) Connected(tunnel io.ReadWriteCloser, transportType string, reason string) error {
+// ctx is propagated to the OTel span — pass the call-site context so the
+// transition span appears as a child of the enclosing trace.
+func (pc *PeerConnection) Connected(ctx context.Context, tunnel io.ReadWriteCloser, transportType string, reason string) error {
 	pc.SetTunnel(tunnel, transportType)
-	if err := pc.TransitionTo(StateConnected, reason, nil); err != nil {
+	if err := pc.TransitionTo(ctx, StateConnected, reason, nil); err != nil {
 		// Roll back tunnel assignment on failure
 		pc.ClearTunnel()
 		return err
@@ -315,7 +351,7 @@ func (pc *PeerConnection) Connected(tunnel io.ReadWriteCloser, transportType str
 // The tunnel is cleared but not closed (caller should close it).
 func (pc *PeerConnection) StartReconnecting(reason string, err error) error {
 	pc.ClearTunnel()
-	return pc.TransitionTo(StateReconnecting, reason, err)
+	return pc.TransitionTo(context.Background(), StateReconnecting, reason, err)
 }
 
 // nolint:revive // ConnectionInfo name kept for clarity despite stuttering

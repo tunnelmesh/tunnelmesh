@@ -6,7 +6,7 @@ pre-commit:
       priority: 1
       glob: "*.go"
       exclude: "vendor/**"
-      run: gofmt -l {staged_files} | xargs -r false
+      run: echo {staged_files} | tr ' ' '\n' | grep -v '^vendor/' | xargs -r gofmt -l | xargs -r false
       fail_text: "Run 'gofmt -w .' to fix formatting"
 
     # Go module checks (may modify vendor/ - must complete before lint)
@@ -98,8 +98,10 @@ pre-commit:
       glob: "**/*.md"
       exclude: "vendor/**"
       run: |
+        files=$(echo {staged_files} | tr ' ' '\n' | grep -v '^vendor/')
+        [ -z "$files" ] && exit 0
         if command -v markdownlint >/dev/null 2>&1; then
-          markdownlint {staged_files}
+          echo "$files" | xargs markdownlint
         else
           echo "markdownlint not installed. Install: npm install -g markdownlint-cli"
           exit 1

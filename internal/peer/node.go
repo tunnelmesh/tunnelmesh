@@ -77,6 +77,13 @@ type MeshNode struct {
 
 	// Latency measurement
 	LatencyProber *LatencyProber
+
+	// OnConnectionSetup is an optional callback invoked after a connection is established or fails.
+	// transport: transport type used ("udp", "ssh", "relay", "unknown")
+	// result: "success" or "failure"
+	// durationSeconds: wall-clock time from dial to connected/failed
+	// traceID: hex OTel trace ID for Prometheus exemplar linking (empty if tracing disabled)
+	OnConnectionSetup func(transport, result string, durationSeconds float64, traceID string)
 }
 
 // NewMeshNode creates a new MeshNode with the given identity and client.
@@ -332,7 +339,7 @@ func (m *MeshNode) HandleRelayPacketForAsymmetricDetection(sourcePeer string) bo
 		Str("peer", sourcePeer).
 		Dur("tunnel_age", tunnelAge).
 		Msg("received relay packet from peer with active tunnel, invalidating stale tunnel")
-	_ = pc.Disconnect("peer using relay (asymmetric tunnel failure)", nil)
+	_ = pc.Disconnect(context.Background(), "peer using relay (asymmetric tunnel failure)", nil)
 	return true
 }
 
@@ -423,7 +430,7 @@ func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
 				Str("peer", peerName).
 				Str("transport", pc.TransportType()).
 				Msg("disconnecting tunnel due to peer IP change")
-			_ = pc.Disconnect("peer IP changed", nil)
+			_ = pc.Disconnect(context.Background(), "peer IP changed", nil)
 		}
 
 		// Trigger discovery to reconnect with new IPs

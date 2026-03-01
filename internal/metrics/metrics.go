@@ -2,6 +2,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -58,6 +60,10 @@ type PeerMetrics struct {
 	// Latency metrics
 	CoordinatorRTTSeconds prometheus.Gauge     // RTT to coordinator in seconds
 	PeerLatencySeconds    *prometheus.GaugeVec // Latency to other peers (seconds), labels: target_peer
+
+	// Connection setup duration histogram with exemplar support for Prometheus → Tempo linking.
+	// Labels: transport (udp, ssh, relay), result (success, failure)
+	ConnectionSetupDuration *prometheus.HistogramVec // tunnelmesh_connection_setup_duration_seconds
 }
 
 func init() {
@@ -227,10 +233,35 @@ func InitMetrics(peerName, meshIP, version string) *PeerMetrics {
 			Help:        "UDP tunnel RTT to other peers in seconds (only available for direct UDP connections)",
 			ConstLabels: constLabels,
 		}, []string{"target_peer"}),
+
+		// Connection setup duration: low-frequency (once per connection), supports
+		// exemplars so a slow bucket in Grafana links directly to the offending trace.
+		ConnectionSetupDuration: promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
+			Name:                            "tunnelmesh_connection_setup_duration_seconds",
+			Help:                            "Time to establish a connection to a peer, from dial to connected state",
+			Buckets:                         []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  100,
+			NativeHistogramMinResetDuration: time.Minute,
+			ConstLabels:                     constLabels,
+		}, []string{"transport", "result"}),
 	}
 
 	// Set peer info
 	m.PeerInfo.WithLabelValues(peerName, meshIP, version).Set(1)
 
 	return m
+}
+
+// RecordConnectionSetup records the duration of a connection setup attempt with an exemplar.
+// traceID should be the hex trace ID from the active OTel span (empty string disables exemplar).
+func (m *PeerMetrics) RecordConnectionSetup(transport, result string, durationSeconds float64, traceID string) {
+	obs := m.ConnectionSetupDuration.WithLabelValues(transport, result)
+	if traceID != "" {
+		if ex, ok := obs.(prometheus.ExemplarObserver); ok {
+			ex.ObserveWithExemplar(durationSeconds, prometheus.Labels{"traceID": traceID})
+			return
+		}
+	}
+	obs.Observe(durationSeconds)
 }

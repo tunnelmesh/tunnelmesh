@@ -164,9 +164,10 @@ func (lm *LifecycleManager) DisconnectAll(reason string) {
 	}
 	lm.mu.RUnlock()
 
-	// Disconnect all connections (triggers observers for route/tunnel cleanup)
+	// Disconnect all connections (triggers observers for route/tunnel cleanup).
+	// Called from background goroutines — use Background context.
 	for _, pc := range connections {
-		_ = pc.Disconnect(reason, nil)
+		_ = pc.Disconnect(context.Background(), reason, nil)
 	}
 }
 
@@ -346,9 +347,10 @@ func (lm *LifecycleManager) ClearConnecting(peerName string) {
 		return
 	}
 
-	// Only transition if currently connecting
-	// Error is ignored - if state already changed, that's fine
+	// Only transition if currently connecting.
+	// Error is ignored - if state already changed, that's fine.
+	// Called after a failed/cancelled outbound attempt — use Background context.
 	if pc.State() == StateConnecting {
-		_ = pc.Disconnect("connection attempt ended", nil)
+		_ = pc.Disconnect(context.Background(), "connection attempt ended", nil)
 	}
 }

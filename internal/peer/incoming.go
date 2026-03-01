@@ -53,9 +53,10 @@ func (m *MeshNode) handleIncomingConnection(ctx context.Context, conn transport.
 	// Wrap connection as a tunnel
 	tun := tunnel.NewTunnelFromTransport(conn)
 
-	// Transition to Connected state (this adds tunnel via LifecycleManager observer)
+	// Transition to Connected state (this adds tunnel via LifecycleManager observer).
+	// Pass ctx so the transition span becomes a child of the incoming connection trace.
 	pc := m.Connections.GetOrCreate(peerName, meshIP)
-	if err := pc.Connected(tun, transportName, "incoming "+transportName+" connection"); err != nil {
+	if err := pc.Connected(ctx, tun, transportName, "incoming "+transportName+" connection"); err != nil {
 		log.Warn().Err(err).Str("peer", peerName).Msg("failed to transition to connected state")
 		_ = tun.Close()
 		return
@@ -65,10 +66,13 @@ func (m *MeshNode) handleIncomingConnection(ctx context.Context, conn transport.
 
 	// Handle incoming packets from this tunnel
 	if m.Forwarder != nil {
-		go func(name string, p *tunnel.Tunnel, peerConn interface{ Disconnect(string, error) error }) {
+		go func(name string, p *tunnel.Tunnel, peerConn interface {
+			Disconnect(context.Context, string, error) error
+		}) {
 			m.Forwarder.HandleTunnel(ctx, name, p)
-			// Disconnect when tunnel handler exits (removes tunnel via LifecycleManager observer)
-			_ = peerConn.Disconnect("tunnel handler exited", nil)
+			// Disconnect when tunnel handler exits (removes tunnel via LifecycleManager observer).
+			// Use Background context — the handler's ctx is done at this point.
+			_ = peerConn.Disconnect(context.Background(), "tunnel handler exited", nil)
 		}(peerName, tun, pc)
 	}
 }

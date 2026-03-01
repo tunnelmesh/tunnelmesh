@@ -311,7 +311,7 @@ func (s *Server) handleS3Proxy(w http.ResponseWriter, r *http.Request) {
 
 	// Route: /api/s3/buckets
 	if path == "buckets" || path == "" {
-		s.withS3AdminMetrics(w, "listBuckets", func(w http.ResponseWriter) {
+		s.withS3AdminMetrics(w, r, "listBuckets", func(w http.ResponseWriter) {
 			s.handleS3ListBuckets(w, r)
 		})
 		return
@@ -335,7 +335,7 @@ func (s *Server) handleS3Proxy(w http.ResponseWriter, r *http.Request) {
 
 		if len(parts) == 1 || parts[1] == "" || parts[1] == "objects" {
 			// List objects in bucket
-			s.withS3AdminMetrics(w, "listObjects", func(w http.ResponseWriter) {
+			s.withS3AdminMetrics(w, r, "listObjects", func(w http.ResponseWriter) {
 				s.handleS3ListObjects(w, r, bucket)
 			})
 			return
@@ -344,7 +344,7 @@ func (s *Server) handleS3Proxy(w http.ResponseWriter, r *http.Request) {
 			rbPath := strings.TrimPrefix(parts[1], "recyclebin")
 			rbPath = strings.TrimPrefix(rbPath, "/")
 			if rbPath == "" {
-				s.withS3AdminMetrics(w, "listRecycledObjects", func(w http.ResponseWriter) {
+				s.withS3AdminMetrics(w, r, "listRecycledObjects", func(w http.ResponseWriter) {
 					s.handleS3ListRecycledObjects(w, r, bucket)
 				})
 			} else {
@@ -355,7 +355,7 @@ func (s *Server) handleS3Proxy(w http.ResponseWriter, r *http.Request) {
 					s.jsonError(w, "invalid object key: "+err.Error(), http.StatusBadRequest)
 					return
 				}
-				s.withS3AdminMetrics(w, "getRecycledObject", func(w http.ResponseWriter) {
+				s.withS3AdminMetrics(w, r, "getRecycledObject", func(w http.ResponseWriter) {
 					s.handleS3GetRecycledObject(w, r, bucket, rbPath)
 				})
 			}
@@ -394,15 +394,15 @@ func (s *Server) handleS3Proxy(w http.ResponseWriter, r *http.Request) {
 			// Route based on subresource
 			switch subresource {
 			case "versions":
-				s.withS3AdminMetrics(w, "listVersions", func(w http.ResponseWriter) {
+				s.withS3AdminMetrics(w, r, "listVersions", func(w http.ResponseWriter) {
 					s.handleS3ListVersions(w, r, bucket, key)
 				})
 			case "restore":
-				s.withS3AdminMetrics(w, "restoreVersion", func(w http.ResponseWriter) {
+				s.withS3AdminMetrics(w, r, "restoreVersion", func(w http.ResponseWriter) {
 					s.handleS3RestoreVersion(w, r, bucket, key)
 				})
 			case "undelete":
-				s.withS3AdminMetrics(w, "undeleteObject", func(w http.ResponseWriter) {
+				s.withS3AdminMetrics(w, r, "undeleteObject", func(w http.ResponseWriter) {
 					s.handleS3UndeleteObject(w, r, bucket, key)
 				})
 			default:

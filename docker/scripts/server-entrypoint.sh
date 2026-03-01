@@ -32,6 +32,11 @@ CMD="tunnelmesh join --config /etc/tunnelmesh/server.yaml"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 CMD="$CMD --log-level $LOG_LEVEL"
 
+# Append OTLP endpoint if configured (set via docker-compose environment)
+if [ -n "${OTLP_ENDPOINT:-}" ]; then
+    CMD="$CMD --otlp-endpoint $OTLP_ENDPOINT"
+fi
+
 # Start the server (which will also join the mesh as a client)
 echo "Starting mesh server..."
 exec $CMD

@@ -899,7 +899,7 @@ func TestMetricsOnCorrectRegistry(t *testing.T) {
 	metrics, _ := newTestMetrics(t)
 	reg.MustRegister(metrics.RequestsTotal)
 
-	metrics.RecordRequest("GetObject", "success", 0.1)
+	metrics.RecordRequest("GetObject", "success", 0.1, "")
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
