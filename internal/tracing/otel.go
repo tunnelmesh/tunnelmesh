@@ -135,6 +135,8 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 			semconv.ServiceName(serviceName),
 			semconv.ServiceVersion(serviceVersion),
 		),
+		// Detect host.name so Grafana can distinguish spans from different nodes.
+		resource.WithHost(),
 	)
 	if err != nil {
 		// Non-fatal: fall back to default resource
