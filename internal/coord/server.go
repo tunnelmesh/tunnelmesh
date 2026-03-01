@@ -1217,11 +1217,17 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 	// "remove" op clears from both Objects and Recycled in one atomic update.
 	store.SetOnObjectRemovedCallback(func(bucket, key string) {
 		s.updateListingIndex(bucket, key, nil, "remove")
+		if s.replicator != nil {
+			s.replicator.GetState().Delete(bucket, key)
+		}
 	})
 
 	// Callback for ForceDeleteBucket (file share deletion, orphaned bucket GC).
 	store.SetOnBucketRemovedCallback(func(bucket string) {
 		s.removeListingBucket(bucket)
+		if s.replicator != nil {
+			s.replicator.GetState().DeleteBucket(bucket)
+		}
 	})
 
 	// Create authorizer with group support

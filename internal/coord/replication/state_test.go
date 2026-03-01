@@ -193,6 +193,47 @@ func TestState_Delete(t *testing.T) {
 	assert.Equal(t, 1, state.Count())
 }
 
+func TestState_DeleteBucket(t *testing.T) {
+	state := NewState("coord1")
+
+	// Populate two buckets
+	state.Update("bucket1", "obj1.json")
+	state.Update("bucket1", "obj2.json")
+	state.Update("bucket1", "sub/obj3.json")
+	state.Update("bucket2", "other.json")
+	state.Update("bucket2", "another.json")
+	assert.Equal(t, 5, state.Count())
+
+	// Delete entire bucket1
+	state.DeleteBucket("bucket1")
+
+	// All bucket1 keys should be gone
+	assert.Equal(t, 2, state.Count())
+	assert.Equal(t, 0, len(state.Get("bucket1", "obj1.json")))
+	assert.Equal(t, 0, len(state.Get("bucket1", "obj2.json")))
+	assert.Equal(t, 0, len(state.Get("bucket1", "sub/obj3.json")))
+
+	// bucket2 keys must remain intact
+	assert.Equal(t, uint64(1), state.Get("bucket2", "other.json").Get("coord1"))
+	assert.Equal(t, uint64(1), state.Get("bucket2", "another.json").Get("coord1"))
+
+	// Deleting non-existent bucket is a no-op
+	state.DeleteBucket("bucket1")
+	assert.Equal(t, 2, state.Count())
+
+	// Deleting the remaining bucket leaves state empty
+	state.DeleteBucket("bucket2")
+	assert.Equal(t, 0, state.Count())
+
+	// Bucket name that is a prefix of another bucket name must not collide.
+	// "data/" prefix must not match "data-archive/file.txt".
+	state.Update("data", "file.txt")
+	state.Update("data-archive", "file.txt")
+	state.DeleteBucket("data")
+	assert.Equal(t, 1, state.Count())
+	assert.Equal(t, uint64(1), state.Get("data-archive", "file.txt").Get("coord1"))
+}
+
 func TestState_Clear(t *testing.T) {
 	state := NewState("coord1")
 

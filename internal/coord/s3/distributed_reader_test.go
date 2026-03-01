@@ -19,15 +19,27 @@ import (
 
 // mockReplicator implements ReplicatorInterface for testing.
 type mockReplicator struct {
-	mu       sync.Mutex
-	chunks   map[string][]byte // chunkHash -> chunk data
-	latency  time.Duration     // Simulated fetch latency
-	failPeer string            // If set, FetchChunk returns error for this peer
-	calls    int32             // Atomic call counter
+	mu            sync.Mutex
+	chunks        map[string][]byte // chunkHash -> chunk data
+	latency       time.Duration     // Simulated fetch latency
+	failPeer      string            // If set, FetchChunk returns error for this peer
+	calls         int32             // Atomic call counter
+	concurrent    int32             // Current concurrent calls
+	maxConcurrent int32             // Peak concurrent calls observed
 }
 
 func (m *mockReplicator) FetchChunk(ctx context.Context, peerID, chunkHash string) ([]byte, error) {
 	atomic.AddInt32(&m.calls, 1)
+
+	// Track peak concurrency without timing dependency.
+	cur := atomic.AddInt32(&m.concurrent, 1)
+	defer atomic.AddInt32(&m.concurrent, -1)
+	for {
+		max := atomic.LoadInt32(&m.maxConcurrent)
+		if cur <= max || atomic.CompareAndSwapInt32(&m.maxConcurrent, max, cur) {
+			break
+		}
+	}
 
 	if m.latency > 0 {
 		select {
@@ -395,9 +407,7 @@ func TestDistributedChunkReader_ParallelFetch(t *testing.T) {
 	})
 	defer func() { _ = reader.Close() }()
 
-	start := time.Now()
 	data, err := io.ReadAll(reader)
-	parallelDuration := time.Since(start)
 	require.NoError(t, err)
 
 	// Verify correct data
@@ -407,11 +417,11 @@ func TestDistributedChunkReader_ParallelFetch(t *testing.T) {
 	}
 	assert.Equal(t, expected.String(), string(data))
 
-	// Parallel with 4 workers should be significantly faster than sequential
-	// Sequential: 8 * 50ms = 400ms. Parallel: ~100ms (8 chunks / 4 workers * 50ms)
-	// Use generous threshold to avoid flaky tests on Windows (timer imprecision)
-	assert.Less(t, parallelDuration, 400*time.Millisecond,
-		"Parallel fetch should be faster than sequential (took %v)", parallelDuration)
+	// Verify parallelism by peak concurrency, not wall-clock time.
+	// With 8 chunks, 4 workers, and 50ms latency per fetch, goroutines must overlap.
+	// Even on a slow Windows runner this is deterministic: concurrent sleeps always overlap.
+	assert.GreaterOrEqual(t, int(atomic.LoadInt32(&mockRepl.maxConcurrent)), 2,
+		"Expected parallel fetching (parallelism=4) but peak concurrency was only %d", mockRepl.maxConcurrent)
 }
 
 func TestDistributedChunkReader_OrderedReassembly(t *testing.T) {
