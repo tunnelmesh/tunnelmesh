@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 )
 
 // MeshTransport implements the Transport interface using HTTP to send messages
@@ -84,6 +85,7 @@ func (mt *MeshTransport) SendToCoordinator(ctx context.Context, coordMeshIP stri
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Replication-Protocol", "v1")
+	tracing.InjectHeaders(ctx, req.Header)
 
 	mt.logger.Debug().
 		Str("coordinator", coordMeshIP).

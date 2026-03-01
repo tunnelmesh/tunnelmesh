@@ -1401,6 +1401,7 @@ func (t *Transport) holePunch(ctx context.Context, peerName string, peerAddr *ne
 	if t.config.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+t.config.AuthToken)
 	}
+	tracing.InjectHeaders(ctx, req.Header)
 
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
@@ -1465,6 +1466,7 @@ func (t *Transport) getPeerEndpoint(ctx context.Context, peerName string) (strin
 	if t.config.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+t.config.AuthToken)
 	}
+	tracing.InjectHeaders(ctx, req.Header)
 
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
