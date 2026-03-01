@@ -1680,6 +1680,8 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 
 	// Register reconnect observer for metrics
 	node.Connections.AddObserver(metricsCollector.ReconnectObserver())
+	// Register cleanup observer to remove stale per-peer metric series on terminal disconnect
+	node.Connections.AddObserver(metricsCollector.CleanupObserver())
 
 	// Start metrics collection loop
 	go metricsCollector.Run(ctx, 10*time.Second)

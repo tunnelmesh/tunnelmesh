@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tunnelmesh/tunnelmesh/internal/peer"
 	"github.com/tunnelmesh/tunnelmesh/internal/peer/connection"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
@@ -373,6 +374,24 @@ func (c *Collector) ReconnectObserver() connection.Observer {
 		// Track reconnections: transitioning from Reconnecting to Connected
 		if t.From == connection.StateReconnecting && t.To == connection.StateConnected {
 			c.TrackReconnect(t.PeerName)
+		}
+	})
+}
+
+// CleanupPeer removes all per-peer Prometheus series for peerName.
+// Call when a connection is permanently closed to prevent cardinality growth.
+func (c *Collector) CleanupPeer(peerName string) {
+	c.metrics.ReconnectCount.DeleteLabelValues(peerName)
+	c.metrics.PeerLatencySeconds.DeleteLabelValues(peerName)
+	c.metrics.DroppedFiltered.DeletePartialMatch(prometheus.Labels{"source_peer": peerName})
+}
+
+// CleanupObserver returns a connection observer that removes per-peer metric series
+// when a peer transitions to StateClosed (terminal disconnect).
+func (c *Collector) CleanupObserver() connection.Observer {
+	return connection.ObserverFunc(func(t connection.Transition) {
+		if t.To == connection.StateClosed {
+			c.CleanupPeer(t.PeerName)
 		}
 	})
 }
