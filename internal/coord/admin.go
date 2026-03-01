@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"sort"
 	"strings"
@@ -394,6 +395,13 @@ func (s *Server) setupAdminRoutes() {
 	})
 	// Expose debug trace endpoint on admin interface only (mesh-only access)
 	s.adminMux.HandleFunc("/debug/trace", s.handleTrace)
+
+	// pprof endpoints for heap profiling (admin/mesh-only access via adminMux)
+	s.adminMux.HandleFunc("/debug/pprof/", pprof.Index)
+	s.adminMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	s.adminMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	s.adminMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	s.adminMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	// Peer site hosting (serves files from peer shares as web pages)
 	s.adminMux.HandleFunc("/peers/", s.handlePeerSite)

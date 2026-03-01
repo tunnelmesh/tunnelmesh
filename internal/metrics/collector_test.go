@@ -851,3 +851,115 @@ func TestCollector_CollectFilteredDrops(t *testing.T) {
 		}
 	}
 }
+
+func TestCollector_CleanupPeer(t *testing.T) {
+	oldRegistry := Registry
+	Registry = prometheus.NewRegistry()
+	defer func() { Registry = oldRegistry }()
+
+	Registry.MustRegister(collectors.NewGoCollector())
+	Registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	m := InitMetrics("test-peer", "10.42.0.1", "1.0.0")
+	c := NewCollector(m, CollectorConfig{})
+
+	// Populate per-peer series
+	c.TrackReconnect("peer-a")
+	c.TrackReconnect("peer-b")
+	c.metrics.PeerLatencySeconds.WithLabelValues("peer-a").Set(0.01)
+	c.metrics.PeerLatencySeconds.WithLabelValues("peer-b").Set(0.02)
+	c.TrackFilterDrop(6, "peer-a")
+	c.TrackFilterDrop(17, "peer-a")
+	c.TrackFilterDrop(6, "peer-b")
+
+	// Verify series exist before cleanup
+	mfs, _ := Registry.Gather()
+	reconnectsBefore := 0
+	for _, mf := range mfs {
+		if mf.GetName() == "tunnelmesh_reconnects_total" {
+			reconnectsBefore = len(mf.GetMetric())
+		}
+	}
+	assert.Equal(t, 2, reconnectsBefore, "Expected 2 reconnect series before cleanup")
+
+	// Clean up peer-a
+	c.CleanupPeer("peer-a")
+
+	mfs, _ = Registry.Gather()
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "tunnelmesh_reconnects_total":
+			assert.Equal(t, 1, len(mf.GetMetric()), "Expected 1 reconnect series after cleanup")
+			labels := make(map[string]string)
+			for _, l := range mf.GetMetric()[0].GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			assert.Equal(t, "peer-b", labels["target_peer"])
+		case "tunnelmesh_peer_udp_latency_seconds":
+			assert.Equal(t, 1, len(mf.GetMetric()), "Expected 1 latency series after cleanup")
+			labels := make(map[string]string)
+			for _, l := range mf.GetMetric()[0].GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			assert.Equal(t, "peer-b", labels["target_peer"])
+		case "tunnelmesh_dropped_filtered_total":
+			for _, metric := range mf.GetMetric() {
+				labels := make(map[string]string)
+				for _, l := range metric.GetLabel() {
+					labels[l.GetName()] = l.GetValue()
+				}
+				assert.NotEqual(t, "peer-a", labels["source_peer"], "peer-a series should be deleted")
+			}
+		}
+	}
+}
+
+func TestCollector_CleanupObserver(t *testing.T) {
+	oldRegistry := Registry
+	Registry = prometheus.NewRegistry()
+	defer func() { Registry = oldRegistry }()
+
+	Registry.MustRegister(collectors.NewGoCollector())
+	Registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	m := InitMetrics("test-peer", "10.42.0.1", "1.0.0")
+	c := NewCollector(m, CollectorConfig{})
+
+	// Populate reconnect series
+	c.TrackReconnect("peer-x")
+	c.TrackReconnect("peer-y")
+
+	observer := c.CleanupObserver()
+
+	// Non-terminal transition should not clean up
+	observer.OnTransition(connection.Transition{
+		PeerName: "peer-x",
+		From:     connection.StateConnected,
+		To:       connection.StateReconnecting,
+	})
+
+	mfs, _ := Registry.Gather()
+	reconnectsAfterNonTerminal := 0
+	for _, mf := range mfs {
+		if mf.GetName() == "tunnelmesh_reconnects_total" {
+			reconnectsAfterNonTerminal = len(mf.GetMetric())
+		}
+	}
+	assert.Equal(t, 2, reconnectsAfterNonTerminal, "Non-terminal transition should not remove series")
+
+	// StateClosed transition should clean up
+	observer.OnTransition(connection.Transition{
+		PeerName: "peer-x",
+		From:     connection.StateReconnecting,
+		To:       connection.StateClosed,
+	})
+
+	mfs, _ = Registry.Gather()
+	reconnectsAfterClose := 0
+	for _, mf := range mfs {
+		if mf.GetName() == "tunnelmesh_reconnects_total" {
+			reconnectsAfterClose = len(mf.GetMetric())
+		}
+	}
+	assert.Equal(t, 1, reconnectsAfterClose, "StateClosed should remove peer series")
+}
