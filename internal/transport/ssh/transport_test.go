@@ -9,29 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	otelcodes "go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/tunnelmesh/tunnelmesh/internal/transport"
+	"github.com/tunnelmesh/tunnelmesh/testutil"
 )
-
-func initSSHTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
-	t.Helper()
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	return exp, func() {
-		_ = tp.Shutdown(context.Background())
-		otel.SetTracerProvider(prev)
-	}
-}
 
 // newTestTransport creates an SSH transport with throwaway ed25519 keys.
 func newTestTransport(t *testing.T) *Transport {
@@ -65,7 +49,7 @@ func newTestTransport(t *testing.T) *Transport {
 // TestSSHDial_EmitsSpan verifies that Dial emits an ssh.dial span with the
 // peer.name and ssh.addr attributes, even when the connection is refused.
 func TestSSHDial_EmitsSpan(t *testing.T) {
-	exp, cleanup := initSSHTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr := newTestTransport(t)
@@ -113,7 +97,7 @@ func TestSSHDial_EmitsSpan(t *testing.T) {
 // TestSSHDial_SpanRecordsErrorOnFailure verifies that when the SSH connection
 // is refused the span status is set to Error.
 func TestSSHDial_SpanRecordsErrorOnFailure(t *testing.T) {
-	exp, cleanup := initSSHTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr := newTestTransport(t)
@@ -143,7 +127,7 @@ func TestSSHDial_SpanRecordsErrorOnFailure(t *testing.T) {
 // TestSSHDial_SpanEndsOnTimeout verifies that when the context deadline fires
 // while the SSH handshake is in progress the span has Error status and ends.
 func TestSSHDial_SpanEndsOnTimeout(t *testing.T) {
-	exp, cleanup := initSSHTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	// Listen but never speak SSH so the handshake blocks.

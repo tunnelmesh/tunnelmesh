@@ -22,6 +22,7 @@ const (
 	PanelGroups     = "groups"
 	PanelBindings   = "bindings"
 	PanelDocker     = "docker"
+	PanelTracing    = "tracing"
 )
 
 // Panel tabs
@@ -81,6 +82,7 @@ func (r *PanelRegistry) registerBuiltinPanels() {
 		{ID: PanelAlerts, Name: "Active Alerts", Tab: PanelTabMesh, Category: PanelCategoryMonitoring, SortOrder: 35, Builtin: true},
 		{ID: PanelPeers, Name: "Connected Peers", Tab: PanelTabMesh, Category: PanelCategoryNetwork, SortOrder: 40, Builtin: true},
 		{ID: PanelLogs, Name: "Peer Logs", Tab: PanelTabMesh, Category: PanelCategoryMonitoring, SortOrder: 50, Builtin: true},
+		{ID: PanelTracing, Name: "Recent Traces", Tab: PanelTabMesh, Category: PanelCategoryMonitoring, SortOrder: 60, Builtin: true},
 		{ID: PanelFilter, Name: "Packet Filter", Tab: PanelTabMesh, Category: PanelCategoryAdmin, SortOrder: 70, Builtin: true},
 
 		// App tab panels
@@ -319,7 +321,7 @@ func (r *PanelRegistry) Update(id string, update PanelDefinition) error {
 func BuiltinPanelIDs() []string {
 	return []string{
 		PanelVisualizer, PanelMap, PanelAlerts, PanelPeers,
-		PanelLogs, PanelFilter, PanelDNS,
+		PanelLogs, PanelTracing, PanelFilter, PanelDNS,
 		PanelS3, PanelShares, PanelPeerMgmt, PanelGroups, PanelBindings, PanelDocker,
 	}
 }
@@ -335,7 +337,7 @@ func DefaultPeerPanels() []string {
 // Note: Admins also inherit all panels from DefaultPeerPanels (alerts, visualizer, etc.)
 func DefaultAdminPanels() []string {
 	return []string{
-		PanelPeers, PanelLogs, PanelFilter, PanelDNS,
+		PanelPeers, PanelLogs, PanelTracing, PanelFilter, PanelDNS,
 		PanelPeerMgmt, PanelGroups, PanelBindings, PanelDocker,
 	}
 }

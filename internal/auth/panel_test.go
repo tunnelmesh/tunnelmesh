@@ -14,7 +14,7 @@ func TestPanelRegistry_BuiltinPanels(t *testing.T) {
 
 	// Should have all built-in panels
 	panels := registry.List()
-	assert.Len(t, panels, 13) // visualizer, map, alerts, peers, logs, filter, dns, s3, shares, users, groups, bindings, docker
+	assert.Len(t, panels, 14) // visualizer, map, alerts, peers, logs, tracing, filter, dns, s3, shares, users, groups, bindings, docker
 
 	// Check specific panels exist
 	assert.NotNil(t, registry.Get(PanelVisualizer))
@@ -45,8 +45,8 @@ func TestPanelRegistry_ListByTab(t *testing.T) {
 	// Data tab should have: peers-mgmt, groups, bindings, dns
 	assert.Len(t, dataPanels, 4)
 
-	// Mesh tab should have: visualizer, map, alerts, peers, logs, filter
-	assert.Len(t, meshPanels, 6)
+	// Mesh tab should have: visualizer, map, alerts, peers, logs, tracing, filter
+	assert.Len(t, meshPanels, 7)
 }
 
 func TestPanelRegistry_RegisterExternal(t *testing.T) {
@@ -222,7 +222,7 @@ func TestAuthorizer_GetAccessiblePanels_Admin(t *testing.T) {
 	auth.Bindings.Add(NewRoleBinding("alice", RoleAdmin, ""))
 
 	panels := auth.GetAccessiblePanels("alice")
-	assert.Len(t, panels, 13) // All built-in panels
+	assert.Len(t, panels, 14) // All built-in panels
 }
 
 func TestAuthorizer_GetAccessiblePanels_DirectBindings(t *testing.T) {
@@ -284,7 +284,7 @@ func TestAuthorizer_GetAccessiblePanels_AdminViaGroup(t *testing.T) {
 
 	// admins should get all panels via IsAdmin check
 	panels := auth.GetAccessiblePanels("alice")
-	assert.Len(t, panels, 13) // All panels
+	assert.Len(t, panels, 14) // All panels
 }
 
 // --- Default panel tests ---
@@ -303,6 +303,7 @@ func TestDefaultAdminPanels(t *testing.T) {
 	defaults := DefaultAdminPanels()
 	assert.Contains(t, defaults, PanelPeers)
 	assert.Contains(t, defaults, PanelLogs)
+	assert.Contains(t, defaults, PanelTracing)
 	assert.Contains(t, defaults, PanelPeerMgmt)
 	assert.Contains(t, defaults, PanelBindings)
 	assert.NotContains(t, defaults, PanelS3)

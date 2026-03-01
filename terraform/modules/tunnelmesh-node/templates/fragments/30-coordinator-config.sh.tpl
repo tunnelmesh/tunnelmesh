@@ -20,6 +20,7 @@ coordinator:
   monitoring:
     prometheus_url: "${prometheus_url}"
     grafana_url: "${grafana_url}"
+    otlp_endpoint: "${otlp_endpoint}"
 %{ endif ~}
 
 %{ if peer_enabled ~}

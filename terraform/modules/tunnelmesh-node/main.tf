@@ -95,6 +95,10 @@ locals {
     prometheus_image_tag      = var.prometheus_image_tag
     loki_image_tag            = var.loki_image_tag
     grafana_image_tag         = var.grafana_image_tag
+    tempo_image_tag           = var.tempo_image_tag
+    tempo_retention_hours     = var.tempo_retention_hours
+    tempo_url                 = var.monitoring_enabled ? "http://localhost:3200" : ""
+    otlp_endpoint             = var.monitoring_enabled ? "http://localhost:4318" : ""
   })
 }
 

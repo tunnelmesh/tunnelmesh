@@ -10,6 +10,7 @@ import (
 )
 
 // initTestTracer sets up a tracer provider with synchronous in-memory export.
+// Uses noLeadingZeroIDGenerator to match production InitOTel behaviour.
 // Returns the exporter (to inspect spans) and a cleanup function.
 func initTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
 	t.Helper()
@@ -17,6 +18,7 @@ func initTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSyncer(exp),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithIDGenerator(&noLeadingZeroIDGenerator{}),
 	)
 	prev := otel.GetTracerProvider()
 	otel.SetTracerProvider(tp)

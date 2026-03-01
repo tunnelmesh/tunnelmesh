@@ -4,11 +4,54 @@ echo "Setting up monitoring stack via Docker Compose..."
 # Create host directories
 mkdir -p /opt/monitoring/prometheus
 mkdir -p /opt/monitoring/loki
+mkdir -p /opt/monitoring/tempo
 mkdir -p /opt/monitoring/grafana/provisioning/datasources
 mkdir -p /opt/monitoring/grafana/provisioning/dashboards
 mkdir -p /opt/monitoring/grafana/dashboards
 mkdir -p /opt/monitoring/targets
 chown 65534:65534 /opt/monitoring/targets  # sd-generator runs as nobody (UID 65534)
+
+# Write tempo config
+# NOTE: This heredoc is intentionally unquoted (<<TEMPOCONFIG not <<'TEMPOCONFIG')
+# so Terraform can substitute ${tempo_retention_hours}.
+cat > /opt/monitoring/tempo/tempo.yaml <<TEMPOCONFIG
+stream_over_http_enabled: true
+server:
+  http_listen_port: 3200
+  http_listen_address: 127.0.0.1
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 127.0.0.1:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+compactor:
+  compaction:
+    block_retention: ${tempo_retention_hours}h
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [local-blocks]
+      generate_native_histograms: both
+TEMPOCONFIG
 
 # Write prometheus config
 cat > /opt/monitoring/prometheus/prometheus.yml <<'PROMCONFIG'
@@ -310,6 +353,15 @@ services:
       - /opt/monitoring/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
 
+  tempo:
+    image: grafana/tempo:${tempo_image_tag}
+    network_mode: host
+    restart: unless-stopped
+    command: -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - /opt/monitoring/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
   grafana:
     image: grafana/grafana:${grafana_image_tag}
     network_mode: host
@@ -333,6 +385,7 @@ services:
 volumes:
   prometheus-data:
   loki-data:
+  tempo-data:
   grafana-data:
 COMPOSEEOF
 
@@ -351,6 +404,20 @@ for i in $(seq 1 36); do
   if [ "$i" -eq 36 ]; then
     echo "Error: Loki did not become ready after 3 minutes"
     exit 1
+  fi
+  sleep 5
+done
+
+# Wait for Tempo to be ready (non-fatal: traces are best-effort)
+echo "Waiting for Tempo to become ready..."
+for i in $(seq 1 36); do
+  if curl -sf http://127.0.0.1:3200/ready > /dev/null 2>&1; then
+    echo "Tempo is ready"
+    break
+  fi
+  if [ "$i" -eq 36 ]; then
+    echo "Warning: Tempo did not become ready after 3 minutes"
+    break
   fi
   sleep 5
 done

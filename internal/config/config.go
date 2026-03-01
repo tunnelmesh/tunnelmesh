@@ -16,6 +16,7 @@ import (
 type MonitoringConfig struct {
 	PrometheusURL string `yaml:"prometheus_url"` // URL to proxy /prometheus/ to (e.g., "http://localhost:9090")
 	GrafanaURL    string `yaml:"grafana_url"`    // URL to proxy /grafana/ to (e.g., "http://localhost:3000")
+	OTLPEndpoint  string `yaml:"otlp_endpoint"`  // OTLP HTTP endpoint for distributed tracing (e.g., "http://127.0.0.1:4318")
 }
 
 // RelayConfig holds configuration for the relay server.
