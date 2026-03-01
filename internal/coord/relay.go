@@ -801,13 +801,13 @@ func (s *Server) handlePersistentRelay(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		s.handlePersistentRelayMessage(peerName, data)
+		s.handlePersistentRelayMessage(r.Context(), peerName, data)
 	}
 }
 
 // handlePersistentRelayMessage processes a message from a persistent relay connection.
 // nolint:gocyclo // Relay message handler processes multiple message types
-func (s *Server) handlePersistentRelayMessage(sourcePeer string, data []byte) {
+func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer string, data []byte) {
 	if len(data) < 1 {
 		log.Debug().Str("peer", sourcePeer).Msg("persistent relay message too short")
 		return
@@ -832,7 +832,7 @@ func (s *Server) handlePersistentRelayMessage(sourcePeer string, data []byte) {
 		// Span wraps the heartbeat processing (parse + store + metrics + ack).
 		// Using background context: heartbeats arrive on a hot loop but are low-frequency
 		// per-peer (~every 30s), so overhead is negligible.
-		_, hbSpan := tracing.Tracer("tunnelmesh/coord").Start(context.Background(), "coord.heartbeat")
+		_, hbSpan := tracing.Tracer("tunnelmesh/coord").Start(ctx, "coord.heartbeat")
 		hbSpan.SetAttributes(attribute.String("peer.name", sourcePeer))
 
 		// Parse stats

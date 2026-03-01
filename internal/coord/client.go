@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -199,13 +200,13 @@ func (c *Client) GetDNSRecords() ([]proto.DNSRecord, error) {
 	return result.Records, nil
 }
 
-func (c *Client) doRequest(method, path string, body []byte) (*http.Response, error) {
+func (c *Client) doRequestWithContext(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -214,8 +215,14 @@ func (c *Client) doRequest(method, path string, body []byte) (*http.Response, er
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	tracing.InjectHeaders(ctx, req.Header)
 
 	return c.client.Do(req)
+}
+
+// doRequest keeps existing callers working; new callers should use doRequestWithContext.
+func (c *Client) doRequest(method, path string, body []byte) (*http.Response, error) {
+	return c.doRequestWithContext(context.Background(), method, path, body)
 }
 
 func (c *Client) parseError(resp *http.Response) error {
@@ -273,14 +280,14 @@ func (c *Client) CheckRelayRequests() ([]string, error) {
 	return result.RelayRequests, nil
 }
 
-// doRequestWithJWT makes an HTTP request with JWT authentication.
-func (c *Client) doRequestWithJWT(method, path string, body []byte) (*http.Response, error) {
+// doRequestWithJWTContext makes an HTTP request with JWT authentication and context.
+func (c *Client) doRequestWithJWTContext(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -289,6 +296,12 @@ func (c *Client) doRequestWithJWT(method, path string, body []byte) (*http.Respo
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	tracing.InjectHeaders(ctx, req.Header)
 
 	return c.client.Do(req)
+}
+
+// doRequestWithJWT makes an HTTP request with JWT authentication.
+func (c *Client) doRequestWithJWT(method, path string, body []byte) (*http.Response, error) {
+	return c.doRequestWithJWTContext(context.Background(), method, path, body)
 }
