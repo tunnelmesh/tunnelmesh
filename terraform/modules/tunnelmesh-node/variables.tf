@@ -233,6 +233,18 @@ variable "prometheus_retention_days" {
   default     = 3
 }
 
+variable "tempo_image_tag" {
+  description = "Tempo Docker image tag (e.g. 2.9.0)"
+  type        = string
+  default     = "2.9.0"
+}
+
+variable "tempo_retention_hours" {
+  description = "Tempo trace retention in hours"
+  type        = number
+  default     = 72
+}
+
 variable "ssh_private_key_path" {
   description = "Path to SSH private key for provisioners. Empty string uses SSH agent."
   type        = string

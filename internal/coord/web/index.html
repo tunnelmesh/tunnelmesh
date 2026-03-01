@@ -555,6 +555,17 @@
             </div>
         </section>
 
+        <!-- Traces section - admin-only, shows recent distributed traces from Tempo -->
+        <section id="traces-section" data-tab="mesh" class="logs-card" style="display: none;">
+            <h2 class="section-toggle" onclick="toggleSection(this)">Recent Traces</h2>
+            <div class="collapsible-content">
+                <a id="traces-link" class="logs-container clickable-card" href="/grafana/explore">
+                    <div id="traces-content"></div>
+                    <div id="no-traces" class="empty-state">No traces available</div>
+                </a>
+            </div>
+        </section>
+
     </main>
 
     <!-- Container for external plugin panels -->

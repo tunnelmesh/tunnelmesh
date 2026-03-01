@@ -472,6 +472,24 @@ func runJoinFromService(ctx context.Context, configPath string) error {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable")
 	}
 
+	// Initialize OTel distributed tracing if configured
+	if cfg.Coordinator.Monitoring.OTLPEndpoint != "" {
+		otelCtx, otelCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer otelCancel()
+		if err := tracing.InitOTel(otelCtx, "tunnelmesh", Version, cfg.Coordinator.Monitoring.OTLPEndpoint); err != nil {
+			log.Warn().Err(err).Str("endpoint", cfg.Coordinator.Monitoring.OTLPEndpoint).Msg("failed to initialize OTel tracing")
+		} else {
+			log.Info().Str("endpoint", cfg.Coordinator.Monitoring.OTLPEndpoint).Msg("OTel distributed tracing enabled")
+			defer func() {
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer shutCancel()
+				if err := tracing.ShutdownOTel(shutCtx); err != nil {
+					log.Warn().Err(err).Msg("failed to shutdown OTel tracing")
+				}
+			}()
+		}
+	}
+
 	// Log network interface information for debugging
 	interfaces, _ := net.Interfaces()
 	for _, iface := range interfaces {

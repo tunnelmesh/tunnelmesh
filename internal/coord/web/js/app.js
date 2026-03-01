@@ -10,7 +10,7 @@ const { createSparklineSVG } = TM.table;
 const { createModalController } = TM.modal;
 
 // Panel refresh lists - defines which panels to refresh for each tab
-const PANELS_MESH_TAB = ['peers', 'logs', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
+const PANELS_MESH_TAB = ['peers', 'logs', 'tracing', 'alerts', 'filter']; // Mesh tab panels (visualizer/map loaded via fetchData)
 const PANELS_APP_TAB = ['s3', 'shares', 'docker']; // App tab panels
 const PANELS_DATA_TAB = ['peers-mgmt', 'groups', 'bindings', 'dns']; // Data tab panels
 
@@ -70,6 +70,9 @@ const state = {
     peerAlerts: {}, // { peerName: { warning: count, critical: count, page: count } }
     // Loki logs state
     lokiEnabled: false,
+    // Tempo tracing state
+    tempoEnabled: false,
+    tempoDatasourceUid: null,
 };
 
 // Initialize DOM cache - call once on DOMContentLoaded
@@ -813,6 +816,152 @@ function formatLogJson(obj) {
     return `{${parts.join(',')}}`;
 }
 
+// Tempo distributed tracing
+let tempoRetryTimer = null;
+async function checkTempoAvailable() {
+    // If already enabled, just refresh traces instead of re-checking
+    if (state.tempoEnabled) {
+        fetchTraces();
+        return;
+    }
+
+    // Cancel any pending retry; we're running the check right now
+    if (tempoRetryTimer) {
+        clearTimeout(tempoRetryTimer);
+        tempoRetryTimer = null;
+    }
+
+    try {
+        // First get the Tempo datasource info from Grafana
+        const dsResp = await fetch('/grafana/api/datasources/name/Tempo');
+        if (!dsResp.ok) {
+            console.warn(`Tempo check: datasource API returned HTTP ${dsResp.status} (Grafana not ready?)`);
+            tempoRetryTimer = setTimeout(checkTempoAvailable, 30000);
+            return;
+        }
+        const dsInfo = await dsResp.json();
+        state.tempoDatasourceUid = dsInfo.uid;
+
+        // Verify Tempo is reachable via the datasource health endpoint
+        const healthResp = await fetch(`/grafana/api/datasources/uid/${dsInfo.uid}/health`);
+        const healthData = healthResp.ok ? await healthResp.json() : null;
+        if (healthResp.ok && healthData?.status === 'OK') {
+            state.tempoEnabled = true;
+            updateTempoExploreLink();
+            fetchTraces();
+            setInterval(fetchTraces, POLL_INTERVAL_MS);
+        } else {
+            console.warn(
+                `Tempo check: health endpoint returned HTTP ${healthResp.status} status=${healthData?.status} (Tempo not ready?)`,
+            );
+            tempoRetryTimer = setTimeout(checkTempoAvailable, 30000);
+        }
+    } catch (err) {
+        console.warn('Tempo check failed:', err.message);
+        tempoRetryTimer = setTimeout(checkTempoAvailable, 30000);
+    }
+}
+
+function updateTempoExploreLink() {
+    const tracesLink = document.getElementById('traces-link');
+    if (!tracesLink) return;
+
+    // Build Grafana 10+ explore URL with Tempo TraceQL query
+    const now = Date.now();
+    const from = now - 3600000; // 1 hour ago
+    const dsUid = state.tempoDatasourceUid || 'tempo';
+    const panesParam = encodeURIComponent(
+        JSON.stringify({
+            abc: {
+                datasource: dsUid,
+                queries: [{ refId: 'A', query: '{}', queryType: 'traceql' }],
+                range: { from: String(from), to: String(now) },
+            },
+        }),
+    );
+    tracesLink.href = `/grafana/explore?schemaVersion=1&panes=${panesParam}&orgId=1`;
+}
+
+async function fetchTraces() {
+    if (!state.tempoEnabled || !state.tempoDatasourceUid) return;
+
+    try {
+        const now = Math.floor(Date.now() / 1000);
+        const oneHourAgo = now - 3600;
+
+        const resp = await fetch(
+            `/grafana/api/datasources/uid/${state.tempoDatasourceUid}/resources/api/search?limit=20&start=${oneHourAgo}&end=${now}`,
+        );
+        if (!resp.ok) {
+            console.error('Tempo search failed:', resp.status, await resp.text().catch(() => ''));
+            return;
+        }
+
+        const data = await resp.json();
+        displayTraces(data);
+    } catch (err) {
+        console.error('Failed to fetch traces:', err);
+    }
+}
+
+function displayTraces(data) {
+    const tracesContent = document.getElementById('traces-content');
+    const noTraces = document.getElementById('no-traces');
+    if (!tracesContent) return;
+
+    const traces = data.traces || [];
+
+    if (traces.length === 0) {
+        tracesContent.innerHTML = '';
+        if (noTraces) noTraces.style.display = 'block';
+        return;
+    }
+
+    if (noTraces) noTraces.style.display = 'none';
+
+    const now = Date.now();
+
+    const html = traces
+        .map((trace) => {
+            // Tempo returns startTimeUnixNano as a string
+            const startMs = Number(trace.startTimeUnixNano) / 1e6;
+            const ageMs = now - startMs;
+            let ageStr;
+            if (ageMs < 60000) {
+                ageStr = `${Math.round(ageMs / 1000)}s ago`;
+            } else if (ageMs < 3600000) {
+                ageStr = `${Math.round(ageMs / 60000)}m ago`;
+            } else {
+                ageStr = `${Math.round(ageMs / 3600000)}h ago`;
+            }
+
+            const durationStr =
+                trace.durationMs >= 1000
+                    ? `${(trace.durationMs / 1000).toFixed(1)}s`
+                    : `${trace.durationMs}ms`;
+
+            const dsUid = state.tempoDatasourceUid || 'tempo';
+            const traceUrl = `/grafana/explore?schemaVersion=1&panes=${encodeURIComponent(
+                JSON.stringify({
+                    abc: {
+                        datasource: dsUid,
+                        queries: [{ refId: 'A', query: trace.traceID, queryType: 'traceId' }],
+                        range: { from: 'now-1h', to: 'now' },
+                    },
+                }),
+            )}&orgId=1`;
+
+            return `<div class="log-entry">
+            <span class="log-timestamp">${escapeHtml(ageStr)}</span>
+            <span class="log-level info">${escapeHtml(trace.rootTraceName || '')}</span>
+            <span class="log-message"><a href="${traceUrl}" target="_blank" rel="noopener">${escapeHtml(trace.rootServiceName || '')} &mdash; ${escapeHtml(durationStr)}</a></span>
+        </div>`;
+        })
+        .join('');
+
+    tracesContent.innerHTML = html;
+}
+
 async function fetchAlerts() {
     if (!state.alertsEnabled) return;
 
@@ -1292,6 +1441,15 @@ function registerBuiltinPanels() {
             sortOrder: 50,
         },
         {
+            id: 'tracing',
+            sectionId: 'traces-section',
+            tab: 'mesh',
+            title: 'Recent Traces',
+            category: 'monitoring',
+            collapsible: true,
+            sortOrder: 60,
+        },
+        {
             id: 'filter',
             sectionId: 'filter-section',
             tab: 'mesh',
@@ -1422,6 +1580,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Check if Loki is available for logs
     checkLokiAvailable();
+
+    // Check if Tempo is available for distributed traces
+    checkTempoAvailable();
 
     // Load peer management (peers, groups, shares)
     checkPeerManagement();
@@ -1998,6 +2159,7 @@ function initRefreshCoordinator() {
     // Register all panel refresh functions
     TM.refresh.register('peers', () => fetchData(false));
     TM.refresh.register('logs', checkLokiAvailable);
+    TM.refresh.register('tracing', checkTempoAvailable);
     TM.refresh.register('alerts', fetchAlerts);
     TM.refresh.register('filter', loadFilterRules);
     TM.refresh.register('peers-mgmt', fetchPeersMgmt);
