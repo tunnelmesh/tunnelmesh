@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -103,7 +104,17 @@ func isDockerHexID(s string) bool {
 	return true
 }
 
-var globalTracerProvider *sdktrace.TracerProvider
+var (
+	globalTPMu           sync.Mutex
+	globalTracerProvider *sdktrace.TracerProvider
+)
+
+// NewIDGenerator returns the production trace/span ID generator used by InitOTel.
+// Exposed so test helpers (testutil.InitTestTracer) can match production behaviour
+// and avoid leading-zero trace IDs that trip the Tempo search bug (#5395).
+func NewIDGenerator() sdktrace.IDGenerator {
+	return &noLeadingZeroIDGenerator{}
+}
 
 // InitOTel initialises the OpenTelemetry TracerProvider with an OTLP HTTP exporter
 // pointing at the given endpoint URL (e.g. "http://localhost:4318").
@@ -142,26 +153,29 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 		sdktrace.WithSpanProcessor(dockerSpanNameProcessor{}),
 	)
 
+	globalTPMu.Lock()
 	if globalTracerProvider != nil {
 		// Best-effort flush of previous provider before replacing.
 		shutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		_ = globalTracerProvider.Shutdown(shutCtx)
 		cancel()
 	}
-
 	otel.SetTracerProvider(tp)
 	globalTracerProvider = tp
+	globalTPMu.Unlock()
 	return nil
 }
 
 // ShutdownOTel flushes buffered spans and shuts down the TracerProvider.
 // Should be called in a deferred cleanup near program exit.
 func ShutdownOTel(ctx context.Context) error {
-	if globalTracerProvider == nil {
-		return nil
-	}
+	globalTPMu.Lock()
 	tp := globalTracerProvider
 	globalTracerProvider = nil
+	globalTPMu.Unlock()
+	if tp == nil {
+		return nil
+	}
 	return tp.Shutdown(ctx)
 }
 

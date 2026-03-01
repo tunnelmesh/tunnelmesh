@@ -6,26 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	otelcodes "go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-)
 
-func initUDPTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
-	t.Helper()
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	return exp, func() {
-		_ = tp.Shutdown(context.Background())
-		otel.SetTracerProvider(prev)
-	}
-}
+	"github.com/tunnelmesh/tunnelmesh/testutil"
+)
 
 // newHandshakeTestTransport returns a minimal UDP transport ready for unit tests.
 // HandshakeTimeout is set low so tests complete quickly.
@@ -58,7 +42,7 @@ func newHandshakeTestTransport(t *testing.T) (*Transport, *net.UDPConn) {
 // TestInitiateHandshake_EmitsSpan verifies that initiateHandshake emits a
 // udp.handshake.initiate span, even when no peer responds (timeout path).
 func TestInitiateHandshake_EmitsSpan(t *testing.T) {
-	exp, cleanup := initUDPTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr, conn := newHandshakeTestTransport(t)
@@ -79,7 +63,7 @@ func TestInitiateHandshake_EmitsSpan(t *testing.T) {
 // TestInitiateHandshake_SpanHasPeerAttr verifies that the span has the
 // peer.name attribute set to the peer name passed in.
 func TestInitiateHandshake_SpanHasPeerAttr(t *testing.T) {
-	exp, cleanup := initUDPTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr, conn := newHandshakeTestTransport(t)
@@ -107,7 +91,7 @@ func TestInitiateHandshake_SpanHasPeerAttr(t *testing.T) {
 // TestInitiateHandshake_TimeoutRecordsError verifies that when the handshake
 // times out (no response), the span status is set to Error.
 func TestInitiateHandshake_TimeoutRecordsError(t *testing.T) {
-	exp, cleanup := initUDPTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr, conn := newHandshakeTestTransport(t)

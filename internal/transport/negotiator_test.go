@@ -7,28 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-)
 
-// initTestTracer sets up a synchronous in-memory OTel tracer for test span inspection.
-func initTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
-	t.Helper()
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	return exp, func() {
-		_ = tp.Shutdown(context.Background())
-		otel.SetTracerProvider(prev)
-	}
-}
+	"github.com/tunnelmesh/tunnelmesh/testutil"
+)
 
 // mockConn is a minimal transport.Connection for testing.
 type mockConn struct {
@@ -89,7 +73,7 @@ func buildNegotiator(transports ...Transport) (*Negotiator, *Registry) {
 }
 
 func TestNegotiate_EmitsNegotiateSpan(t *testing.T) {
-	exp, cleanup := initTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr := &mockTransport{typ: TransportUDP}
@@ -136,7 +120,7 @@ func TestNegotiate_EmitsNegotiateSpan(t *testing.T) {
 }
 
 func TestNegotiate_EmitsAttemptSpans(t *testing.T) {
-	exp, cleanup := initTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr := &mockTransport{typ: TransportUDP}
@@ -157,7 +141,7 @@ func TestNegotiate_EmitsAttemptSpans(t *testing.T) {
 }
 
 func TestNegotiate_AttemptsAreChildrenOfNegotiate(t *testing.T) {
-	exp, cleanup := initTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr := &mockTransport{typ: TransportUDP}
@@ -188,7 +172,7 @@ func TestNegotiate_AttemptsAreChildrenOfNegotiate(t *testing.T) {
 }
 
 func TestNegotiate_AttemptSpanRecordsErrorOnFailure(t *testing.T) {
-	exp, cleanup := initTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	dialErr := errors.New("connection refused")
@@ -210,7 +194,7 @@ func TestNegotiate_AttemptSpanRecordsErrorOnFailure(t *testing.T) {
 }
 
 func TestNegotiate_NegotiateSpanHasSelectedTransport(t *testing.T) {
-	exp, cleanup := initTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	// First transport fails, second succeeds — exercises fallback path.
@@ -246,7 +230,7 @@ func TestNegotiate_NegotiateSpanHasSelectedTransport(t *testing.T) {
 }
 
 func TestNegotiate_AllSpansEndWithinFunction(t *testing.T) {
-	exp, cleanup := initTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	tr := &mockTransport{typ: TransportUDP}

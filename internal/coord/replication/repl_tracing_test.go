@@ -5,27 +5,10 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
 	otelcodes "go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-)
 
-// initReplTestTracer sets up a synchronous in-memory tracer for span assertions.
-func initReplTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
-	t.Helper()
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	return exp, func() {
-		_ = tp.Shutdown(context.Background())
-		otel.SetTracerProvider(prev)
-	}
-}
+	"github.com/tunnelmesh/tunnelmesh/testutil"
+)
 
 func createReplTracingTest(t *testing.T) (*Replicator, *mockS3Store) {
 	t.Helper()
@@ -50,7 +33,7 @@ func createReplTracingTest(t *testing.T) (*Replicator, *mockS3Store) {
 
 //nolint:dupl
 func TestProcessQueuePut_EmitsSpan(t *testing.T) {
-	exp, cleanup := initReplTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	r, _ := createReplTracingTest(t)
@@ -90,7 +73,7 @@ func TestProcessQueuePut_EmitsSpan(t *testing.T) {
 
 //nolint:dupl
 func TestProcessQueueDelete_EmitsSpan(t *testing.T) {
-	exp, cleanup := initReplTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	r, _ := createReplTracingTest(t)
@@ -128,7 +111,7 @@ func TestProcessQueueDelete_EmitsSpan(t *testing.T) {
 }
 
 func TestProcessQueueDelete_RecordsErrorOnPeerFailure(t *testing.T) {
-	exp, cleanup := initReplTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	transport := newMockTransport()
@@ -173,7 +156,7 @@ func TestProcessQueueDelete_RecordsErrorOnPeerFailure(t *testing.T) {
 }
 
 func TestProcessQueuePut_SpanEndsAfterAllPeers(t *testing.T) {
-	exp, cleanup := initReplTestTracer(t)
+	exp, cleanup := testutil.InitTestTracer(t)
 	defer cleanup()
 
 	r, _ := createReplTracingTest(t)
