@@ -5,6 +5,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/tunnelmesh/tunnelmesh/internal/netmon"
+	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
 // RunNetworkMonitor monitors for network changes and handles them.
@@ -25,6 +26,9 @@ func (m *MeshNode) RunNetworkMonitor(ctx context.Context, events <-chan netmon.E
 // HandleNetworkChange handles a network change event by re-registering with
 // the coordination server and triggering peer discovery.
 func (m *MeshNode) HandleNetworkChange(event netmon.Event) {
+	// Invalidate cached external IP so re-registration uses a fresh address.
+	proto.ResetExternalIPCache()
+
 	log.Info().
 		Str("type", event.Type.String()).
 		Str("interface", event.Interface).

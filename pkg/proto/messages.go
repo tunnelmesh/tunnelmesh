@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -289,10 +290,38 @@ var publicIPServices = []string{
 	"https://icanhazip.com",
 }
 
-// GetExternalIP fetches the public IP address from an external service.
-// This is useful when behind NAT where local interfaces don't show the public IP.
+var (
+	extIPMu    sync.Mutex
+	extIPCache string
+	extIPValid bool
+)
+
+// GetExternalIP returns the cached external IP, fetching it once if not yet known.
+// Call ResetExternalIPCache() to force a re-fetch (e.g., on network change).
 // Returns empty string if the public IP cannot be determined.
 func GetExternalIP() string {
+	extIPMu.Lock()
+	defer extIPMu.Unlock()
+	if extIPValid {
+		return extIPCache
+	}
+	extIPCache = fetchExternalIP()
+	extIPValid = true // cache even "" — don't retry until network change
+	return extIPCache
+}
+
+// ResetExternalIPCache invalidates the cached external IP so the next call re-fetches.
+// Should be called from HandleNetworkChange before GetLocalIPs().
+func ResetExternalIPCache() {
+	extIPMu.Lock()
+	extIPValid = false
+	extIPCache = ""
+	extIPMu.Unlock()
+}
+
+// fetchExternalIP fetches the public IP address from an external service.
+// Returns empty string if the public IP cannot be determined.
+func fetchExternalIP() string {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 	}

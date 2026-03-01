@@ -144,7 +144,7 @@ func interfaceByIndex(index int) (string, error) {
 
 func (m *darwinMonitor) shouldIgnore(event *Event) bool {
 	if event.Interface == "" {
-		return false
+		return true // InterfaceByIndex lookup failed — ignore unidentifiable event
 	}
 
 	for _, pattern := range m.cfg.IgnoreInterfaces {
