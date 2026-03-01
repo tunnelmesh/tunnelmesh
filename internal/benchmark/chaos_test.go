@@ -205,11 +205,12 @@ func TestChaosWriter_LatencyWithJitter(t *testing.T) {
 		durations = append(durations, time.Since(start))
 	}
 
-	// All durations should be between latency-jitter and latency+jitter
-	// Use wider tolerance for CI runners which have variable scheduling delays
+	// All durations should be at least latency-jitter (verifies delay is applied).
+	// Upper bound uses a generous 150ms slack: the exact ceiling isn't meaningful
+	// and CI schedulers can add significant overhead on loaded runners.
 	for _, d := range durations {
 		assert.GreaterOrEqual(t, d, latency-jitter-5*time.Millisecond)
-		assert.LessOrEqual(t, d, latency+jitter+20*time.Millisecond)
+		assert.LessOrEqual(t, d, latency+jitter+150*time.Millisecond)
 	}
 }
 
