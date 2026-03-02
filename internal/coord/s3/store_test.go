@@ -673,7 +673,7 @@ func TestPurgeRecycleBin_RespectsRetention(t *testing.T) {
 		}
 	}
 
-	store.SetRecycleBinRetentionDays(90)
+	store.SetRecycleBinRetentionHours(24)
 	purged := store.PurgeRecycleBin(context.Background())
 	assert.Equal(t, 1, purged, "only old entry should be purged")
 
@@ -695,8 +695,8 @@ func TestPurgeRecycleBin_DisabledWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	_ = store.DeleteObject(context.Background(), "test-bucket", "file.txt")
 
-	// Retention days = 0 means disabled
-	store.SetRecycleBinRetentionDays(0)
+	// Retention hours = 0 means disabled
+	store.SetRecycleBinRetentionHours(0)
 	purged := store.PurgeRecycleBin(context.Background())
 	assert.Equal(t, 0, purged)
 
@@ -2607,7 +2607,12 @@ func (r *trackingChunkRegistry) RegisterShardChunk(hash string, size int64, _, _
 	return r.RegisterChunk(hash, size)
 }
 
-func (r *trackingChunkRegistry) UnregisterChunk(_ string) error { return nil }
+func (r *trackingChunkRegistry) UnregisterChunk(hash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.registered, hash)
+	return nil
+}
 
 func (r *trackingChunkRegistry) GetOwners(_ string) ([]string, error) {
 	return nil, fmt.Errorf("not found")
@@ -3195,4 +3200,86 @@ func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {
 	err := store.UpdateBucketMetadata(ctx, "test", BucketMetadataUpdate{QuotaBytes: &neg})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot be negative")
+}
+
+// TestGetActiveVersionIDs verifies that the method collects version IDs from
+// meta/, versions/, and recyclebin/ — mirroring buildChunkReferenceSet.
+func TestGetActiveVersionIDs(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	// Empty store — should return an empty map without error.
+	ids, err := store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ids, "no buckets yet: should return empty map")
+
+	require.NoError(t, store.CreateBucket(ctx, "bkt", "alice", 2, nil))
+
+	// First write — one live version in meta/.
+	meta1, err := store.PutObject(ctx, "bkt", "obj.txt",
+		bytes.NewReader([]byte("v1 content for version id test")), 30, "text/plain", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, meta1.VersionID)
+
+	ids, err = store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.True(t, ids[meta1.VersionID], "live version ID should appear after first write")
+	assert.Len(t, ids, 1)
+
+	// Second write — v1 moves to versions/, v2 becomes the live meta.
+	meta2, err := store.PutObject(ctx, "bkt", "obj.txt",
+		bytes.NewReader([]byte("v2 content for version id test 2")), 32, "text/plain", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, meta2.VersionID)
+
+	ids, err = store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.True(t, ids[meta1.VersionID], "archived version ID (versions/) should be present")
+	assert.True(t, ids[meta2.VersionID], "live version ID (meta/) should be present")
+	assert.Len(t, ids, 2)
+
+	// Soft-delete v2 — it moves to the recycle bin but chunks remain on disk.
+	// The version ID must still appear so CleanupOrphanedShards does not prematurely
+	// evict EC shard registry entries for the still-live chunks.
+	require.NoError(t, store.DeleteObject(ctx, "bkt", "obj.txt"))
+
+	ids, err = store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.True(t, ids[meta1.VersionID], "archived version ID (versions/) should survive soft-delete")
+	assert.True(t, ids[meta2.VersionID], "soft-deleted version ID (recyclebin/) should remain present")
+}
+
+// TestPurgeObject_UnregistersChunksFromRegistry verifies that PurgeObject removes
+// all chunk entries from the distributed chunk registry (the primary fix for the
+// ascending memory baseline between accordion benchmark runs).
+func TestPurgeObject_UnregistersChunksFromRegistry(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	reg := newTrackingChunkRegistry()
+	store.SetChunkRegistry(reg)
+
+	require.NoError(t, store.CreateBucket(ctx, "bucket", "alice", 2, nil))
+
+	// Put a CDC object so its chunks are registered.
+	content := []byte("hello world purge registry test unique content abc123")
+	_, err := store.PutObject(ctx, "bucket", "obj.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
+	require.NoError(t, err)
+
+	// Confirm at least one chunk was registered.
+	reg.mu.Lock()
+	registeredCount := len(reg.registered)
+	reg.mu.Unlock()
+	require.Greater(t, registeredCount, 0, "PutObject should register chunks in the registry")
+
+	// PurgeObject deletes the object, its chunks (via DeleteUnreferencedChunks), and
+	// must now also unregister them from the chunk registry.
+	err = store.PurgeObject(ctx, "bucket", "obj.txt")
+	require.NoError(t, err)
+
+	reg.mu.Lock()
+	remaining := len(reg.registered)
+	reg.mu.Unlock()
+	assert.Equal(t, 0, remaining,
+		"PurgeObject should unregister all chunk entries from the registry")
 }

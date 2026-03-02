@@ -207,24 +207,24 @@ type ReplicatorInterface interface {
 }
 
 type Store struct {
-	dataDir                 string
-	cas                     *CAS // Content-addressable storage for chunks
-	quota                   *QuotaManager
-	chunkRegistry           ChunkRegistryInterface   // Optional distributed chunk ownership tracking
-	replicator              ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
-	coordinatorID           string                   // Local coordinator ID for version vectors (optional)
-	logger                  zerolog.Logger           // Structured logger
-	onObjectRemovedCallback func(bucket, key string) // Called when an object is permanently removed from disk
-	onBucketRemovedCallback func(bucket string)      // Called when an entire bucket is removed from disk
-	defaultObjectExpiryDays int                      // Days until objects expire (0 = never)
-	defaultShareExpiryDays  int                      // Days until file shares expire (0 = never)
-	recyclebinRetentionDays int                      // Days to retain recycled objects before purging (0 = never purge)
-	versionRetentionDays    int                      // Days to retain object versions (0 = forever)
-	maxVersionsPerObject    int                      // Max versions to keep per object (0 = unlimited)
-	versionRetentionPolicy  VersionRetentionPolicy
-	erasureCodingSemaphore  chan struct{}  // Limits concurrent erasure coding operations (memory safety)
-	bgWg                    sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu                      sync.RWMutex
+	dataDir                  string
+	cas                      *CAS // Content-addressable storage for chunks
+	quota                    *QuotaManager
+	chunkRegistry            ChunkRegistryInterface   // Optional distributed chunk ownership tracking
+	replicator               ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
+	coordinatorID            string                   // Local coordinator ID for version vectors (optional)
+	logger                   zerolog.Logger           // Structured logger
+	onObjectRemovedCallback  func(bucket, key string) // Called when an object is permanently removed from disk
+	onBucketRemovedCallback  func(bucket string)      // Called when an entire bucket is removed from disk
+	defaultObjectExpiryDays  int                      // Days until objects expire (0 = never)
+	defaultShareExpiryDays   int                      // Days until file shares expire (0 = never)
+	recyclebinRetentionHours float64                  // Hours to retain recycled objects before purging (0 = never purge)
+	versionRetentionDays     int                      // Days to retain object versions (0 = forever)
+	maxVersionsPerObject     int                      // Max versions to keep per object (0 = unlimited)
+	versionRetentionPolicy   VersionRetentionPolicy
+	erasureCodingSemaphore   chan struct{}  // Limits concurrent erasure coding operations (memory safety)
+	bgWg                     sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	mu                       sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -2417,18 +2417,19 @@ func (s *Store) PurgeObject(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
-// SetRecycleBinRetentionDays sets the number of days to retain recycled objects before purging.
-func (s *Store) SetRecycleBinRetentionDays(days int) {
+// SetRecycleBinRetentionHours sets the number of hours to retain recycled objects before purging.
+// Fractional values are supported (e.g. 0.167 ≈ 10 minutes). 0 disables purging.
+func (s *Store) SetRecycleBinRetentionHours(hours float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recyclebinRetentionDays = days
+	s.recyclebinRetentionHours = hours
 }
 
-// RecycleBinRetentionDays returns the configured recycle bin retention period in days.
-func (s *Store) RecycleBinRetentionDays() int {
+// RecycleBinRetentionHours returns the configured recycle bin retention period in hours.
+func (s *Store) RecycleBinRetentionHours() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.recyclebinRetentionDays
+	return s.recyclebinRetentionHours
 }
 
 // PurgeRecycleBin removes all recycled objects older than the retention period.
@@ -2436,14 +2437,14 @@ func (s *Store) RecycleBinRetentionDays() int {
 // Returns the number of entries purged.
 func (s *Store) PurgeRecycleBin(ctx context.Context) int {
 	s.mu.RLock()
-	retentionDays := s.recyclebinRetentionDays
+	retentionHours := s.recyclebinRetentionHours
 	s.mu.RUnlock()
 
-	if retentionDays <= 0 {
+	if retentionHours <= 0 {
 		return 0 // Disabled
 	}
 
-	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionHours * float64(time.Hour)))
 	return s.purgeRecycledEntries(ctx, &cutoff)
 }
 
@@ -2853,6 +2854,12 @@ func (s *Store) DeleteUnreferencedChunks(ctx context.Context, chunkHashes []stri
 				s.statsChunkCount.Add(-1)
 				s.statsChunkBytes.Add(-freed)
 				totalFreed += freed
+				if s.chunkRegistry != nil {
+					if err := s.chunkRegistry.UnregisterChunk(hash); err != nil {
+						s.logger.Warn().Str("hash", hash[:8]).Err(err).
+							Msg("failed to unregister chunk from registry after deletion")
+					}
+				}
 			}
 		}
 	}
@@ -3805,6 +3812,93 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 	}
 
 	return referencedChunks
+}
+
+// GetActiveVersionIDs returns the set of all active version IDs across all buckets.
+// It mirrors buildChunkReferenceSet, walking meta/, versions/, and recyclebin/ for
+// each bucket. The recyclebin scan is required: soft-deleted objects still have their
+// chunks on disk, so their EC shard registry entries must not be evicted prematurely.
+func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error) {
+	activeVersionIDs := make(map[string]bool)
+
+	bucketsDir := filepath.Join(s.dataDir, "buckets")
+	bucketEntries, err := os.ReadDir(bucketsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return activeVersionIDs, nil
+		}
+		return nil, fmt.Errorf("read buckets dir: %w", err)
+	}
+
+	for _, bucketEntry := range bucketEntries {
+		select {
+		case <-ctx.Done():
+			return activeVersionIDs, ctx.Err()
+		default:
+		}
+		if !bucketEntry.IsDir() {
+			continue
+		}
+		bucket := bucketEntry.Name()
+
+		// Scan current objects (live versions under meta/) and archived versions.
+		for _, dir := range []string{
+			filepath.Join(bucketsDir, bucket, "meta"),
+			filepath.Join(bucketsDir, bucket, "versions"),
+		} {
+			if walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+					return nil
+				}
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					s.logger.Debug().Err(readErr).Str("path", path).Msg("GetActiveVersionIDs: skipping unreadable object meta file")
+					return nil
+				}
+				var meta ObjectMeta
+				if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
+					activeVersionIDs[meta.VersionID] = true
+				}
+				return nil
+			}); walkErr != nil {
+				s.logger.Debug().Err(walkErr).Str("dir", dir).Msg("GetActiveVersionIDs: object meta walk error")
+			}
+		}
+
+		// Scan recycle bin entries. Soft-deleted objects retain their chunks on disk
+		// until the retention period expires, so their version IDs must be kept active
+		// to prevent premature EC shard registry eviction.
+		recyclebinDir := s.recyclebinPath(bucket)
+		if walkErr := filepath.Walk(recyclebinDir, func(path string, info os.FileInfo, err error) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+				return nil
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				s.logger.Debug().Err(readErr).Str("path", path).Msg("GetActiveVersionIDs: skipping unreadable recyclebin file")
+				return nil
+			}
+			var entry RecycledEntry
+			if json.Unmarshal(data, &entry) == nil && entry.Meta.VersionID != "" {
+				activeVersionIDs[entry.Meta.VersionID] = true
+			}
+			return nil
+		}); walkErr != nil {
+			s.logger.Debug().Err(walkErr).Str("bucket", bucket).Msg("GetActiveVersionIDs: recyclebin walk error")
+		}
+	}
+
+	return activeVersionIDs, nil
 }
 
 // pruneAllExpiredVersionsSimple prunes expired versions across all buckets.

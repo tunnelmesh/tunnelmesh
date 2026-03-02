@@ -1237,8 +1237,12 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 	store.SetDefaultObjectExpiryDays(cfg.Coordinator.S3.ObjectExpiryDays)
 	store.SetDefaultShareExpiryDays(cfg.Coordinator.S3.ShareExpiryDays)
 
-	// Set recycle bin retention config
-	store.SetRecycleBinRetentionDays(cfg.Coordinator.S3.RecycleBinRetentionDays)
+	// Set recycle bin retention config.
+	// Note: recycle_bin_retention_hours: 0 in YAML is treated as "use default" (24h) by LoadPeerConfig,
+	// not as "disable". To disable purging entirely, call SetRecycleBinRetentionHours(0) directly.
+	store.SetRecycleBinRetentionHours(cfg.Coordinator.S3.RecycleBinRetentionHours)
+	log.Info().Float64("recycle_bin_retention_hours", cfg.Coordinator.S3.RecycleBinRetentionHours).
+		Msg("S3 recycle bin retention configured")
 
 	// Set version retention config
 	store.SetVersionRetentionDays(cfg.Coordinator.S3.VersionRetentionDays)

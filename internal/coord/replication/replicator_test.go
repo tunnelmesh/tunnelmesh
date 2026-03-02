@@ -379,6 +379,11 @@ func (m *mockS3Store) GetBucketOwner(_ context.Context, bucket string) string {
 	return ""
 }
 
+func (m *mockS3Store) GetActiveVersionIDs(_ context.Context) (map[string]bool, error) {
+	// Mock does not track version IDs; return empty set.
+	return map[string]bool{}, nil
+}
+
 // splitFirst splits a string at the first occurrence of sep.
 func splitFirst(s string, sep byte) []string {
 	for i := 0; i < len(s); i++ {
@@ -528,6 +533,14 @@ func (m *mockChunkRegistry) AddOwner(hash string, coordID string) error {
 	}
 	m.ownership[hash][coordID] = true
 	return nil
+}
+
+func (m *mockChunkRegistry) CleanupOrphanedShards(_ map[string]bool) int {
+	return 0 // No-op for tests
+}
+
+func (m *mockChunkRegistry) CleanupStaleOwners(_ time.Duration) int {
+	return 0 // No-op for tests
 }
 
 // setOwnership sets chunk ownership for testing.

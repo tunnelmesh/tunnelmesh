@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	s3pkg "github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
@@ -366,13 +367,27 @@ func (r *Replicator) runAutoSyncCycle() {
 		localKeys[bucket] = keys
 	}
 
+	// Build flat active-key set for pruning stale state vectors.
+	// Keys are stored as "bucket/key" to match State's internal format.
+	// Only locally-owned keys are included (replicated buckets are intentionally
+	// excluded — their state vectors would be stale on restart anyway, and the
+	// GCGracePeriod provides a buffer against transient ownership detection errors).
+	activeSet := make(map[string]bool, len(localKeys)*4)
+	for bucket, keys := range localKeys {
+		for _, key := range keys {
+			activeSet[bucket+"/"+key] = true
+		}
+	}
+	if pruned := r.state.PruneDeletedKeys(activeSet, s3pkg.GCGracePeriod); pruned > 0 {
+		r.logger.Info().Int("pruned", pruned).Msg("Auto-sync: pruned stale replication state vectors")
+	}
+
 	var total int
 	for bucket, keys := range localKeys {
 		for _, key := range keys {
 			r.EnqueueReplication(bucket, key, "put")
 			total++
 		}
-		_ = bucket
 	}
 
 	if total > 0 || skippedBuckets > 0 {
@@ -388,6 +403,19 @@ func (r *Replicator) runAutoSyncCycle() {
 	// Only includes locally-owned buckets: each coordinator is authoritative
 	// for its own buckets and should not send manifests for replicated ones.
 	r.sendObjectManifest(ctx, localKeys, peers)
+
+	// Clean up registry entries for erasure-coding shards whose parent file version
+	// has been deleted. This runs every autoSyncInterval (default 5 min), which is
+	// frequent enough to contain registry growth between accordion benchmark runs.
+	if r.chunkRegistry != nil {
+		if activeVersionIDs, err := r.s3.GetActiveVersionIDs(ctx); err == nil {
+			if n := r.chunkRegistry.CleanupOrphanedShards(activeVersionIDs); n > 0 {
+				r.logger.Info().Int("cleaned", n).Msg("Auto-sync: cleaned up orphaned EC shard registry entries")
+			}
+		} else {
+			r.logger.Warn().Err(err).Msg("Auto-sync: failed to get active version IDs for shard cleanup")
+		}
+	}
 }
 
 // sendObjectManifest sends the set of live objects to each peer so they can
