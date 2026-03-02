@@ -220,16 +220,11 @@ func (s *State) LoadSnapshot(data []byte) error {
 	// We only want to load the version vectors to understand remote state
 	// s.nodeID = snapshot.NodeID  // REMOVED: This would corrupt our identity
 	s.vectors = snapshot.Vectors
-
-	// Timestamps are not persisted in snapshots (they're ephemeral). Seed every
-	// loaded entry with time.Now() so PruneDeletedKeys can see them. The
-	// GCGracePeriod window gives the cluster time to re-sync and confirm which
-	// keys are still active before any pruning occurs.
-	now := time.Now()
-	s.lastUpdated = make(map[string]time.Time, len(snapshot.Vectors))
-	for k := range snapshot.Vectors {
-		s.lastUpdated[k] = now
-	}
+	// lastUpdated is intentionally not persisted. Entries loaded here have no
+	// timestamp; PruneDeletedKeys treats missing timestamps as immediately
+	// pruneable (if not in the active set), which is correct — any in-flight
+	// delayed PUTs from before the restart have already timed out.
+	s.lastUpdated = make(map[string]time.Time)
 
 	return nil
 }
@@ -275,18 +270,23 @@ func (s *State) ListKeys() []string {
 }
 
 // PruneDeletedKeys removes version vector entries for keys no longer in the
-// active set whose last update is older than maxAge. This prevents unbounded
-// growth when accordion-style workloads delete and recreate many unique keys.
-// The maxAge grace period ensures in-flight delayed PUT replicas can still be
-// rejected via conflict detection before the tombstone is discarded.
+// active set. Entries that have a known timestamp are kept for maxAge after
+// their last update so that in-flight delayed PUT replicas can still be
+// rejected via conflict detection. Entries with no timestamp (e.g. loaded
+// from a snapshot after a restart) are pruned immediately — any in-flight
+// PUTs from before the restart have already timed out.
 // Returns the number of entries removed.
 func (s *State) PruneDeletedKeys(activeKeys map[string]bool, maxAge time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	pruned := 0
-	for k, ts := range s.lastUpdated {
-		if !activeKeys[k] && time.Since(ts) > maxAge {
+	for k := range s.vectors {
+		if activeKeys[k] {
+			continue
+		}
+		ts, hasTS := s.lastUpdated[k]
+		if !hasTS || time.Since(ts) > maxAge {
 			delete(s.vectors, k)
 			delete(s.lastUpdated, k)
 			pruned++

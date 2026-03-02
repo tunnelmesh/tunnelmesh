@@ -589,9 +589,9 @@ func TestState_PruneDeletedKeys(t *testing.T) {
 }
 
 func TestState_PruneDeletedKeys_LoadSnapshot(t *testing.T) {
-	// Entries loaded from a snapshot have no persisted lastUpdated.
-	// LoadSnapshot must seed lastUpdated for all loaded keys so PruneDeletedKeys
-	// can later clean them up once they age out of the grace period.
+	// Entries loaded from a snapshot have no lastUpdated (timestamps are not
+	// persisted). PruneDeletedKeys must treat missing timestamps as immediately
+	// pruneable so stale post-restart entries don't accumulate indefinitely.
 	original := NewState("coord1")
 	original.Update("bucket", "active.json")
 	original.Update("bucket", "stale.json")
@@ -602,21 +602,17 @@ func TestState_PruneDeletedKeys_LoadSnapshot(t *testing.T) {
 	restored := NewState("coord1")
 	require.NoError(t, restored.LoadSnapshot(data))
 
-	// Both keys should have lastUpdated set after loading
+	// Neither key should have a lastUpdated entry after loading
 	restored.mu.RLock()
 	_, activeHasTS := restored.lastUpdated["bucket/active.json"]
 	_, staleHasTS := restored.lastUpdated["bucket/stale.json"]
 	restored.mu.RUnlock()
 
-	assert.True(t, activeHasTS, "LoadSnapshot should seed lastUpdated for active.json")
-	assert.True(t, staleHasTS, "LoadSnapshot should seed lastUpdated for stale.json")
+	assert.False(t, activeHasTS, "LoadSnapshot should not seed lastUpdated")
+	assert.False(t, staleHasTS, "LoadSnapshot should not seed lastUpdated")
 
-	// Back-date stale.json so it appears old
-	restored.mu.Lock()
-	restored.lastUpdated["bucket/stale.json"] = time.Now().Add(-20 * time.Minute)
-	restored.mu.Unlock()
-
-	// Only active.json is still in the active set
+	// Only active.json is in the active set. stale.json has no timestamp and
+	// is not active, so it must be pruned immediately (no maxAge needed).
 	activeKeys := map[string]bool{"bucket/active.json": true}
 	pruned := restored.PruneDeletedKeys(activeKeys, 10*time.Minute)
 
