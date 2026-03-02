@@ -168,6 +168,7 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 		res := <-results
 		span.AddEvent("replication.peer", trace.WithAttributes(
 			attribute.String("peer.id", res.peerID),
+			attribute.String("peer.name", r.GetPeerName(res.peerID)),
 			attribute.Bool("peer.succeeded", res.err == nil),
 		))
 		if res.err != nil {

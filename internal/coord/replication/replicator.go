@@ -496,6 +496,17 @@ func (r *Replicator) HasPeer(coordMeshIP string) bool {
 	return r.peers[coordMeshIP]
 }
 
+// GetPeerName returns the coordinator name for a given mesh IP, or the mesh IP
+// itself if no name is known.
+func (r *Replicator) GetPeerName(meshIP string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if name := r.peerNames[meshIP]; name != "" {
+		return name
+	}
+	return meshIP
+}
+
 // GetPeers returns a copy of the current peer list.
 func (r *Replicator) GetPeers() []string {
 	r.mu.RLock()
