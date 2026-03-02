@@ -507,6 +507,19 @@ func (r *Replicator) GetPeerName(meshIP string) string {
 	return meshIP
 }
 
+// GetPeerNames returns a snapshot of the mesh-IP → coordinator-name mapping.
+// Callers that need to look up multiple names should prefer this over repeated
+// GetPeerName calls to avoid acquiring the read lock once per peer.
+func (r *Replicator) GetPeerNames() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snapshot := make(map[string]string, len(r.peerNames))
+	for ip, name := range r.peerNames {
+		snapshot[ip] = name
+	}
+	return snapshot
+}
+
 // GetPeers returns a copy of the current peer list.
 func (r *Replicator) GetPeers() []string {
 	r.mu.RLock()
