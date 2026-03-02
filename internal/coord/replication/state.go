@@ -281,6 +281,8 @@ func (s *State) PruneDeletedKeys(activeKeys map[string]bool, maxAge time.Duratio
 	defer s.mu.Unlock()
 
 	pruned := 0
+	// Deleting from a map during range iteration is well-defined in Go:
+	// deleted keys are simply not visited in subsequent iterations.
 	for k := range s.vectors {
 		if activeKeys[k] {
 			continue

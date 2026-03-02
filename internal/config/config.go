@@ -52,7 +52,7 @@ type S3Config struct {
 	MaxObjectSize            bytesize.Size          `yaml:"max_object_size"`             // Maximum size per individual object upload (e.g., "1Gi", "500Mi") - defaults to 1Gi
 	ObjectExpiryDays         int                    `yaml:"object_expiry_days"`          // Days until objects expire (default: 9125 = 25 years)
 	ShareExpiryDays          int                    `yaml:"share_expiry_days"`           // Days until file shares expire (default: 365 = 1 year)
-	RecycleBinRetentionHours float64                `yaml:"recycle_bin_retention_hours"` // Hours to keep recycled items before deletion (default: 24h; fractions OK, e.g. 0.167 = 10 min)
+	RecycleBinRetentionHours float64                `yaml:"recycle_bin_retention_hours"` // Hours to keep recycled items before deletion (default: 24h; fractions OK, e.g. 0.167 = 10 min). Note: YAML 0 is treated as "use default" — to disable purging entirely, set store.SetRecycleBinRetentionHours(0) programmatically.
 	VersionRetentionDays     int                    `yaml:"version_retention_days"`      // Days to keep object versions (default: 30)
 	MaxVersionsPerObject     int                    `yaml:"max_versions_per_object"`     // Max versions to keep per object (default: 100, 0 = unlimited)
 	VersionRetention         VersionRetentionConfig `yaml:"version_retention"`           // Tiered version retention policy

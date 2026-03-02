@@ -3841,55 +3841,40 @@ func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error
 		}
 		bucket := bucketEntry.Name()
 
-		// Scan current objects (live versions under meta/).
-		metaDir := filepath.Join(bucketsDir, bucket, "meta")
-		_ = filepath.Walk(metaDir, func(path string, info os.FileInfo, err error) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+		// Scan current objects (live versions under meta/) and archived versions.
+		for _, dir := range []string{
+			filepath.Join(bucketsDir, bucket, "meta"),
+			filepath.Join(bucketsDir, bucket, "versions"),
+		} {
+			if walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+					return nil
+				}
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					s.logger.Debug().Err(readErr).Str("path", path).Msg("GetActiveVersionIDs: skipping unreadable object meta file")
+					return nil
+				}
+				var meta ObjectMeta
+				if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
+					activeVersionIDs[meta.VersionID] = true
+				}
 				return nil
+			}); walkErr != nil {
+				s.logger.Debug().Err(walkErr).Str("dir", dir).Msg("GetActiveVersionIDs: object meta walk error")
 			}
-			data, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return nil
-			}
-			var meta ObjectMeta
-			if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
-				activeVersionIDs[meta.VersionID] = true
-			}
-			return nil
-		})
-
-		// Scan archived versions (under versions/).
-		versionsDir := filepath.Join(bucketsDir, bucket, "versions")
-		_ = filepath.Walk(versionsDir, func(path string, info os.FileInfo, err error) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
-				return nil
-			}
-			data, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return nil
-			}
-			var meta ObjectMeta
-			if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
-				activeVersionIDs[meta.VersionID] = true
-			}
-			return nil
-		})
+		}
 
 		// Scan recycle bin entries. Soft-deleted objects retain their chunks on disk
 		// until the retention period expires, so their version IDs must be kept active
 		// to prevent premature EC shard registry eviction.
 		recyclebinDir := s.recyclebinPath(bucket)
-		_ = filepath.Walk(recyclebinDir, func(path string, info os.FileInfo, err error) error {
+		if walkErr := filepath.Walk(recyclebinDir, func(path string, info os.FileInfo, err error) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -3900,6 +3885,7 @@ func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error
 			}
 			data, readErr := os.ReadFile(path)
 			if readErr != nil {
+				s.logger.Debug().Err(readErr).Str("path", path).Msg("GetActiveVersionIDs: skipping unreadable recyclebin file")
 				return nil
 			}
 			var entry RecycledEntry
@@ -3907,7 +3893,9 @@ func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error
 				activeVersionIDs[entry.Meta.VersionID] = true
 			}
 			return nil
-		})
+		}); walkErr != nil {
+			s.logger.Debug().Err(walkErr).Str("bucket", bucket).Msg("GetActiveVersionIDs: recyclebin walk error")
+		}
 	}
 
 	return activeVersionIDs, nil

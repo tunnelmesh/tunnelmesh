@@ -385,7 +385,6 @@ func (r *Replicator) runAutoSyncCycle() {
 			r.EnqueueReplication(bucket, key, "put")
 			total++
 		}
-		_ = bucket
 	}
 
 	if total > 0 || skippedBuckets > 0 {
