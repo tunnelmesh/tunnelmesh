@@ -190,7 +190,7 @@ func TestFetchChunk_Timeout(t *testing.T) {
 	defer func() { _ = local.Stop() }()
 
 	// Don't set up message routing - response will never arrive
-	transport.handler = func(from string, data []byte) error {
+	transport.handler = func(ctx context.Context, from string, data []byte) error {
 		// Drop all messages (simulate network timeout)
 		return nil
 	}
@@ -220,7 +220,7 @@ func TestFetchChunk_ContextCancellation(t *testing.T) {
 	defer func() { _ = local.Stop() }()
 
 	// Don't set up message routing
-	transport.handler = func(from string, data []byte) error {
+	transport.handler = func(ctx context.Context, from string, data []byte) error {
 		return nil
 	}
 

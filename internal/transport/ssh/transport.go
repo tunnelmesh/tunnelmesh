@@ -74,6 +74,7 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("peer.name", opts.PeerName),
+		attribute.String("peer.id", opts.PeerInfo.PublicKey),
 		attribute.String("ssh.addr", addr),
 	)
 

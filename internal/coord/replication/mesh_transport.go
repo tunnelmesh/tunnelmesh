@@ -21,7 +21,7 @@ type MeshTransport struct {
 	// Base URL pattern for coordinators: https://{meshIP}/api/replication/message
 	// Uses standard HTTPS port 443 (admin interface), which is mesh-only (not exposed to public internet)
 	httpClient       *http.Client
-	handler          func(from string, data []byte) error
+	handler          func(ctx context.Context, from string, data []byte) error
 	handlerMu        sync.RWMutex
 	logger           zerolog.Logger
 	bytesSentCounter prometheus.Counter // optional; nil = no metrics
@@ -117,15 +117,16 @@ func (mt *MeshTransport) SendToCoordinator(ctx context.Context, coordMeshIP stri
 
 // RegisterHandler registers a handler for incoming replication messages.
 // This is called by the coordinator's HTTP server when it receives a replication message.
-func (mt *MeshTransport) RegisterHandler(handler func(from string, data []byte) error) {
+func (mt *MeshTransport) RegisterHandler(handler func(ctx context.Context, from string, data []byte) error) {
 	mt.handlerMu.Lock()
 	defer mt.handlerMu.Unlock()
 	mt.handler = handler
 }
 
 // HandleIncomingMessage is called by the HTTP handler when a replication message is received.
+// ctx should carry the W3C trace context extracted from the HTTP request headers.
 // The 'from' parameter should be the sender's mesh IP or node ID.
-func (mt *MeshTransport) HandleIncomingMessage(from string, data []byte) error {
+func (mt *MeshTransport) HandleIncomingMessage(ctx context.Context, from string, data []byte) error {
 	mt.handlerMu.RLock()
 	handler := mt.handler
 	mt.handlerMu.RUnlock()
@@ -139,7 +140,7 @@ func (mt *MeshTransport) HandleIncomingMessage(from string, data []byte) error {
 		Int("size", len(data)).
 		Msg("handling incoming replication message")
 
-	err := handler(from, data)
+	err := handler(ctx, from, data)
 	if err == nil && mt.bytesRecvCounter != nil {
 		mt.bytesRecvCounter.Add(float64(len(data)))
 	}
