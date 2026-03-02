@@ -10,6 +10,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // replQueueEntry represents a pending replication operation in the queue.
@@ -144,6 +145,7 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 
 	if r.chunkRegistry == nil {
 		// No chunk registry — fall back to file-level replication
+		span.SetStatus(otelcodes.Ok, "no chunk registry")
 		return
 	}
 
@@ -152,6 +154,8 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 		err    error
 	}
 	results := make(chan peerResult, len(peers))
+	// Snapshot names once to avoid acquiring r.mu once per peer in the results loop.
+	peerNames := r.GetPeerNames()
 
 	for _, peerID := range peers {
 		go func(pid string) {
@@ -164,6 +168,15 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 	allSucceeded := true
 	for range peers {
 		res := <-results
+		name := peerNames[res.peerID]
+		if name == "" {
+			name = res.peerID
+		}
+		span.AddEvent("replication.peer", trace.WithAttributes(
+			attribute.String("peer.id", res.peerID),
+			attribute.String("peer.name", name),
+			attribute.Bool("peer.succeeded", res.err == nil),
+		))
 		if res.err != nil {
 			r.logger.Error().Err(res.err).
 				Str("peer", res.peerID).

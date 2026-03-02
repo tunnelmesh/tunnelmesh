@@ -198,6 +198,7 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 	// Mark as connecting with cancel function - if already connecting, bail out
 	if !m.Connections.StartConnecting(peer.Name, peer.MeshIP, cancel) {
 		log.Debug().Str("peer", peer.Name).Msg("connection attempt already in progress")
+		setupSpan.SetStatus(otelcodes.Ok, "already connecting")
 		return
 	}
 	defer m.Connections.ClearConnecting(peer.Name)
@@ -205,6 +206,7 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 	// Check if transport negotiator is available
 	if m.TransportNegotiator == nil {
 		log.Debug().Str("peer", peer.Name).Msg("no transport negotiator available, skipping connection attempt")
+		setupSpan.SetStatus(otelcodes.Ok, "no transport negotiator")
 		return
 	}
 
@@ -235,6 +237,7 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 		// Check if we were cancelled due to inbound connection
 		if connCtx.Err() == context.Canceled {
 			log.Debug().Str("peer", peer.Name).Msg("outbound connection cancelled (inbound connection established)")
+			setupSpan.SetStatus(otelcodes.Ok, "cancelled by inbound connection")
 			return
 		}
 		setupSpan.RecordError(err)
@@ -254,6 +257,7 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 	if _, exists := m.tunnelMgr.Get(peer.Name); exists {
 		log.Debug().Str("peer", peer.Name).Msg("tunnel already established by peer, closing our connection")
 		_ = result.Connection.Close()
+		setupSpan.SetStatus(otelcodes.Ok, "tunnel already established by peer")
 		return
 	}
 
@@ -265,11 +269,14 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 	if pc == nil {
 		log.Warn().Str("peer", peer.Name).Msg("peer connection not found after negotiation")
 		_ = tun.Close()
+		setupSpan.SetStatus(otelcodes.Error, "peer connection not found after negotiation")
 		return
 	}
 	if err := pc.Connected(connCtx, tun, string(result.Transport), "transport negotiated: "+string(result.Transport)); err != nil {
 		log.Warn().Err(err).Str("peer", peer.Name).Msg("failed to transition to connected state")
 		_ = tun.Close()
+		setupSpan.RecordError(err)
+		setupSpan.SetStatus(otelcodes.Error, err.Error())
 		return
 	}
 

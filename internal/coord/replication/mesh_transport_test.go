@@ -326,7 +326,7 @@ func TestRegisterHandler(t *testing.T) {
 	mt := NewMeshTransport(logger, nil)
 
 	called := false
-	handler := func(from string, data []byte) error {
+	handler := func(ctx context.Context, from string, data []byte) error {
 		called = true
 		return nil
 	}
@@ -334,7 +334,7 @@ func TestRegisterHandler(t *testing.T) {
 	mt.RegisterHandler(handler)
 
 	// Verify handler was registered by calling HandleIncomingMessage
-	err := mt.HandleIncomingMessage("test-peer", []byte("test"))
+	err := mt.HandleIncomingMessage(context.Background(), "test-peer", []byte("test"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestHandleIncomingMessage_NoHandler(t *testing.T) {
 	logger := zerolog.Nop()
 	mt := NewMeshTransport(logger, nil)
 
-	err := mt.HandleIncomingMessage("test-peer", []byte("test"))
+	err := mt.HandleIncomingMessage(context.Background(), "test-peer", []byte("test"))
 	if err == nil {
 		t.Fatal("expected error when no handler registered")
 	}
@@ -363,13 +363,13 @@ func TestHandleIncomingMessage_HandlerError(t *testing.T) {
 	mt := NewMeshTransport(logger, nil)
 
 	expectedErr := errors.New("handler error")
-	handler := func(from string, data []byte) error {
+	handler := func(ctx context.Context, from string, data []byte) error {
 		return expectedErr
 	}
 
 	mt.RegisterHandler(handler)
 
-	err := mt.HandleIncomingMessage("test-peer", []byte("test"))
+	err := mt.HandleIncomingMessage(context.Background(), "test-peer", []byte("test"))
 	if err == nil {
 		t.Fatal("expected error from handler")
 	}
@@ -386,7 +386,7 @@ func TestHandleIncomingMessage_HandlerParameters(t *testing.T) {
 	var receivedFrom string
 	var receivedData []byte
 
-	handler := func(from string, data []byte) error {
+	handler := func(ctx context.Context, from string, data []byte) error {
 		receivedFrom = from
 		receivedData = data
 		return nil
@@ -397,7 +397,7 @@ func TestHandleIncomingMessage_HandlerParameters(t *testing.T) {
 	expectedFrom := "coordinator-1"
 	expectedData := []byte("test data")
 
-	err := mt.HandleIncomingMessage(expectedFrom, expectedData)
+	err := mt.HandleIncomingMessage(context.Background(), expectedFrom, expectedData)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestConcurrentHandlerRegistration(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			handler := func(from string, data []byte) error {
+			handler := func(ctx context.Context, from string, data []byte) error {
 				return nil
 			}
 			mt.RegisterHandler(handler)
@@ -433,7 +433,7 @@ func TestConcurrentHandlerRegistration(t *testing.T) {
 	wg.Wait()
 
 	// Verify handler works after concurrent registration
-	err := mt.HandleIncomingMessage("test", []byte("test"))
+	err := mt.HandleIncomingMessage(context.Background(), "test", []byte("test"))
 	if err != nil {
 		t.Errorf("unexpected error after concurrent registration: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestConcurrentHandleIncomingMessage(t *testing.T) {
 	callCount := 0
 	var mu sync.Mutex
 
-	handler := func(from string, data []byte) error {
+	handler := func(ctx context.Context, from string, data []byte) error {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -464,7 +464,7 @@ func TestConcurrentHandleIncomingMessage(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			err := mt.HandleIncomingMessage(fmt.Sprintf("peer-%d", id), []byte("test"))
+			err := mt.HandleIncomingMessage(context.Background(), fmt.Sprintf("peer-%d", id), []byte("test"))
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -531,11 +531,11 @@ func TestMeshTransport_MetricsBytesReceived(t *testing.T) {
 	mt.SetReplicationMetrics(sentCounter, recvCounter)
 
 	data := []byte("incoming replication message")
-	mt.RegisterHandler(func(from string, d []byte) error {
+	mt.RegisterHandler(func(ctx context.Context, from string, d []byte) error {
 		return nil
 	})
 
-	err := mt.HandleIncomingMessage("coord-1", data)
+	err := mt.HandleIncomingMessage(context.Background(), "coord-1", data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -568,11 +568,11 @@ func TestMeshTransport_MetricsNotIncrementedOnHandlerError(t *testing.T) {
 
 	mt.SetReplicationMetrics(nil, recvCounter)
 
-	mt.RegisterHandler(func(from string, data []byte) error {
+	mt.RegisterHandler(func(ctx context.Context, from string, data []byte) error {
 		return errors.New("handler error")
 	})
 
-	_ = mt.HandleIncomingMessage("coord-1", []byte("data"))
+	_ = mt.HandleIncomingMessage(context.Background(), "coord-1", []byte("data"))
 
 	mfs, _ := reg.Gather()
 	for _, mf := range mfs {
@@ -599,10 +599,34 @@ func TestMeshTransport_MetricsNilSafe(t *testing.T) {
 	}
 
 	// Verify no panic on receive.
-	mt.RegisterHandler(func(from string, data []byte) error { return nil })
-	err = mt.HandleIncomingMessage("coord-1", []byte("data"))
+	mt.RegisterHandler(func(ctx context.Context, from string, data []byte) error { return nil })
+	err = mt.HandleIncomingMessage(context.Background(), "coord-1", []byte("data"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleIncomingMessage_PropagatesContext(t *testing.T) {
+	mt := NewMeshTransport(zerolog.Nop(), nil)
+
+	type ctxKey struct{}
+	sentCtx := context.WithValue(context.Background(), ctxKey{}, "trace-value")
+
+	var receivedCtx context.Context
+	mt.RegisterHandler(func(ctx context.Context, from string, data []byte) error {
+		receivedCtx = ctx
+		return nil
+	})
+
+	if err := mt.HandleIncomingMessage(sentCtx, "peer-1", []byte("data")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedCtx == nil {
+		t.Fatal("handler was not called")
+	}
+	if receivedCtx.Value(ctxKey{}) != "trace-value" {
+		t.Fatal("context not propagated to handler")
 	}
 }
 

@@ -14,6 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"golang.org/x/time/rate"
 )
 
@@ -29,8 +32,10 @@ type Transport interface {
 	// SendToCoordinator sends a message to another coordinator by mesh IP
 	SendToCoordinator(ctx context.Context, coordMeshIP string, data []byte) error
 
-	// RegisterHandler registers a handler for incoming replication messages
-	RegisterHandler(handler func(from string, data []byte) error)
+	// RegisterHandler registers a handler for incoming replication messages.
+	// The context carries the W3C trace context extracted from the HTTP request headers,
+	// allowing the receiving coordinator to create child spans under the sender's trace.
+	RegisterHandler(handler func(ctx context.Context, from string, data []byte) error)
 }
 
 // ObjectMeta represents S3 object metadata including chunk information.
@@ -491,6 +496,30 @@ func (r *Replicator) HasPeer(coordMeshIP string) bool {
 	return r.peers[coordMeshIP]
 }
 
+// GetPeerName returns the coordinator name for a given mesh IP, or the mesh IP
+// itself if no name is known.
+func (r *Replicator) GetPeerName(meshIP string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if name := r.peerNames[meshIP]; name != "" {
+		return name
+	}
+	return meshIP
+}
+
+// GetPeerNames returns a snapshot of the mesh-IP → coordinator-name mapping.
+// Callers that need to look up multiple names should prefer this over repeated
+// GetPeerName calls to avoid acquiring the read lock once per peer.
+func (r *Replicator) GetPeerNames() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	snapshot := make(map[string]string, len(r.peerNames))
+	for ip, name := range r.peerNames {
+		snapshot[ip] = name
+	}
+	return snapshot
+}
+
 // GetPeers returns a copy of the current peer list.
 func (r *Replicator) GetPeers() []string {
 	r.mu.RLock()
@@ -680,7 +709,22 @@ func (r *Replicator) sendReplicateMessage(ctx context.Context, peer string, payl
 }
 
 // handleIncomingMessage processes incoming replication messages.
-func (r *Replicator) handleIncomingMessage(from string, data []byte) error {
+func (r *Replicator) handleIncomingMessage(ctx context.Context, from string, data []byte) (err error) {
+	_, span := tracing.Tracer("tunnelmesh/replication").Start(ctx, "replication.receive")
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, err.Error())
+		} else {
+			span.SetStatus(otelcodes.Ok, "")
+		}
+	}()
+	span.SetAttributes(
+		attribute.String("replication.from", from),
+		attribute.Int("replication.size", len(data)),
+	)
+
 	// Apply rate limiting to prevent abuse
 	if !r.rateLimiter.Allow() {
 		r.incrementRateLimitedCount()
@@ -711,6 +755,7 @@ func (r *Replicator) handleIncomingMessage(from string, data []byte) error {
 		msg.From = from
 	}
 
+	span.SetAttributes(attribute.String("replication.msg_type", string(msg.Type)))
 	r.logger.Debug().
 		Str("type", string(msg.Type)).
 		Str("from", from).
