@@ -269,7 +269,7 @@ func (m *MeshNode) establishTunnelWithOptions(ctx context.Context, peer proto.Pe
 	if pc == nil {
 		log.Warn().Str("peer", peer.Name).Msg("peer connection not found after negotiation")
 		_ = tun.Close()
-		setupSpan.SetStatus(otelcodes.Ok, "peer connection not found")
+		setupSpan.SetStatus(otelcodes.Error, "peer connection not found after negotiation")
 		return
 	}
 	if err := pc.Connected(connCtx, tun, string(result.Transport), "transport negotiated: "+string(result.Transport)); err != nil {

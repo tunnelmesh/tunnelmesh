@@ -15,6 +15,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"golang.org/x/time/rate"
 )
 
@@ -683,9 +685,21 @@ func (r *Replicator) sendReplicateMessage(ctx context.Context, peer string, payl
 }
 
 // handleIncomingMessage processes incoming replication messages.
-func (r *Replicator) handleIncomingMessage(ctx context.Context, from string, data []byte) error {
+func (r *Replicator) handleIncomingMessage(ctx context.Context, from string, data []byte) (err error) {
 	_, span := tracing.Tracer("tunnelmesh/replication").Start(ctx, "replication.receive")
 	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, err.Error())
+		} else {
+			span.SetStatus(otelcodes.Ok, "")
+		}
+	}()
+	span.SetAttributes(
+		attribute.String("replication.from", from),
+		attribute.Int("replication.size", len(data)),
+	)
 
 	// Apply rate limiting to prevent abuse
 	if !r.rateLimiter.Allow() {
@@ -717,6 +731,7 @@ func (r *Replicator) handleIncomingMessage(ctx context.Context, from string, dat
 		msg.From = from
 	}
 
+	span.SetAttributes(attribute.String("replication.msg_type", string(msg.Type)))
 	r.logger.Debug().
 		Str("type", string(msg.Type)).
 		Str("from", from).

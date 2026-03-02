@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
@@ -139,7 +140,8 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 		resource.WithHost(),
 	)
 	if err != nil {
-		// Non-fatal: fall back to default resource
+		// Non-fatal: fall back to default resource (loses service.name, service.version, host.name)
+		log.Warn().Err(err).Msg("tracing: failed to build resource; falling back to default (some span attributes will be missing)")
 		res = resource.Default()
 	}
 
