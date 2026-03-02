@@ -20,6 +20,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // relayPacketPool pools relay packet buffers to reduce GC pressure.
@@ -839,6 +840,7 @@ func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer st
 		var stats proto.PeerStats
 		if err := json.Unmarshal(statsJSON, &stats); err != nil {
 			hbSpan.RecordError(err)
+			hbSpan.SetStatus(otelcodes.Error, err.Error())
 			log.Debug().Err(err).Str("peer", sourcePeer).Msg("failed to parse heartbeat stats")
 		}
 
@@ -902,6 +904,7 @@ func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer st
 		}
 
 		// End heartbeat span and inject trace_id into log for Loki → Tempo correlation.
+		hbSpan.SetStatus(otelcodes.Ok, "")
 		sc := hbSpan.SpanContext()
 		hbSpan.End()
 		log.Debug().
