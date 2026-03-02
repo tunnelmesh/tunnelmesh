@@ -3202,8 +3202,8 @@ func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot be negative")
 }
 
-// TestGetActiveVersionIDs verifies that the method collects version IDs from both
-// the live meta/ files and the archived versions/ files.
+// TestGetActiveVersionIDs verifies that the method collects version IDs from
+// meta/, versions/, and recyclebin/ — mirroring buildChunkReferenceSet.
 func TestGetActiveVersionIDs(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	ctx := context.Background()
@@ -3215,7 +3215,7 @@ func TestGetActiveVersionIDs(t *testing.T) {
 
 	require.NoError(t, store.CreateBucket(ctx, "bkt", "alice", 2, nil))
 
-	// First write — produces one live version (meta/).
+	// First write — one live version in meta/.
 	meta1, err := store.PutObject(ctx, "bkt", "obj.txt",
 		bytes.NewReader([]byte("v1 content for version id test")), 30, "text/plain", nil)
 	require.NoError(t, err)
@@ -3237,6 +3237,16 @@ func TestGetActiveVersionIDs(t *testing.T) {
 	assert.True(t, ids[meta1.VersionID], "archived version ID (versions/) should be present")
 	assert.True(t, ids[meta2.VersionID], "live version ID (meta/) should be present")
 	assert.Len(t, ids, 2)
+
+	// Soft-delete v2 — it moves to the recycle bin but chunks remain on disk.
+	// The version ID must still appear so CleanupOrphanedShards does not prematurely
+	// evict EC shard registry entries for the still-live chunks.
+	require.NoError(t, store.DeleteObject(ctx, "bkt", "obj.txt"))
+
+	ids, err = store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.True(t, ids[meta1.VersionID], "archived version ID (versions/) should survive soft-delete")
+	assert.True(t, ids[meta2.VersionID], "soft-deleted version ID (recyclebin/) should remain present")
 }
 
 // TestPurgeObject_UnregistersChunksFromRegistry verifies that PurgeObject removes

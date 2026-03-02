@@ -3814,17 +3814,19 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 }
 
 // GetActiveVersionIDs returns the set of all active version IDs across all buckets.
-// It walks the same meta/ and versions/ directories as buildChunkReferenceSet, collecting
-// the VersionID field from each ObjectMeta. This is used by the replicator to identify
-// erasure-coding shards whose parent file version no longer exists.
+// It mirrors buildChunkReferenceSet, walking meta/, versions/, and recyclebin/ for
+// each bucket. The recyclebin scan is required: soft-deleted objects still have their
+// chunks on disk, so their EC shard registry entries must not be evicted prematurely.
 func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error) {
 	activeVersionIDs := make(map[string]bool)
 
 	bucketsDir := filepath.Join(s.dataDir, "buckets")
 	bucketEntries, err := os.ReadDir(bucketsDir)
 	if err != nil {
-		// Directory not yet created is not an error.
-		return activeVersionIDs, nil
+		if os.IsNotExist(err) {
+			return activeVersionIDs, nil
+		}
+		return nil, fmt.Errorf("read buckets dir: %w", err)
 	}
 
 	for _, bucketEntry := range bucketEntries {
@@ -3878,6 +3880,30 @@ func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error
 			var meta ObjectMeta
 			if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
 				activeVersionIDs[meta.VersionID] = true
+			}
+			return nil
+		})
+
+		// Scan recycle bin entries. Soft-deleted objects retain their chunks on disk
+		// until the retention period expires, so their version IDs must be kept active
+		// to prevent premature EC shard registry eviction.
+		recyclebinDir := s.recyclebinPath(bucket)
+		_ = filepath.Walk(recyclebinDir, func(path string, info os.FileInfo, err error) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+				return nil
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			var entry RecycledEntry
+			if json.Unmarshal(data, &entry) == nil && entry.Meta.VersionID != "" {
+				activeVersionIDs[entry.Meta.VersionID] = true
 			}
 			return nil
 		})
