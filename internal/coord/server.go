@@ -1238,7 +1238,7 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 	store.SetDefaultShareExpiryDays(cfg.Coordinator.S3.ShareExpiryDays)
 
 	// Set recycle bin retention config
-	store.SetRecycleBinRetentionDays(cfg.Coordinator.S3.RecycleBinRetentionDays)
+	store.SetRecycleBinRetentionHours(cfg.Coordinator.S3.RecycleBinRetentionHours)
 
 	// Set version retention config
 	store.SetVersionRetentionDays(cfg.Coordinator.S3.VersionRetentionDays)

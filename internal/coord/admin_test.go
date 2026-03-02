@@ -1519,8 +1519,8 @@ func TestS3GC_WithoutPurgeAll(t *testing.T) {
 	err = srv.s3Store.DeleteObject(context.Background(), "test-bucket", "recent.txt")
 	require.NoError(t, err)
 
-	// Set retention to 90 days — recent recycled entry should NOT be purged
-	srv.s3Store.SetRecycleBinRetentionDays(90)
+	// Set retention to 24 hours — recent recycled entry should NOT be purged
+	srv.s3Store.SetRecycleBinRetentionHours(24)
 
 	body := bytes.NewReader([]byte(`{}`))
 	req := httptest.NewRequest(http.MethodPost, "/api/s3/gc", body)

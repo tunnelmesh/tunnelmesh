@@ -673,7 +673,7 @@ func TestPurgeRecycleBin_RespectsRetention(t *testing.T) {
 		}
 	}
 
-	store.SetRecycleBinRetentionDays(90)
+	store.SetRecycleBinRetentionHours(24)
 	purged := store.PurgeRecycleBin(context.Background())
 	assert.Equal(t, 1, purged, "only old entry should be purged")
 
@@ -695,8 +695,8 @@ func TestPurgeRecycleBin_DisabledWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	_ = store.DeleteObject(context.Background(), "test-bucket", "file.txt")
 
-	// Retention days = 0 means disabled
-	store.SetRecycleBinRetentionDays(0)
+	// Retention hours = 0 means disabled
+	store.SetRecycleBinRetentionHours(0)
 	purged := store.PurgeRecycleBin(context.Background())
 	assert.Equal(t, 0, purged)
 

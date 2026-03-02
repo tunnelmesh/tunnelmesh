@@ -207,24 +207,24 @@ type ReplicatorInterface interface {
 }
 
 type Store struct {
-	dataDir                 string
-	cas                     *CAS // Content-addressable storage for chunks
-	quota                   *QuotaManager
-	chunkRegistry           ChunkRegistryInterface   // Optional distributed chunk ownership tracking
-	replicator              ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
-	coordinatorID           string                   // Local coordinator ID for version vectors (optional)
-	logger                  zerolog.Logger           // Structured logger
-	onObjectRemovedCallback func(bucket, key string) // Called when an object is permanently removed from disk
-	onBucketRemovedCallback func(bucket string)      // Called when an entire bucket is removed from disk
-	defaultObjectExpiryDays int                      // Days until objects expire (0 = never)
-	defaultShareExpiryDays  int                      // Days until file shares expire (0 = never)
-	recyclebinRetentionDays int                      // Days to retain recycled objects before purging (0 = never purge)
-	versionRetentionDays    int                      // Days to retain object versions (0 = forever)
-	maxVersionsPerObject    int                      // Max versions to keep per object (0 = unlimited)
-	versionRetentionPolicy  VersionRetentionPolicy
-	erasureCodingSemaphore  chan struct{}  // Limits concurrent erasure coding operations (memory safety)
-	bgWg                    sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu                      sync.RWMutex
+	dataDir                  string
+	cas                      *CAS // Content-addressable storage for chunks
+	quota                    *QuotaManager
+	chunkRegistry            ChunkRegistryInterface   // Optional distributed chunk ownership tracking
+	replicator               ReplicatorInterface      // Optional replicator for fetching remote chunks (Phase 5)
+	coordinatorID            string                   // Local coordinator ID for version vectors (optional)
+	logger                   zerolog.Logger           // Structured logger
+	onObjectRemovedCallback  func(bucket, key string) // Called when an object is permanently removed from disk
+	onBucketRemovedCallback  func(bucket string)      // Called when an entire bucket is removed from disk
+	defaultObjectExpiryDays  int                      // Days until objects expire (0 = never)
+	defaultShareExpiryDays   int                      // Days until file shares expire (0 = never)
+	recyclebinRetentionHours float64                  // Hours to retain recycled objects before purging (0 = never purge)
+	versionRetentionDays     int                      // Days to retain object versions (0 = forever)
+	maxVersionsPerObject     int                      // Max versions to keep per object (0 = unlimited)
+	versionRetentionPolicy   VersionRetentionPolicy
+	erasureCodingSemaphore   chan struct{}  // Limits concurrent erasure coding operations (memory safety)
+	bgWg                     sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	mu                       sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -2417,18 +2417,19 @@ func (s *Store) PurgeObject(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
-// SetRecycleBinRetentionDays sets the number of days to retain recycled objects before purging.
-func (s *Store) SetRecycleBinRetentionDays(days int) {
+// SetRecycleBinRetentionHours sets the number of hours to retain recycled objects before purging.
+// Fractional values are supported (e.g. 0.167 ≈ 10 minutes). 0 disables purging.
+func (s *Store) SetRecycleBinRetentionHours(hours float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recyclebinRetentionDays = days
+	s.recyclebinRetentionHours = hours
 }
 
-// RecycleBinRetentionDays returns the configured recycle bin retention period in days.
-func (s *Store) RecycleBinRetentionDays() int {
+// RecycleBinRetentionHours returns the configured recycle bin retention period in hours.
+func (s *Store) RecycleBinRetentionHours() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.recyclebinRetentionDays
+	return s.recyclebinRetentionHours
 }
 
 // PurgeRecycleBin removes all recycled objects older than the retention period.
@@ -2436,14 +2437,14 @@ func (s *Store) RecycleBinRetentionDays() int {
 // Returns the number of entries purged.
 func (s *Store) PurgeRecycleBin(ctx context.Context) int {
 	s.mu.RLock()
-	retentionDays := s.recyclebinRetentionDays
+	retentionHours := s.recyclebinRetentionHours
 	s.mu.RUnlock()
 
-	if retentionDays <= 0 {
+	if retentionHours <= 0 {
 		return 0 // Disabled
 	}
 
-	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionHours * float64(time.Hour)))
 	return s.purgeRecycledEntries(ctx, &cutoff)
 }
 
