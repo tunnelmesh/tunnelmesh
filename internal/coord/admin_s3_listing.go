@@ -136,7 +136,14 @@ func (s *Server) updateListingIndex(bucket, key string, info *S3ObjectInfo, op s
 			newBL.Objects = []S3ObjectInfo{*info}
 		}
 
-		newIdx.Buckets[bucket] = &newBL
+		// For "remove" ops, drop the bucket key entirely if both slices are now empty
+		// rather than storing an empty entry. reconcileLocalIndex would clean it up
+		// within 5 min anyway, but removing it eagerly keeps the map lean.
+		if op == "remove" && len(newBL.Objects) == 0 && len(newBL.Recycled) == 0 {
+			delete(newIdx.Buckets, bucket)
+		} else {
+			newIdx.Buckets[bucket] = &newBL
+		}
 		newIdx.Seq++ // Monotonic increment for reconcile staleness detection
 
 		// CAS to avoid lost updates from concurrent calls

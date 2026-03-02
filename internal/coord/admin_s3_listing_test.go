@@ -262,6 +262,42 @@ func TestUpdateListingIndex_RemoveOp(t *testing.T) {
 	}
 }
 
+// TestUpdateListingIndex_RemoveLastObject_DropsBucketKey verifies that removing
+// the last object from a bucket drops the bucket key from the index map entirely,
+// rather than leaving behind an empty bucket entry that wastes memory.
+func TestUpdateListingIndex_RemoveLastObject_DropsBucketKey(t *testing.T) {
+	srv := newTestServerWithListingIndex(t)
+
+	// Add two objects to the same bucket.
+	info1 := S3ObjectInfo{Key: "first.txt", Size: 10, LastModified: "2024-01-01T00:00:00Z"}
+	info2 := S3ObjectInfo{Key: "second.txt", Size: 20, LastModified: "2024-01-02T00:00:00Z"}
+	srv.updateListingIndex("bkt", "first.txt", &info1, "put")
+	srv.updateListingIndex("bkt", "second.txt", &info2, "put")
+
+	idx := srv.localListingIndex.Load()
+	require.NotNil(t, idx)
+	require.NotNil(t, idx.Buckets["bkt"], "bucket should be present after puts")
+	assert.Len(t, idx.Buckets["bkt"].Objects, 2)
+
+	// Remove one — bucket key must still be present (one object remains).
+	srv.updateListingIndex("bkt", "first.txt", nil, "remove")
+	idx = srv.localListingIndex.Load()
+	require.NotNil(t, idx.Buckets["bkt"], "bucket should remain when objects still exist")
+	assert.Len(t, idx.Buckets["bkt"].Objects, 1)
+
+	// Remove the last object — bucket key must be absent from the map.
+	srv.updateListingIndex("bkt", "second.txt", nil, "remove")
+	idx = srv.localListingIndex.Load()
+	_, exists := idx.Buckets["bkt"]
+	assert.False(t, exists, "bucket key should be removed from map when last object is gone")
+
+	// Removing from a non-existent bucket (already gone) must be a no-op.
+	srv.updateListingIndex("bkt", "ghost.txt", nil, "remove")
+	idx = srv.localListingIndex.Load()
+	_, exists = idx.Buckets["bkt"]
+	assert.False(t, exists, "remove from absent bucket must not re-create bucket key")
+}
+
 // TestPurgeObject_UpdatesListingIndex verifies that calling store.PurgeObject
 // immediately removes the entry from the listing index via onObjectRemovedCallback.
 func TestPurgeObject_UpdatesListingIndex(t *testing.T) {

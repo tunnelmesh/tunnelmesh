@@ -1149,6 +1149,59 @@ func TestTriggerManifestSync_WorkerDrains(t *testing.T) {
 // while the worker is busy processing the first result in exactly one cycle, not two.
 // It uses preSyncHook to pause the worker at a deterministic point, ensuring the
 // second TriggerManifestSync call races with an in-progress cycle (not a future one).
+// TestAutoSyncCycle_PrunesReplicatedStateVectors verifies that runAutoSyncCycle
+// prunes state vectors for replicated (non-locally-owned) objects after they
+// are deleted on the primary coordinator.  Previously, activeSet was built from
+// localKeys only, so replicated objects' state vectors were never eligible for
+// pruning even after the objects were removed from disk.
+func TestAutoSyncCycle_PrunesReplicatedStateVectors(t *testing.T) {
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-b",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    0,
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("10.0.0.1", "coord-a")
+
+	// Simulate coord-b receiving a replicated object from coord-a.
+	// The object exists on disk and its state vector is tracked.
+	s3Store.addObjectWithChunks("replicated-bucket", "doc.txt", []string{"h1"}, map[string][]byte{"h1": []byte("d1")})
+	s3Store.bucketOwners = map[string]string{
+		"replicated-bucket": "coord-a",
+	}
+	r.state.Merge("replicated-bucket", "doc.txt", VersionVector{"coord-a": 1})
+	assert.Equal(t, 1, r.state.Count(), "state should track the replicated object")
+
+	// Run auto-sync: the object is still on disk, so its state vector must NOT be pruned.
+	r.runAutoSyncCycle()
+	assert.Equal(t, 1, r.state.Count(), "live replicated object state vector must be preserved")
+
+	// Now simulate the object being deleted on the primary and removed from disk.
+	s3Store.mu.Lock()
+	delete(s3Store.objects, "replicated-bucket/doc.txt")
+	s3Store.mu.Unlock()
+
+	// Back-date the state vector so it's past GCGracePeriod.
+	r.state.mu.Lock()
+	r.state.lastUpdated["replicated-bucket/doc.txt"] = time.Now().Add(-20 * time.Minute)
+	r.state.mu.Unlock()
+
+	// Run auto-sync again: the object is now absent from disk (not in allKeys),
+	// so its state vector is eligible for pruning.
+	r.runAutoSyncCycle()
+	assert.Equal(t, 0, r.state.Count(),
+		"deleted replicated object state vector must be pruned after GCGracePeriod")
+}
+
 func TestTriggerManifestSync_Deduplication(t *testing.T) {
 	transport := newMockTransport()
 	s3Store := newMockS3Store()
