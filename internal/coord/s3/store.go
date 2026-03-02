@@ -3871,7 +3871,10 @@ func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error
 			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
 				return nil
 			}
-			data, _ := os.ReadFile(path)
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
 			var meta ObjectMeta
 			if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
 				activeVersionIDs[meta.VersionID] = true

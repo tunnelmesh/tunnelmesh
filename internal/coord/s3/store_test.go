@@ -3202,6 +3202,43 @@ func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot be negative")
 }
 
+// TestGetActiveVersionIDs verifies that the method collects version IDs from both
+// the live meta/ files and the archived versions/ files.
+func TestGetActiveVersionIDs(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	// Empty store — should return an empty map without error.
+	ids, err := store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ids, "no buckets yet: should return empty map")
+
+	require.NoError(t, store.CreateBucket(ctx, "bkt", "alice", 2, nil))
+
+	// First write — produces one live version (meta/).
+	meta1, err := store.PutObject(ctx, "bkt", "obj.txt",
+		bytes.NewReader([]byte("v1 content for version id test")), 30, "text/plain", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, meta1.VersionID)
+
+	ids, err = store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.True(t, ids[meta1.VersionID], "live version ID should appear after first write")
+	assert.Len(t, ids, 1)
+
+	// Second write — v1 moves to versions/, v2 becomes the live meta.
+	meta2, err := store.PutObject(ctx, "bkt", "obj.txt",
+		bytes.NewReader([]byte("v2 content for version id test 2")), 32, "text/plain", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, meta2.VersionID)
+
+	ids, err = store.GetActiveVersionIDs(ctx)
+	require.NoError(t, err)
+	assert.True(t, ids[meta1.VersionID], "archived version ID (versions/) should be present")
+	assert.True(t, ids[meta2.VersionID], "live version ID (meta/) should be present")
+	assert.Len(t, ids, 2)
+}
+
 // TestPurgeObject_UnregistersChunksFromRegistry verifies that PurgeObject removes
 // all chunk entries from the distributed chunk registry (the primary fix for the
 // ascending memory baseline between accordion benchmark runs).
