@@ -606,6 +606,30 @@ func TestMeshTransport_MetricsNilSafe(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_PropagatesContext(t *testing.T) {
+	mt := NewMeshTransport(zerolog.Nop(), nil)
+
+	type ctxKey struct{}
+	sentCtx := context.WithValue(context.Background(), ctxKey{}, "trace-value")
+
+	var receivedCtx context.Context
+	mt.RegisterHandler(func(ctx context.Context, from string, data []byte) error {
+		receivedCtx = ctx
+		return nil
+	})
+
+	if err := mt.HandleIncomingMessage(sentCtx, "peer-1", []byte("data")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedCtx == nil {
+		t.Fatal("handler was not called")
+	}
+	if receivedCtx.Value(ctxKey{}) != "trace-value" {
+		t.Fatal("context not propagated to handler")
+	}
+}
+
 func TestMeshTransport_HTTPClientConfiguration(t *testing.T) {
 	logger := zerolog.Nop()
 	mt := NewMeshTransport(logger, nil)
