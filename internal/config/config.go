@@ -47,16 +47,16 @@ type CoordinatorConfig struct {
 // S3Config holds configuration for the S3-compatible storage service.
 // S3 is always enabled when coordinator is enabled (port hardcoded to 9000).
 type S3Config struct {
-	DataDir                 string                 `yaml:"data_dir"`                   // Storage directory for S3 objects (default: {data_dir}/s3)
-	MaxSize                 bytesize.Size          `yaml:"max_size"`                   // Maximum storage size (e.g., "10Gi", "500Mi") - defaults to 1Gi
-	MaxObjectSize           bytesize.Size          `yaml:"max_object_size"`            // Maximum size per individual object upload (e.g., "1Gi", "500Mi") - defaults to 1Gi
-	ObjectExpiryDays        int                    `yaml:"object_expiry_days"`         // Days until objects expire (default: 9125 = 25 years)
-	ShareExpiryDays         int                    `yaml:"share_expiry_days"`          // Days until file shares expire (default: 365 = 1 year)
-	RecycleBinRetentionDays int                    `yaml:"recycle_bin_retention_days"` // Days to keep recycled items before deletion (default: 90)
-	VersionRetentionDays    int                    `yaml:"version_retention_days"`     // Days to keep object versions (default: 30)
-	MaxVersionsPerObject    int                    `yaml:"max_versions_per_object"`    // Max versions to keep per object (default: 100, 0 = unlimited)
-	VersionRetention        VersionRetentionConfig `yaml:"version_retention"`          // Tiered version retention policy
-	DefaultShareQuota       bytesize.Size          `yaml:"default_share_quota"`        // Auto-share quota per peer (default: 10Mi)
+	DataDir                  string                 `yaml:"data_dir"`                    // Storage directory for S3 objects (default: {data_dir}/s3)
+	MaxSize                  bytesize.Size          `yaml:"max_size"`                    // Maximum storage size (e.g., "10Gi", "500Mi") - defaults to 1Gi
+	MaxObjectSize            bytesize.Size          `yaml:"max_object_size"`             // Maximum size per individual object upload (e.g., "1Gi", "500Mi") - defaults to 1Gi
+	ObjectExpiryDays         int                    `yaml:"object_expiry_days"`          // Days until objects expire (default: 9125 = 25 years)
+	ShareExpiryDays          int                    `yaml:"share_expiry_days"`           // Days until file shares expire (default: 365 = 1 year)
+	RecycleBinRetentionHours float64                `yaml:"recycle_bin_retention_hours"` // Hours to keep recycled items before deletion (default: 24h; fractions OK, e.g. 0.167 = 10 min). Note: YAML 0 is treated as "use default" — to disable purging entirely, set store.SetRecycleBinRetentionHours(0) programmatically.
+	VersionRetentionDays     int                    `yaml:"version_retention_days"`      // Days to keep object versions (default: 30)
+	MaxVersionsPerObject     int                    `yaml:"max_versions_per_object"`     // Max versions to keep per object (default: 100, 0 = unlimited)
+	VersionRetention         VersionRetentionConfig `yaml:"version_retention"`           // Tiered version retention policy
+	DefaultShareQuota        bytesize.Size          `yaml:"default_share_quota"`         // Auto-share quota per peer (default: 10Mi)
 }
 
 // VersionRetentionConfig configures smart tiered version retention.
@@ -291,8 +291,8 @@ func LoadPeerConfig(path string) (*PeerConfig, error) {
 		if cfg.Coordinator.S3.ShareExpiryDays == 0 {
 			cfg.Coordinator.S3.ShareExpiryDays = 365
 		}
-		if cfg.Coordinator.S3.RecycleBinRetentionDays == 0 {
-			cfg.Coordinator.S3.RecycleBinRetentionDays = 90
+		if cfg.Coordinator.S3.RecycleBinRetentionHours == 0 {
+			cfg.Coordinator.S3.RecycleBinRetentionHours = 24.0
 		}
 		if cfg.Coordinator.S3.VersionRetentionDays == 0 {
 			cfg.Coordinator.S3.VersionRetentionDays = 30

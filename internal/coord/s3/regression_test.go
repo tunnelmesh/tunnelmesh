@@ -322,7 +322,7 @@ func TestRegression_DeleteUnreferencedChunksRespectsAllBuckets(t *testing.T) {
 func TestRegression_RecycleBinPurgePreservesLiveChunks(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
-	store.SetRecycleBinRetentionDays(1) // Enable recycle bin
+	store.SetRecycleBinRetentionHours(24) // Enable recycle bin
 
 	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2, nil))
 
@@ -784,7 +784,7 @@ func TestRegression_AccordionModeFullCycle(t *testing.T) {
 func TestRegression_SoftDeleteSharedChunksPreserved(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
-	store.SetRecycleBinRetentionDays(1)
+	store.SetRecycleBinRetentionHours(24)
 
 	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2, nil))
 

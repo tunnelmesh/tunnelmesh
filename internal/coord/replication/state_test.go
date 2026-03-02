@@ -3,6 +3,7 @@ package replication
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -525,4 +526,135 @@ func TestState_ReplicationScenario(t *testing.T) {
 		assert.Equal(t, uint64(1), final1.Get("coord2"))
 		assert.Equal(t, uint64(1), final1.Get("coord3"))
 	})
+}
+
+func TestState_PruneDeletedKeys(t *testing.T) {
+	t.Run("prunes stale inactive keys", func(t *testing.T) {
+		state := NewState("coord1")
+
+		// Add keys
+		state.Update("bucket", "active.json")
+		state.Update("bucket", "deleted.json")
+		assert.Equal(t, 2, state.Count())
+
+		// Back-date the lastUpdated for the deleted key so it looks old
+		state.mu.Lock()
+		state.lastUpdated["bucket/deleted.json"] = time.Now().Add(-20 * time.Minute)
+		state.mu.Unlock()
+
+		// active.json is in the active set; deleted.json is not
+		activeKeys := map[string]bool{"bucket/active.json": true}
+		pruned := state.PruneDeletedKeys(activeKeys, 10*time.Minute)
+
+		assert.Equal(t, 1, pruned)
+		assert.Equal(t, 1, state.Count())
+		assert.NotEmpty(t, state.Get("bucket", "active.json"))
+		assert.Empty(t, state.Get("bucket", "deleted.json"))
+	})
+
+	t.Run("does not prune keys within grace period", func(t *testing.T) {
+		state := NewState("coord1")
+
+		state.Update("bucket", "recent.json")
+		// recent.json is not in active set, but was just updated — must be kept
+		activeKeys := map[string]bool{}
+		pruned := state.PruneDeletedKeys(activeKeys, 10*time.Minute)
+
+		assert.Equal(t, 0, pruned)
+		assert.Equal(t, 1, state.Count())
+	})
+
+	t.Run("does not prune keys still in active set", func(t *testing.T) {
+		state := NewState("coord1")
+
+		state.Update("bucket", "live.json")
+		// Back-date so it looks old
+		state.mu.Lock()
+		state.lastUpdated["bucket/live.json"] = time.Now().Add(-1 * time.Hour)
+		state.mu.Unlock()
+
+		// Key is still active — must not be pruned even though it is old
+		activeKeys := map[string]bool{"bucket/live.json": true}
+		pruned := state.PruneDeletedKeys(activeKeys, 10*time.Minute)
+
+		assert.Equal(t, 0, pruned)
+		assert.Equal(t, 1, state.Count())
+	})
+
+	t.Run("empty state returns zero", func(t *testing.T) {
+		state := NewState("coord1")
+		pruned := state.PruneDeletedKeys(map[string]bool{}, time.Minute)
+		assert.Equal(t, 0, pruned)
+	})
+}
+
+func TestState_PruneDeletedKeys_LoadSnapshot(t *testing.T) {
+	// Entries loaded from a snapshot have no lastUpdated (timestamps are not
+	// persisted). PruneDeletedKeys must treat missing timestamps as immediately
+	// pruneable so stale post-restart entries don't accumulate indefinitely.
+	original := NewState("coord1")
+	original.Update("bucket", "active.json")
+	original.Update("bucket", "stale.json")
+
+	data, err := original.Snapshot()
+	require.NoError(t, err)
+
+	restored := NewState("coord1")
+	require.NoError(t, restored.LoadSnapshot(data))
+
+	// Neither key should have a lastUpdated entry after loading
+	restored.mu.RLock()
+	_, activeHasTS := restored.lastUpdated["bucket/active.json"]
+	_, staleHasTS := restored.lastUpdated["bucket/stale.json"]
+	restored.mu.RUnlock()
+
+	assert.False(t, activeHasTS, "LoadSnapshot should not seed lastUpdated")
+	assert.False(t, staleHasTS, "LoadSnapshot should not seed lastUpdated")
+
+	// Only active.json is in the active set. stale.json has no timestamp and
+	// is not active, so it must be pruned immediately (no maxAge needed).
+	activeKeys := map[string]bool{"bucket/active.json": true}
+	pruned := restored.PruneDeletedKeys(activeKeys, 10*time.Minute)
+
+	assert.Equal(t, 1, pruned)
+	assert.Equal(t, 1, restored.Count())
+	assert.NotEmpty(t, restored.Get("bucket", "active.json"))
+	assert.Empty(t, restored.Get("bucket", "stale.json"))
+}
+
+func TestState_PruneDeletedKeys_Timestamps(t *testing.T) {
+	state := NewState("coord1")
+
+	// lastUpdated should be set by Update
+	before := time.Now()
+	state.Update("bucket", "obj.json")
+	after := time.Now()
+
+	state.mu.RLock()
+	ts, ok := state.lastUpdated["bucket/obj.json"]
+	state.mu.RUnlock()
+
+	assert.True(t, ok, "lastUpdated should be set after Update")
+	assert.True(t, !ts.Before(before) && !ts.After(after), "timestamp should be within test window")
+
+	// lastUpdated should be set by Merge
+	state.Merge("bucket", "merged.json", VersionVector{"coord2": 1})
+	state.mu.RLock()
+	_, ok = state.lastUpdated["bucket/merged.json"]
+	state.mu.RUnlock()
+	assert.True(t, ok, "lastUpdated should be set after Merge")
+
+	// lastUpdated should be set by Set
+	state.Set("bucket", "set.json", VersionVector{"coord1": 5})
+	state.mu.RLock()
+	_, ok = state.lastUpdated["bucket/set.json"]
+	state.mu.RUnlock()
+	assert.True(t, ok, "lastUpdated should be set after Set")
+
+	// lastUpdated should be cleared by Delete
+	state.Delete("bucket", "obj.json")
+	state.mu.RLock()
+	_, ok = state.lastUpdated["bucket/obj.json"]
+	state.mu.RUnlock()
+	assert.False(t, ok, "lastUpdated should be cleared after Delete")
 }
