@@ -369,6 +369,9 @@ func (r *Replicator) runAutoSyncCycle() {
 
 	// Build flat active-key set for pruning stale state vectors.
 	// Keys are stored as "bucket/key" to match State's internal format.
+	// Only locally-owned keys are included (replicated buckets are intentionally
+	// excluded — their state vectors would be stale on restart anyway, and the
+	// GCGracePeriod provides a buffer against transient ownership detection errors).
 	activeSet := make(map[string]bool, len(localKeys)*4)
 	for bucket, keys := range localKeys {
 		for _, key := range keys {

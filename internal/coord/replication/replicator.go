@@ -2490,11 +2490,15 @@ func (r *Replicator) runDeferredChunkCleanupWorker() {
 		}
 
 		// Coalesce: wait 30 seconds to collect more chunks.
+		// Use time.NewTimer instead of time.After to avoid a timer leak on ctx cancellation.
+		coalesceTimer := time.NewTimer(30 * time.Second)
 		select {
-		case <-time.After(30 * time.Second):
+		case <-coalesceTimer.C:
 		case <-r.ctx.Done():
+			coalesceTimer.Stop()
 			return
 		}
+		coalesceTimer.Stop()
 
 		// Swap out the pending set so we don't block enqueuers during the walk.
 		r.deferredChunksMu.Lock()
