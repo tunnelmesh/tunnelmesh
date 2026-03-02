@@ -128,6 +128,10 @@ type S3Store interface {
 	// GetBucketOwner returns the owner of a bucket (empty string if bucket not found).
 	// Used by manifest reconciliation to validate sender ownership.
 	GetBucketOwner(ctx context.Context, bucket string) string
+
+	// GetActiveVersionIDs returns the set of all active version IDs across all buckets.
+	// Used by CleanupOrphanedShards to identify EC shards whose parent version is gone.
+	GetActiveVersionIDs(ctx context.Context) (map[string]bool, error)
 }
 
 // ChunkRegistryInterface defines operations for chunk ownership tracking.
@@ -137,6 +141,12 @@ type ChunkRegistryInterface interface {
 	GetOwners(hash string) ([]string, error)
 	GetChunksOwnedBy(coordID string) ([]string, error)
 	AddOwner(hash string, coordID string) error
+	// CleanupOrphanedShards removes registry entries for EC shards whose parent
+	// file version ID is no longer present in the active set. Returns count removed.
+	CleanupOrphanedShards(activeFileIDs map[string]bool) int
+	// CleanupStaleOwners removes coordinator entries that have not been refreshed
+	// within maxAge. Returns the total count of ownership entries removed.
+	CleanupStaleOwners(maxAge time.Duration) int
 }
 
 // Replicator manages replication of S3 data between coordinators.
@@ -216,6 +226,10 @@ type Replicator struct {
 	autoSyncInterval     time.Duration
 	autoSyncInitialDelay time.Duration
 
+	// Chunk registry periodic cleanup
+	chunkRegistryCleanupInterval time.Duration
+	chunkRegistryMaxOwnerAge     time.Duration
+
 	// On-demand manifest sync trigger (buffered 1 — deduplicated).
 	manifestSyncCh chan struct{}
 
@@ -250,27 +264,29 @@ type pendingChunkReplication struct {
 
 // Config contains configuration for the replicator.
 type Config struct {
-	NodeID               string
-	Transport            Transport
-	S3Store              S3Store
-	ChunkRegistry        ChunkRegistryInterface // Optional: distributed chunk ownership tracking (Phase 4)
-	CapacityChecker      CapacityChecker        // Optional: nil = no capacity checks
-	Logger               zerolog.Logger
-	AckTimeout           time.Duration   // How long to wait for ACK before retrying (default: 10s)
-	RetryInterval        time.Duration   // How long to wait before retrying failed replication (default: 30s)
-	MaxPendingOperations int             // Maximum number of pending ACKs to track (0 = unlimited, default: 10k)
-	RateLimit            int             // Maximum incoming messages per second (0 = unlimited, default: 5000)
-	RateBurst            int             // Maximum burst size for rate limiter (default: 500)
-	ApplyTimeout         time.Duration   // Timeout for applying replication to S3 (default: 30s)
-	AckSendTimeout       time.Duration   // Timeout for sending ACK messages (default: 5s)
-	SyncRequestTimeout   time.Duration   // Timeout for handling sync requests (default: 5min)
-	SyncResponseTimeout  time.Duration   // Timeout for handling sync responses (default: 10min)
-	ChunkAckTimeout      time.Duration   // Timeout for chunk-level ACKs (default: 30s, Phase 4)
-	MaxConcurrentSends   int             // Maximum concurrent outbound replication sends (default: 20)
-	ChunkPipelineWindow  int             // Maximum concurrent chunk sends per ReplicateObject (default: 5)
-	AutoSyncInterval     time.Duration   // How often to re-enqueue all objects for replication (default: 5min, 0 = disabled)
-	AutoSyncInitialDelay time.Duration   // Initial delay before first auto-sync (default: 2min). 0 uses default.
-	Context              context.Context // SECURITY FIX #3: Parent context for proper cancellation propagation
+	NodeID                       string
+	Transport                    Transport
+	S3Store                      S3Store
+	ChunkRegistry                ChunkRegistryInterface // Optional: distributed chunk ownership tracking (Phase 4)
+	CapacityChecker              CapacityChecker        // Optional: nil = no capacity checks
+	Logger                       zerolog.Logger
+	AckTimeout                   time.Duration   // How long to wait for ACK before retrying (default: 10s)
+	RetryInterval                time.Duration   // How long to wait before retrying failed replication (default: 30s)
+	MaxPendingOperations         int             // Maximum number of pending ACKs to track (0 = unlimited, default: 10k)
+	RateLimit                    int             // Maximum incoming messages per second (0 = unlimited, default: 5000)
+	RateBurst                    int             // Maximum burst size for rate limiter (default: 500)
+	ApplyTimeout                 time.Duration   // Timeout for applying replication to S3 (default: 30s)
+	AckSendTimeout               time.Duration   // Timeout for sending ACK messages (default: 5s)
+	SyncRequestTimeout           time.Duration   // Timeout for handling sync requests (default: 5min)
+	SyncResponseTimeout          time.Duration   // Timeout for handling sync responses (default: 10min)
+	ChunkAckTimeout              time.Duration   // Timeout for chunk-level ACKs (default: 30s, Phase 4)
+	MaxConcurrentSends           int             // Maximum concurrent outbound replication sends (default: 20)
+	ChunkPipelineWindow          int             // Maximum concurrent chunk sends per ReplicateObject (default: 5)
+	AutoSyncInterval             time.Duration   // How often to re-enqueue all objects for replication (default: 5min, 0 = disabled)
+	AutoSyncInitialDelay         time.Duration   // Initial delay before first auto-sync (default: 2min). 0 uses default.
+	ChunkRegistryCleanupInterval time.Duration   // How often to evict stale chunk owners (default: 1h, 0 uses default)
+	ChunkRegistryMaxOwnerAge     time.Duration   // Max age for a coordinator's ownership entry (default: 7 days)
+	Context                      context.Context // SECURITY FIX #3: Parent context for proper cancellation propagation
 }
 
 // NewReplicator creates a new replicator instance.
@@ -317,6 +333,12 @@ func NewReplicator(config Config) *Replicator {
 	if config.AutoSyncInitialDelay == 0 {
 		config.AutoSyncInitialDelay = 2 * time.Minute
 	}
+	if config.ChunkRegistryCleanupInterval == 0 {
+		config.ChunkRegistryCleanupInterval = 1 * time.Hour
+	}
+	if config.ChunkRegistryMaxOwnerAge == 0 {
+		config.ChunkRegistryMaxOwnerAge = 7 * 24 * time.Hour
+	}
 
 	// SECURITY FIX #3: Use provided context or create a new one
 	// This allows proper context propagation and cancellation from parent
@@ -345,25 +367,27 @@ func NewReplicator(config Config) *Replicator {
 		// high parallelism for typical replication bursts while limiting
 		// goroutine memory overhead (~8KB stack each). When full, callers
 		// fall back to synchronous send rather than queueing indefinitely.
-		ackSendSem:             make(chan struct{}, 100),
-		sendSem:                make(chan struct{}, config.MaxConcurrentSends),
-		rateLimiter:            rate.NewLimiter(rate.Limit(config.RateLimit), config.RateBurst),
-		peers:                  make(map[string]bool),
-		peerNames:              make(map[string]string),
-		pending:                make(map[string]*pendingReplication),
-		pendingChunks:          make(map[string]*pendingChunkReplication),
-		pendingFetchRequests:   make(map[string]chan *FetchChunkResponsePayload),
-		pendingFetchTimestamps: make(map[string]time.Time),
-		metaImportSem:          make(chan struct{}, 3),
-		deferredChunks:         make(map[string]struct{}),
-		deferredNotify:         make(chan struct{}, 1),
-		replQueue:              make(chan struct{}, 1),
-		manifestSyncCh:         make(chan struct{}, 1),
-		chunkPipelineWindow:    config.ChunkPipelineWindow,
-		autoSyncInterval:       config.AutoSyncInterval,
-		autoSyncInitialDelay:   config.AutoSyncInitialDelay,
-		ctx:                    ctx,
-		cancel:                 cancel,
+		ackSendSem:                   make(chan struct{}, 100),
+		sendSem:                      make(chan struct{}, config.MaxConcurrentSends),
+		rateLimiter:                  rate.NewLimiter(rate.Limit(config.RateLimit), config.RateBurst),
+		peers:                        make(map[string]bool),
+		peerNames:                    make(map[string]string),
+		pending:                      make(map[string]*pendingReplication),
+		pendingChunks:                make(map[string]*pendingChunkReplication),
+		pendingFetchRequests:         make(map[string]chan *FetchChunkResponsePayload),
+		pendingFetchTimestamps:       make(map[string]time.Time),
+		metaImportSem:                make(chan struct{}, 3),
+		deferredChunks:               make(map[string]struct{}),
+		deferredNotify:               make(chan struct{}, 1),
+		replQueue:                    make(chan struct{}, 1),
+		manifestSyncCh:               make(chan struct{}, 1),
+		chunkPipelineWindow:          config.ChunkPipelineWindow,
+		autoSyncInterval:             config.AutoSyncInterval,
+		autoSyncInitialDelay:         config.AutoSyncInitialDelay,
+		chunkRegistryCleanupInterval: config.ChunkRegistryCleanupInterval,
+		chunkRegistryMaxOwnerAge:     config.ChunkRegistryMaxOwnerAge,
+		ctx:                          ctx,
+		cancel:                       cancel,
 	}
 
 	// Register message handler
@@ -413,6 +437,12 @@ func (r *Replicator) Start() error {
 	// Start deferred chunk cleanup worker
 	r.wg.Add(1)
 	go r.runDeferredChunkCleanupWorker()
+
+	// Start chunk registry stale-owner cleanup worker
+	if r.chunkRegistry != nil {
+		r.wg.Add(1)
+		go r.chunkRegistryCleanupWorker()
+	}
 
 	// Start rebalancer if configured
 	if r.rebalancer != nil {
@@ -1361,6 +1391,29 @@ func (r *Replicator) fetchRequestCleanupWorker() {
 					Int("count", cleaned).
 					Dur("ttl", fetchRequestTTL).
 					Msg("Cleaned up stale fetch requests")
+			}
+		}
+	}
+}
+
+// chunkRegistryCleanupWorker periodically evicts stale coordinator entries from the
+// chunk registry. After the primary fix (UnregisterChunk in DeleteUnreferencedChunks),
+// valid chunks are regularly re-registered; orphaned entries become stale over time
+// and are removed here, acting as a backstop for any deletion paths we may have missed.
+func (r *Replicator) chunkRegistryCleanupWorker() {
+	defer r.wg.Done()
+
+	ticker := time.NewTicker(r.chunkRegistryCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			n := r.chunkRegistry.CleanupStaleOwners(r.chunkRegistryMaxOwnerAge)
+			if n > 0 {
+				r.logger.Info().Int("cleaned", n).Msg("chunk registry stale owner cleanup")
 			}
 		}
 	}

@@ -388,6 +388,19 @@ func (r *Replicator) runAutoSyncCycle() {
 	// Only includes locally-owned buckets: each coordinator is authoritative
 	// for its own buckets and should not send manifests for replicated ones.
 	r.sendObjectManifest(ctx, localKeys, peers)
+
+	// Clean up registry entries for erasure-coding shards whose parent file version
+	// has been deleted. This runs every autoSyncInterval (default 5 min), which is
+	// frequent enough to contain registry growth between accordion benchmark runs.
+	if r.chunkRegistry != nil {
+		if activeVersionIDs, err := r.s3.GetActiveVersionIDs(ctx); err == nil {
+			if n := r.chunkRegistry.CleanupOrphanedShards(activeVersionIDs); n > 0 {
+				r.logger.Info().Int("cleaned", n).Msg("Auto-sync: cleaned up orphaned EC shard registry entries")
+			}
+		} else {
+			r.logger.Warn().Err(err).Msg("Auto-sync: failed to get active version IDs for shard cleanup")
+		}
+	}
 }
 
 // sendObjectManifest sends the set of live objects to each peer so they can

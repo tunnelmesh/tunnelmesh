@@ -2853,6 +2853,12 @@ func (s *Store) DeleteUnreferencedChunks(ctx context.Context, chunkHashes []stri
 				s.statsChunkCount.Add(-1)
 				s.statsChunkBytes.Add(-freed)
 				totalFreed += freed
+				if s.chunkRegistry != nil {
+					if err := s.chunkRegistry.UnregisterChunk(hash); err != nil {
+						s.logger.Warn().Str("hash", hash[:8]).Err(err).
+							Msg("failed to unregister chunk from registry after deletion")
+					}
+				}
 			}
 		}
 	}
@@ -3805,6 +3811,76 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 	}
 
 	return referencedChunks
+}
+
+// GetActiveVersionIDs returns the set of all active version IDs across all buckets.
+// It walks the same meta/ and versions/ directories as buildChunkReferenceSet, collecting
+// the VersionID field from each ObjectMeta. This is used by the replicator to identify
+// erasure-coding shards whose parent file version no longer exists.
+func (s *Store) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error) {
+	activeVersionIDs := make(map[string]bool)
+
+	bucketsDir := filepath.Join(s.dataDir, "buckets")
+	bucketEntries, err := os.ReadDir(bucketsDir)
+	if err != nil {
+		// Directory not yet created is not an error.
+		return activeVersionIDs, nil
+	}
+
+	for _, bucketEntry := range bucketEntries {
+		select {
+		case <-ctx.Done():
+			return activeVersionIDs, ctx.Err()
+		default:
+		}
+		if !bucketEntry.IsDir() {
+			continue
+		}
+		bucket := bucketEntry.Name()
+
+		// Scan current objects (live versions under meta/).
+		metaDir := filepath.Join(bucketsDir, bucket, "meta")
+		_ = filepath.Walk(metaDir, func(path string, info os.FileInfo, err error) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+				return nil
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			var meta ObjectMeta
+			if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
+				activeVersionIDs[meta.VersionID] = true
+			}
+			return nil
+		})
+
+		// Scan archived versions (under versions/).
+		versionsDir := filepath.Join(bucketsDir, bucket, "versions")
+		_ = filepath.Walk(versionsDir, func(path string, info os.FileInfo, err error) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
+				return nil
+			}
+			data, _ := os.ReadFile(path)
+			var meta ObjectMeta
+			if json.Unmarshal(data, &meta) == nil && meta.VersionID != "" {
+				activeVersionIDs[meta.VersionID] = true
+			}
+			return nil
+		})
+	}
+
+	return activeVersionIDs, nil
 }
 
 // pruneAllExpiredVersionsSimple prunes expired versions across all buckets.

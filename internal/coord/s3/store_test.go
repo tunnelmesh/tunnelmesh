@@ -2607,7 +2607,12 @@ func (r *trackingChunkRegistry) RegisterShardChunk(hash string, size int64, _, _
 	return r.RegisterChunk(hash, size)
 }
 
-func (r *trackingChunkRegistry) UnregisterChunk(_ string) error { return nil }
+func (r *trackingChunkRegistry) UnregisterChunk(hash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.registered, hash)
+	return nil
+}
 
 func (r *trackingChunkRegistry) GetOwners(_ string) ([]string, error) {
 	return nil, fmt.Errorf("not found")
@@ -3195,4 +3200,39 @@ func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {
 	err := store.UpdateBucketMetadata(ctx, "test", BucketMetadataUpdate{QuotaBytes: &neg})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot be negative")
+}
+
+// TestPurgeObject_UnregistersChunksFromRegistry verifies that PurgeObject removes
+// all chunk entries from the distributed chunk registry (the primary fix for the
+// ascending memory baseline between accordion benchmark runs).
+func TestPurgeObject_UnregistersChunksFromRegistry(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	reg := newTrackingChunkRegistry()
+	store.SetChunkRegistry(reg)
+
+	require.NoError(t, store.CreateBucket(ctx, "bucket", "alice", 2, nil))
+
+	// Put a CDC object so its chunks are registered.
+	content := []byte("hello world purge registry test unique content abc123")
+	_, err := store.PutObject(ctx, "bucket", "obj.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
+	require.NoError(t, err)
+
+	// Confirm at least one chunk was registered.
+	reg.mu.Lock()
+	registeredCount := len(reg.registered)
+	reg.mu.Unlock()
+	require.Greater(t, registeredCount, 0, "PutObject should register chunks in the registry")
+
+	// PurgeObject deletes the object, its chunks (via DeleteUnreferencedChunks), and
+	// must now also unregister them from the chunk registry.
+	err = store.PurgeObject(ctx, "bucket", "obj.txt")
+	require.NoError(t, err)
+
+	reg.mu.Lock()
+	remaining := len(reg.registered)
+	reg.mu.Unlock()
+	assert.Equal(t, 0, remaining,
+		"PurgeObject should unregister all chunk entries from the registry")
 }

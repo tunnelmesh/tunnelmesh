@@ -267,3 +267,8 @@ func (a *S3StoreAdapter) GetAllObjectKeys(ctx context.Context) (map[string][]str
 	}
 	return result, nil
 }
+
+// GetActiveVersionIDs returns the set of all active version IDs across all buckets.
+func (a *S3StoreAdapter) GetActiveVersionIDs(ctx context.Context) (map[string]bool, error) {
+	return a.store.GetActiveVersionIDs(ctx)
+}
