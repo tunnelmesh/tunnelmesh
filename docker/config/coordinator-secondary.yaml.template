@@ -14,6 +14,9 @@ coordinator:
   admin_peers: ["coordinator-*", "mynode"]
   service_ports: [9443]
   locations: true
+  s3:
+    recycle_bin_retention_days: 7
+    max_versions_per_object: 10
 
 # Ship logs to the central Loki running on coordinator-1
 loki:

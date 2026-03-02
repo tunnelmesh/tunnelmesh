@@ -15,6 +15,9 @@ coordinator:
   monitoring:
     prometheus_url: "http://localhost:9090"
     grafana_url: "http://localhost:3000"
+  s3:
+    recycle_bin_retention_days: 7
+    max_versions_per_object: 10
 
 # Log shipping to Loki
 loki:

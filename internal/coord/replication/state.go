@@ -7,22 +7,25 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // State tracks version vectors for each replicated S3 key.
 // This provides conflict detection for the replication system.
 // Version vectors are separate from S3's object versioning.
 type State struct {
-	mu      sync.RWMutex
-	vectors map[string]VersionVector // key: "bucket/key", value: version vector
-	nodeID  string                   // This coordinator's ID
+	mu          sync.RWMutex
+	vectors     map[string]VersionVector // key: "bucket/key", value: version vector
+	lastUpdated map[string]time.Time     // key: "bucket/key", value: last mutation time
+	nodeID      string                   // This coordinator's ID
 }
 
 // NewState creates a new replication state tracker.
 func NewState(nodeID string) *State {
 	return &State{
-		vectors: make(map[string]VersionVector),
-		nodeID:  nodeID,
+		vectors:     make(map[string]VersionVector),
+		lastUpdated: make(map[string]time.Time),
+		nodeID:      nodeID,
 	}
 }
 
@@ -52,6 +55,7 @@ func (s *State) Set(bucket, key string, vv VersionVector) {
 
 	k := makeKey(bucket, key)
 	s.vectors[k] = vv.Copy()
+	s.lastUpdated[k] = time.Now()
 }
 
 // Update updates the version vector for a given S3 object.
@@ -69,6 +73,7 @@ func (s *State) Update(bucket, key string) VersionVector {
 
 	vv.Increment(s.nodeID)
 	s.vectors[k] = vv
+	s.lastUpdated[k] = time.Now()
 
 	return vv.Copy()
 }
@@ -90,6 +95,7 @@ func (s *State) Merge(bucket, key string, remoteVV VersionVector) (merged Versio
 	// Merge the remote version vector
 	localVV.Merge(remoteVV)
 	s.vectors[k] = localVV
+	s.lastUpdated[k] = time.Now()
 
 	return localVV.Copy(), isNew
 }
@@ -112,6 +118,7 @@ func (s *State) Delete(bucket, key string) {
 
 	k := makeKey(bucket, key)
 	delete(s.vectors, k)
+	delete(s.lastUpdated, k)
 }
 
 // DeleteBucket removes all version vectors for every key in the given bucket.
@@ -123,6 +130,7 @@ func (s *State) DeleteBucket(bucket string) {
 	for k := range s.vectors {
 		if strings.HasPrefix(k, prefix) {
 			delete(s.vectors, k)
+			delete(s.lastUpdated, k)
 		}
 	}
 }
@@ -139,6 +147,7 @@ func (s *State) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.vectors = make(map[string]VersionVector)
+	s.lastUpdated = make(map[string]time.Time)
 }
 
 // stateSnapshot represents a serializable snapshot of the replication state.
@@ -253,4 +262,25 @@ func (s *State) ListKeys() []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// PruneDeletedKeys removes version vector entries for keys no longer in the
+// active set whose last update is older than maxAge. This prevents unbounded
+// growth when accordion-style workloads delete and recreate many unique keys.
+// The maxAge grace period ensures in-flight delayed PUT replicas can still be
+// rejected via conflict detection before the tombstone is discarded.
+// Returns the number of entries removed.
+func (s *State) PruneDeletedKeys(activeKeys map[string]bool, maxAge time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pruned := 0
+	for k, ts := range s.lastUpdated {
+		if !activeKeys[k] && time.Since(ts) > maxAge {
+			delete(s.vectors, k)
+			delete(s.lastUpdated, k)
+			pruned++
+		}
+	}
+	return pruned
 }

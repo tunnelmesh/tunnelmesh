@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	s3pkg "github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
@@ -364,6 +365,18 @@ func (r *Replicator) runAutoSyncCycle() {
 			continue
 		}
 		localKeys[bucket] = keys
+	}
+
+	// Build flat active-key set for pruning stale state vectors.
+	// Keys are stored as "bucket/key" to match State's internal format.
+	activeSet := make(map[string]bool, len(localKeys)*4)
+	for bucket, keys := range localKeys {
+		for _, key := range keys {
+			activeSet[bucket+"/"+key] = true
+		}
+	}
+	if pruned := r.state.PruneDeletedKeys(activeSet, s3pkg.GCGracePeriod); pruned > 0 {
+		r.logger.Info().Int("pruned", pruned).Msg("Auto-sync: pruned stale replication state vectors")
 	}
 
 	var total int
