@@ -221,6 +221,16 @@ func (s *State) LoadSnapshot(data []byte) error {
 	// s.nodeID = snapshot.NodeID  // REMOVED: This would corrupt our identity
 	s.vectors = snapshot.Vectors
 
+	// Timestamps are not persisted in snapshots (they're ephemeral). Seed every
+	// loaded entry with time.Now() so PruneDeletedKeys can see them. The
+	// GCGracePeriod window gives the cluster time to re-sync and confirm which
+	// keys are still active before any pruning occurs.
+	now := time.Now()
+	s.lastUpdated = make(map[string]time.Time, len(snapshot.Vectors))
+	for k := range snapshot.Vectors {
+		s.lastUpdated[k] = now
+	}
+
 	return nil
 }
 
