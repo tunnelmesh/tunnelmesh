@@ -4,6 +4,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -251,8 +254,8 @@ func TestServer_ContextCancellation(t *testing.T) {
 }
 
 func TestServer_Addr(t *testing.T) {
-	server := NewServer("10.99.0.1", 9998)
-	assert.Equal(t, "10.99.0.1:9998", server.Addr())
+	server := NewServer("10.99.0.1", 9443)
+	assert.Equal(t, "10.99.0.1:9443", server.Addr())
 }
 
 // Helper to create a bytes reader
@@ -342,4 +345,62 @@ func TestServer_FullBenchmarkCycle(t *testing.T) {
 	mt, _, err = ReadMessage(conn)
 	require.NoError(t, err)
 	require.Equal(t, MsgComplete, mt)
+}
+
+// TestHTTPHandler_UploadCycle verifies that NewHTTPHandler correctly performs
+// the HTTP upgrade and then runs a complete upload benchmark cycle.
+func TestHTTPHandler_UploadCycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ts := httptest.NewTLSServer(NewHTTPHandler())
+	defer ts.Close()
+
+	u, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(u.Port())
+	require.NoError(t, err)
+
+	conn, err := dialBenchmarkHTTP(ctx, "127.0.0.1:"+strconv.Itoa(port))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	// 1. Send start
+	start := StartMessage{Size: 256, Direction: DirectionUpload}
+	require.NoError(t, WriteMessage(conn, MsgStart, &start))
+
+	// 2. Read ack
+	mt, data, err := ReadMessage(conn)
+	require.NoError(t, err)
+	require.Equal(t, MsgAck, mt)
+	var ack AckMessage
+	require.NoError(t, ack.Decode(bytesReader(data)))
+	require.True(t, ack.Accepted)
+
+	// 3. Send data
+	dataMsg := DataMessage{SeqNum: 0, Data: make([]byte, 256)}
+	require.NoError(t, WriteMessage(conn, MsgData, &dataMsg))
+
+	// 4. Send complete
+	complete := CompleteMessage{BytesTransferred: 256, DurationNs: int64(time.Millisecond)}
+	require.NoError(t, WriteMessage(conn, MsgComplete, &complete))
+
+	// 5. Read server's complete
+	mt, _, err = ReadMessage(conn)
+	require.NoError(t, err)
+	assert.Equal(t, MsgComplete, mt)
+}
+
+// TestHTTPHandler_BadUpgradeHeader verifies that a request without the correct
+// Upgrade header receives a 400 Bad Request response.
+func TestHTTPHandler_BadUpgradeHeader(t *testing.T) {
+	ts := httptest.NewTLSServer(NewHTTPHandler())
+	defer ts.Close()
+	tsClient := ts.Client() // TLS client that trusts the test cert
+
+	resp, err := tsClient.Get(ts.URL + BenchmarkPath)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, 400, resp.StatusCode, "missing Upgrade header should return 400")
 }

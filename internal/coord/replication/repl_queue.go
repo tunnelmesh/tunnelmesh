@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -167,6 +168,7 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 	}
 
 	allSucceeded := true
+	var bucketMissing bool
 	for range peers {
 		res := <-results
 		name := peerNames[res.peerID]
@@ -179,18 +181,30 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 			attribute.Bool("peer.succeeded", res.err == nil),
 		))
 		if res.err != nil {
-			r.logger.Error().Err(res.err).
-				Str("peer", res.peerID).
-				Str("bucket", entry.bucket).
-				Str("key", entry.key).
-				Int("retry", entry.retries).
-				Msg("Queued replication failed")
-			span.RecordError(res.err)
+			if errors.Is(res.err, s3pkg.ErrBucketNotFound) {
+				bucketMissing = true
+			} else {
+				r.logger.Error().Err(res.err).
+					Str("peer", res.peerID).
+					Str("bucket", entry.bucket).
+					Str("key", entry.key).
+					Int("retry", entry.retries).
+					Msg("Queued replication failed")
+				span.RecordError(res.err)
+			}
 			allSucceeded = false
 		}
 	}
 
 	if !allSucceeded {
+		if bucketMissing {
+			span.SetStatus(otelcodes.Ok, "bucket deleted")
+			r.logger.Debug().
+				Str("bucket", entry.bucket).
+				Str("key", entry.key).
+				Msg("replication: source bucket deleted, dropping queue entry")
+			return
+		}
 		span.SetStatus(otelcodes.Error, "one or more peers failed")
 		r.reEnqueueOnFailure(entry)
 	} else {

@@ -10,7 +10,10 @@ import (
 
 // Default values for benchmark configuration.
 const (
-	DefaultPort    = 9998
+	// DefaultPort is the port of the admin server where the benchmark HTTP handler
+	// is registered. Benchmark traffic flows through HTTPS (TLS + HTTP upgrade)
+	// rather than a dedicated plain-TCP listener.
+	DefaultPort    = 9443
 	DefaultSize    = 10 * 1024 * 1024 // 10 MB
 	DefaultTimeout = 120 * time.Second
 	ChunkSize      = 64 * 1024 // 64 KB chunks

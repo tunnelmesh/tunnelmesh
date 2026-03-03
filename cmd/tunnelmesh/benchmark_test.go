@@ -38,7 +38,7 @@ func TestNewBenchmarkCmd(t *testing.T) {
 
 	portFlag := cmd.Flags().Lookup("port")
 	require.NotNil(t, portFlag)
-	assert.Equal(t, "9998", portFlag.DefValue)
+	assert.Equal(t, "9443", portFlag.DefValue)
 
 	// Chaos flags
 	packetLossFlag := cmd.Flags().Lookup("packet-loss")
