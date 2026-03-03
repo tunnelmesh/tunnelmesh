@@ -767,6 +767,47 @@ func TestPurgeOrphanedFileShareBuckets_GracePeriod(t *testing.T) {
 	assert.NoError(t, err, "bucket should still exist after purge (grace period)")
 }
 
+func TestPurgeOrphanedFileShareBuckets_KeepsRecentOrphanInRaceWindow(t *testing.T) {
+	// Regression test for the race condition where:
+	// 1. Coordinator A creates fs+ bucket and enqueues file_shares.json replication
+	// 2. Coordinator B auto-creates the bucket via ImportObjectMeta
+	// 3. GC fires before file_shares.json arrives (can take up to 7 min)
+	// 4. With the old 2-min grace period the bucket was deleted; with 1-hour it survives.
+	store := newTestStoreWithCASForFileshare(t)
+	systemStore, err := NewSystemStore(store, "svc:coordinator")
+	require.NoError(t, err)
+
+	authorizer := auth.NewAuthorizerWithGroups()
+	mgr := NewFileShareManager(store, systemStore, authorizer)
+
+	// Create a fs+ bucket with no share config — simulates a bucket replicated
+	// before its file_shares.json arrived (the race window).
+	bucketName := FileShareBucketPrefix + "race-window"
+	err = store.CreateBucket(context.Background(), bucketName, "alice", 1, nil)
+	require.NoError(t, err)
+
+	// Backdate the bucket to 5 minutes old — past the old 2-min grace period
+	// but well within the new 1-hour grace period.
+	metaPath := filepath.Join(store.DataDir(), "buckets", bucketName, "_meta.json")
+	metaData, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+	meta, err := store.HeadBucket(context.Background(), bucketName)
+	require.NoError(t, err)
+	fiveMinAgo := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	updated := bytes.Replace(metaData,
+		[]byte(meta.CreatedAt.Format(time.RFC3339Nano)),
+		[]byte(fiveMinAgo), 1)
+	require.NoError(t, os.WriteFile(metaPath, updated, 0644))
+
+	// Purge should NOT delete this bucket — it is within the 1-hour grace period
+	purged := mgr.PurgeOrphanedFileShareBuckets(context.Background())
+	assert.Equal(t, 0, purged, "5-min old orphaned bucket must survive within 1-hour grace period")
+
+	// Verify bucket still exists
+	_, err = store.HeadBucket(context.Background(), bucketName)
+	assert.NoError(t, err, "bucket must still exist — file_shares.json replication can take up to 7 min")
+}
+
 func TestPurgeOrphanedFileShareBuckets_DeletesOldOrphans(t *testing.T) {
 	store := newTestStoreWithCASForFileshare(t)
 	systemStore, err := NewSystemStore(store, "svc:coordinator")
@@ -785,10 +826,10 @@ func TestPurgeOrphanedFileShareBuckets_DeletesOldOrphans(t *testing.T) {
 	metaData, err := os.ReadFile(metaPath)
 	require.NoError(t, err)
 
-	// Replace the timestamp with one from 20 minutes ago
+	// Replace the timestamp with one from 2 hours ago (well past the 1-hour grace period)
 	meta, err := store.HeadBucket(context.Background(), bucketName)
 	require.NoError(t, err)
-	oldTime := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339Nano)
+	oldTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	updated := bytes.Replace(metaData,
 		[]byte(meta.CreatedAt.Format(time.RFC3339Nano)),
 		[]byte(oldTime), 1)
@@ -903,12 +944,12 @@ func TestPurgeOrphanedFileShareBuckets_KeepsActiveBuckets(t *testing.T) {
 
 	bucketName := FileShareBucketPrefix + "active"
 
-	// Backdate the bucket so it's past the grace period
+	// Backdate the bucket so it's past the grace period (well past 1 hour)
 	metaPath := filepath.Join(store.DataDir(), "buckets", bucketName, "_meta.json")
 	metaData, err := os.ReadFile(metaPath)
 	require.NoError(t, err)
 
-	oldTime := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339Nano)
+	oldTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	meta, _ := store.HeadBucket(context.Background(), bucketName)
 	updated := bytes.Replace(metaData,
 		[]byte(meta.CreatedAt.Format(time.RFC3339Nano)),
@@ -945,7 +986,7 @@ func TestPurgeOrphanedFileShareBuckets_NilSystemStoreDoesNotWipeShares(t *testin
 	metaData, err := os.ReadFile(metaPath)
 	require.NoError(t, err)
 
-	oldTime := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339Nano)
+	oldTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	meta, _ := store.HeadBucket(context.Background(), bucketName)
 	updated := bytes.Replace(metaData,
 		[]byte(meta.CreatedAt.Format(time.RFC3339Nano)),
