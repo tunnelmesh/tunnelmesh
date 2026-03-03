@@ -1686,7 +1686,9 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	// Start metrics collection loop
 	go metricsCollector.Run(ctx, 10*time.Second)
 
-	// Start metrics admin server on mesh IP
+	// Start metrics admin server on mesh IP.
+	// The benchmark handler is registered on this mux so benchmark traffic
+	// flows through the admin HTTPS port instead of a dedicated TCP port.
 	if tlsMgr != nil {
 		tlsCert, err := tlsMgr.LoadCert()
 		if err != nil {
@@ -1694,6 +1696,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		} else {
 			metricsAddr := fmt.Sprintf("%s:%d", resp.MeshIP, cfg.MetricsPort)
 			adminServer := admin.NewAdminServer()
+			adminServer.Handle(benchmark.BenchmarkPath, benchmark.NewHTTPHandler())
 			if err := adminServer.Start(metricsAddr, tlsCert); err != nil {
 				log.Warn().Err(err).Msg("failed to start metrics admin server")
 			} else {
@@ -1703,17 +1706,6 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 				defer func() { _ = adminServer.Stop() }()
 			}
 		}
-	}
-
-	// Start benchmark server on mesh IP for speed tests
-	benchServer := benchmark.NewServer(resp.MeshIP, benchmark.DefaultPort)
-	if err := benchServer.Start(); err != nil {
-		log.Warn().Err(err).Msg("failed to start benchmark server")
-	} else {
-		log.Info().
-			Str("address", benchServer.Addr()).
-			Msg("benchmark server started")
-		defer func() { _ = benchServer.Stop() }()
 	}
 
 	// Start peer discovery and tunnel establishment loop

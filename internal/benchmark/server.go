@@ -8,104 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
 
-// Server is a benchmark server that listens for incoming benchmark connections.
-type Server struct {
-	addr     string
-	port     int
-	listener net.Listener
-
-	mu      sync.Mutex
-	running bool
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-}
-
-// NewServer creates a new benchmark server.
-func NewServer(addr string, port int) *Server {
-	return &Server{
-		addr: addr,
-		port: port,
-	}
-}
-
-// Addr returns the server's listen address.
-func (s *Server) Addr() string {
-	return fmt.Sprintf("%s:%d", s.addr, s.port)
-}
-
-// Start starts the benchmark server.
-func (s *Server) Start() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.running {
-		return fmt.Errorf("server already running")
-	}
-
-	listener, err := net.Listen("tcp", s.Addr())
-	if err != nil {
-		return fmt.Errorf("failed to listen: %w", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.listener = listener
-	s.cancel = cancel
-	s.running = true
-
-	s.wg.Add(1)
-	go s.acceptLoop(ctx)
-
-	log.Debug().Str("addr", s.Addr()).Msg("benchmark server started")
-	return nil
-}
-
-// Stop stops the benchmark server.
-func (s *Server) Stop() error {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
-		return nil
-	}
-	s.running = false
-	s.cancel()
-	_ = s.listener.Close()
-	s.mu.Unlock()
-
-	s.wg.Wait()
-	log.Debug().Str("addr", s.Addr()).Msg("benchmark server stopped")
-	return nil
-}
-
-func (s *Server) acceptLoop(ctx context.Context) {
-	defer s.wg.Done()
-
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				log.Error().Err(err).Msg("benchmark server accept error")
-				continue
-			}
-		}
-
-		s.wg.Add(1)
-		go s.handleConnection(ctx, conn)
-	}
-}
-
-func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
-	defer s.wg.Done()
-	defer func() { _ = conn.Close() }()
-
+// serveConn runs the benchmark binary protocol on an already-established net.Conn.
+// It is called from the HTTP-upgrade handler in http.go via NewHTTPHandler.
+func serveConn(ctx context.Context, conn net.Conn) {
 	log.Debug().Str("remote", conn.RemoteAddr().String()).Msg("benchmark connection accepted")
 
 	// Set read deadline for initial message
@@ -120,14 +30,14 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	if mt != MsgStart {
 		log.Error().Str("type", mt.String()).Msg("expected Start message")
-		s.sendError(conn, "expected Start message")
+		connSendError(conn, "expected Start message")
 		return
 	}
 
 	var start StartMessage
 	if err := start.Decode(bytes.NewReader(data)); err != nil {
 		log.Error().Err(err).Msg("failed to decode start message")
-		s.sendError(conn, "failed to decode start message")
+		connSendError(conn, "failed to decode start message")
 		return
 	}
 
@@ -144,15 +54,15 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	// Handle based on direction
 	switch start.Direction {
 	case DirectionUpload:
-		s.handleUpload(ctx, conn, start.Size)
+		connHandleUpload(ctx, conn, start.Size)
 	case DirectionDownload:
-		s.handleDownload(ctx, conn, start.Size)
+		connHandleDownload(ctx, conn, start.Size)
 	default:
-		s.sendError(conn, fmt.Sprintf("unknown direction: %s", start.Direction))
+		connSendError(conn, fmt.Sprintf("unknown direction: %s", start.Direction))
 	}
 }
 
-func (s *Server) handleUpload(ctx context.Context, conn net.Conn, size int64) {
+func connHandleUpload(ctx context.Context, conn net.Conn, size int64) {
 	startTime := time.Now()
 	var received int64
 
@@ -214,7 +124,7 @@ func (s *Server) handleUpload(ctx context.Context, conn net.Conn, size int64) {
 	}
 }
 
-func (s *Server) handleDownload(ctx context.Context, conn net.Conn, size int64) {
+func connHandleDownload(ctx context.Context, conn net.Conn, size int64) {
 	startTime := time.Now()
 	var sent int64
 	var seqNum uint32
@@ -224,7 +134,7 @@ func (s *Server) handleDownload(ctx context.Context, conn net.Conn, size int64) 
 	_, _ = rand.Read(chunk)
 
 	// Handle any incoming pings before starting data transfer
-	s.handlePendingPings(conn)
+	connHandlePendingPings(conn)
 
 	for sent < size {
 		select {
@@ -265,8 +175,8 @@ func (s *Server) handleDownload(ctx context.Context, conn net.Conn, size int64) 
 	}
 }
 
-// handlePendingPings reads and responds to any pending ping messages.
-func (s *Server) handlePendingPings(conn net.Conn) {
+// connHandlePendingPings reads and responds to any pending ping messages.
+func connHandlePendingPings(conn net.Conn) {
 	// Set a short timeout to check for pings
 	_ = conn.SetReadDeadline(time.Now().Add(PingCheckTimeout))
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
@@ -289,7 +199,7 @@ func (s *Server) handlePendingPings(conn net.Conn) {
 	}
 }
 
-func (s *Server) sendError(conn net.Conn, msg string) {
+func connSendError(conn net.Conn, msg string) {
 	errMsg := ErrorMessage{Error: msg}
 	_ = WriteMessage(conn, MsgError, &errMsg)
 }

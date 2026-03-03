@@ -49,10 +49,9 @@ func (c *Client) Run(ctx context.Context, cfg Config) (*Result, error) {
 		result.Chaos = &cfg.Chaos
 	}
 
-	// Connect to remote server
+	// Connect to the benchmark endpoint on the remote admin server via HTTP upgrade + TLS.
 	addr := fmt.Sprintf("%s:%d", c.remoteAddr, cfg.Port)
-	dialer := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := dialBenchmarkHTTP(ctx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
