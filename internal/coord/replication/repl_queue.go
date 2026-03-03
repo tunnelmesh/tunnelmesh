@@ -56,7 +56,15 @@ func (r *Replicator) runReplicationQueueWorker() {
 		case <-r.ctx.Done():
 			return
 		case <-r.replQueue:
-			r.drainReplicationQueue(r.ctx)
+			// Use a fresh context so that an in-progress drain is not aborted by
+			// r.ctx cancellation. Stop() calls drainReplicationQueueFinal() before
+			// r.cancel(), but if the worker already dequeued the entry, the final
+			// drain finds nothing and returns — leaving this drain as the only
+			// chance to complete the replication. The 10-second timeout keeps
+			// shutdown time bounded.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			r.drainReplicationQueue(ctx)
+			cancel()
 		case <-ticker.C:
 			r.drainReplicationQueue(r.ctx)
 		}
@@ -168,7 +176,7 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 	}
 
 	allSucceeded := true
-	var bucketMissing bool
+	var sourceBucketMissing bool
 	for range peers {
 		res := <-results
 		name := peerNames[res.peerID]
@@ -182,7 +190,7 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 		))
 		if res.err != nil {
 			if errors.Is(res.err, s3pkg.ErrBucketNotFound) {
-				bucketMissing = true
+				sourceBucketMissing = true
 			} else {
 				r.logger.Error().Err(res.err).
 					Str("peer", res.peerID).
@@ -197,10 +205,10 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 	}
 
 	if !allSucceeded {
-		// bucketMissing takes precedence over any other peer error: if the
-		// source bucket is gone there is nothing to replicate regardless of
-		// what other peers returned, so drop the entry unconditionally.
-		if bucketMissing {
+		// sourceBucketMissing takes precedence: if the source bucket is gone
+		// there is nothing to replicate regardless of what other peers returned,
+		// so drop the entry unconditionally.
+		if sourceBucketMissing {
 			span.SetStatus(otelcodes.Ok, "bucket deleted")
 			r.logger.Debug().
 				Str("bucket", entry.bucket).
