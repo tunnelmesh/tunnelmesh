@@ -379,8 +379,14 @@ func NewStoreWithCAS(dataDir string, quota *QuotaManager, masterKey [32]byte) (*
 	}
 	store.cas = cas
 
-	// Initialize incremental stats from filesystem (one-time walk at startup)
-	store.initCASStats()
+	// Initialize incremental stats from filesystem (one-time walk at startup).
+	// Run in background so HTTP server can start immediately; stats are only
+	// used for metrics/quota display and the atomic counters start at zero.
+	store.bgWg.Add(1)
+	go func() {
+		defer store.bgWg.Done()
+		store.initCASStats()
+	}()
 
 	return store, nil
 }
