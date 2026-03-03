@@ -4585,9 +4585,19 @@ func (s *Store) collectAndDeleteAllVersions(bucket, key string) []string {
 // Close flushes any pending operations and syncs the data directory.
 // Since all writes use syncedWriteFile (which calls fsync), this just ensures
 // directory metadata is flushed for durability.
-func (s *Store) Close() error {
+func (s *Store) Close() (retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Defer CAS close so the encoder's internal goroutines are always released,
+	// even if future callers of this function add early-return error paths.
+	if s.cas != nil {
+		defer func() {
+			if err := s.cas.Close(); err != nil && retErr == nil {
+				retErr = fmt.Errorf("close CAS encoder: %w", err)
+			}
+		}()
+	}
 
 	// Sync all bucket directories and their subdirectories to ensure
 	// all filesystem operations are complete before cleanup.
@@ -4646,13 +4656,6 @@ func (s *Store) Close() error {
 	if f, err := os.Open(s.dataDir); err == nil {
 		_ = f.Sync()
 		_ = f.Close()
-	}
-
-	// Release zstd encoder sub-encoder pool (~51 MB)
-	if s.cas != nil {
-		if err := s.cas.Close(); err != nil {
-			return fmt.Errorf("close CAS encoder: %w", err)
-		}
 	}
 
 	return nil

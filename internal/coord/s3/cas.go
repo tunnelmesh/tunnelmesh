@@ -16,6 +16,11 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+// casEncoderConcurrency caps the zstd encoder's internal sub-encoder pool.
+// Each sub-encoder holds ~12.7 MB of hash tables, so 4 × 12.7 MB ≈ 51 MB
+// memory budget. Increase for higher throughput at the cost of more memory.
+const casEncoderConcurrency = 4
+
 // CAS (Content-Addressable Storage) manages encrypted, compressed chunks.
 // Chunks are identified by their SHA-256 hash (computed on plaintext).
 // Storage format: plaintext -> zstd compress -> XChaCha20-Poly1305 encrypt -> store
@@ -65,11 +70,10 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 	}
 
 	// Initialize single shared encoder with bounded concurrency.
-	// Concurrency(4) caps the internal sub-encoder pool at 4×~12.7 MB ≈ 51 MB
-	// instead of GOMAXPROCS×12.7 MB ≈ 158 MB that a sync.Pool would accumulate.
+	// See casEncoderConcurrency for the memory/throughput tradeoff rationale.
 	enc, err := zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.SpeedDefault),
-		zstd.WithEncoderConcurrency(4),
+		zstd.WithEncoderConcurrency(casEncoderConcurrency),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create zstd encoder: %w", err)
