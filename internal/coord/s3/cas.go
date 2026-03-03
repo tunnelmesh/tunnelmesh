@@ -79,12 +79,23 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 	// Initialize decoder pool
 	cas.decoderPool = sync.Pool{
 		New: func() interface{} {
-			dec, _ := zstd.NewReader(nil)
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				// Unreachable: NewReader only fails on invalid options, and we
+				// pass none. Panic rather than silently returning a nil decoder.
+				panic(fmt.Sprintf("zstd.NewReader: %v", err))
+			}
 			return dec
 		},
 	}
 
 	return cas, nil
+}
+
+// Close releases the resources held by the shared encoder (its internal
+// sub-encoder pool). Should be called when the CAS is no longer needed.
+func (c *CAS) Close() error {
+	return c.encoder.Close()
 }
 
 // WriteChunk stores a chunk and returns its content hash and on-disk size.

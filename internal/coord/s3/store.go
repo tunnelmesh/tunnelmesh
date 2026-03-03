@@ -4642,5 +4642,12 @@ func (s *Store) Close() error {
 		_ = f.Close()
 	}
 
+	// Release zstd encoder sub-encoder pool (~51 MB)
+	if s.cas != nil {
+		if err := s.cas.Close(); err != nil {
+			return fmt.Errorf("close CAS encoder: %w", err)
+		}
+	}
+
 	return nil
 }
