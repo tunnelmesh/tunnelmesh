@@ -53,6 +53,7 @@ func RegisterWithCoordinator(ctx context.Context, coordinatorURL string, creds *
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: insecureSkipVerify,
 			},
+			IdleConnTimeout: 30 * time.Second,
 		},
 	}
 

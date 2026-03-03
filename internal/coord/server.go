@@ -1497,7 +1497,9 @@ func (s *Server) StartS3Server(addr string, tlsCert *tls.Certificate) error {
 	}
 
 	server := &http.Server{
-		Handler: s.s3Server.Handler(),
+		Handler:           s.s3Server.Handler(),
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	if tlsCert != nil {
@@ -2409,7 +2411,13 @@ func (s *Server) lookupPeerLocation(peerName, ip string) {
 // ListenAndServe starts the coordination server.
 func (s *Server) ListenAndServe() error {
 	log.Info().Str("listen", s.cfg.Coordinator.Listen).Msg("starting coordination server")
-	return http.ListenAndServe(s.cfg.Coordinator.Listen, s)
+	srv := &http.Server{
+		Addr:              s.cfg.Coordinator.Listen,
+		Handler:           s,
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 // GetCoordMeshIPs returns the current list of coordinator mesh IPs.
@@ -2598,7 +2606,9 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 	}
 
 	s.adminServer = &http.Server{
-		Handler: redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
+		Handler:           redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	if tlsCert != nil {
