@@ -874,6 +874,12 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		// Collect and persist local capacity, then load peer snapshots
 		s.collectAndPersistCapacity(ctx)
 		s.loadPeerCapacitySnapshots(ctx)
+
+		// Evict peers that stopped heartbeating (frees IP allocations)
+		s.evictStalePeers()
+
+		// Remove expired circuit breaker state entries
+		s.forwardBreaker.Cleanup()
 	}
 
 	// Initialize listing index channel and start background indexer
@@ -935,6 +941,62 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// stalePeerTimeout is how long a non-coordinator peer can go without a heartbeat
+// before being evicted. Only peers that have heartbeated at least once are eligible;
+// zero-time registrations (e.g. s3bench) are excluded and handled via explicit deregistration.
+const stalePeerTimeout = 30 * time.Minute
+
+// evictStalePeers removes non-coordinator peers that have not sent a heartbeat
+// within stalePeerTimeout. This releases their IP allocations, DNS entries, and
+// alias registrations so the coordinator does not accumulate unbounded state.
+// It is called from the periodic GC cycle (every 5 minutes).
+func (s *Server) evictStalePeers() {
+	now := time.Now()
+
+	// Collect names of stale peers under the lock, then call holePunch outside it.
+	type evicted struct {
+		name string
+		info *peerInfo
+	}
+	var toEvict []evicted
+
+	s.peersMu.Lock()
+	for name, info := range s.peers {
+		if info.peer.IsCoordinator {
+			continue // Coordinators have a separate lifecycle
+		}
+		if info.lastStatsTime.IsZero() {
+			continue // Never heartbeated (e.g. s3bench); skip — use explicit deregistration
+		}
+		if now.Sub(info.lastStatsTime) < stalePeerTimeout {
+			continue
+		}
+		toEvict = append(toEvict, evicted{name: name, info: info})
+	}
+
+	for _, e := range toEvict {
+		s.ipAlloc.release(e.info.peer.MeshIP)
+		for _, alias := range e.info.aliases {
+			delete(s.aliasOwner, alias)
+			delete(s.dnsCache, alias)
+		}
+		delete(s.peers, e.name)
+		delete(s.dnsCache, e.name)
+		log.Info().
+			Str("peer", e.name).
+			Dur("since_heartbeat", now.Sub(e.info.lastStatsTime)).
+			Msg("evicted stale peer")
+	}
+	s.peersMu.Unlock()
+
+	// holePunch has its own lock; must be called outside peersMu.
+	if s.holePunch != nil {
+		for _, e := range toEvict {
+			s.holePunch.RemoveEndpoint(e.name)
+		}
+	}
 }
 
 // StartReplicator starts the replication engine if enabled.

@@ -59,6 +59,20 @@ func (cb *coordForwardBreaker) RecordFailure(target string) (firstFailure bool) 
 	return first
 }
 
+// Cleanup removes state entries whose cooldown has expired and that have not
+// been reset by a successful forward. Called periodically to prevent unbounded
+// map growth after network partitions resolve.
+func (cb *coordForwardBreaker) Cleanup() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	now := time.Now()
+	for target, st := range cb.state {
+		if now.After(st.cooldownUntil) {
+			delete(cb.state, target)
+		}
+	}
+}
+
 // RecordSuccess resets the circuit for target. Returns true if the circuit was
 // previously open (so the caller can log a recovery message).
 func (cb *coordForwardBreaker) RecordSuccess(target string) (wasOpen bool) {

@@ -656,3 +656,83 @@ func TestCoordinatorClient_URLEscaping(t *testing.T) {
 		t.Errorf("Expected URL path %q, got %q", expectedPath, capturedRawPath)
 	}
 }
+
+func TestDeregisterPeer(t *testing.T) {
+	tests := []struct {
+		name          string
+		peerName      string
+		serverStatus  int
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name:         "successful deregistration",
+			peerName:     "s3bench",
+			serverStatus: http.StatusOK,
+			expectError:  false,
+		},
+		{
+			name:         "204 No Content treated as success",
+			peerName:     "s3bench",
+			serverStatus: http.StatusNoContent,
+			expectError:  false,
+		},
+		{
+			name:         "404 Not Found is idempotent (success)",
+			peerName:     "already-gone",
+			serverStatus: http.StatusNotFound,
+			expectError:  false,
+		},
+		{
+			name:          "server error returns error",
+			peerName:      "s3bench",
+			serverStatus:  http.StatusInternalServerError,
+			expectError:   true,
+			errorContains: "500",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedPath string
+			var capturedMethod string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedPath = r.URL.Path
+				capturedMethod = r.Method
+				w.WriteHeader(tt.serverStatus)
+			}))
+			defer server.Close()
+
+			client := &CoordinatorClient{
+				baseURL:    server.URL,
+				httpClient: server.Client(),
+				accessKey:  "test-access",
+				secretKey:  "test-secret",
+			}
+
+			err := client.DeregisterPeer(context.Background(), tt.peerName)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error, got nil")
+				} else if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+			}
+
+			if !tt.expectError || tt.serverStatus == http.StatusNotFound {
+				if capturedMethod != http.MethodDelete {
+					t.Errorf("Expected DELETE method, got %s", capturedMethod)
+				}
+				expectedPath := "/api/v1/peers/" + tt.peerName
+				if capturedPath != expectedPath {
+					t.Errorf("Expected path %q, got %q", expectedPath, capturedPath)
+				}
+			}
+		})
+	}
+}

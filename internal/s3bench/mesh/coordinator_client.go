@@ -280,6 +280,7 @@ func (c *CoordinatorClient) GetObject(ctx context.Context, bucket, key string) (
 
 // DeleteShare deletes a file share on the coordinator via DELETE /api/shares/{name}.
 // Treats 404 as success (idempotent).
+// nolint:dupl // Idiomatic HTTP DELETE helpers are structurally similar; extracting a helper would obscure intent.
 func (c *CoordinatorClient) DeleteShare(ctx context.Context, name string) error {
 	requestURL := fmt.Sprintf("%s/api/shares/%s", c.baseURL, url.PathEscape(name))
 
@@ -386,6 +387,31 @@ func (c *CoordinatorClient) TriggerGC(ctx context.Context, purgeRecycleBin bool)
 	}
 
 	return nil, fmt.Errorf("trigger GC: server busy after %d retries", maxRetries)
+}
+
+// DeregisterPeer removes this peer from the coordinator via DELETE /api/v1/peers/{name}.
+// Treats 404 as success (idempotent).
+// nolint:dupl // Idiomatic HTTP DELETE helpers are structurally similar; extracting a helper would obscure intent.
+func (c *CoordinatorClient) DeregisterPeer(ctx context.Context, name string) error {
+	requestURL := fmt.Sprintf("%s/api/v1/peers/%s", c.baseURL, url.PathEscape(name))
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, requestURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	c.setBasicAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP DELETE %s: %w", requestURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("deregister peer failed: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // setBasicAuth sets HTTP Basic Auth header using S3 credentials.
