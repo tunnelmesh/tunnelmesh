@@ -18,26 +18,35 @@ import (
 
 // CoordinatorClient provides HTTP access to the coordinator's S3 API.
 type CoordinatorClient struct {
-	baseURL      string // Base URL for coordinator (https://10.42.0.1:443)
-	accessKey    string
-	secretKey    string
-	httpClient   *http.Client
-	gcRetryDelay time.Duration // delay between GC 429 retries; 0 means use default (15s)
+	baseURL       string // Admin mux URL (https://10.42.0.1:443) for S3 and share operations
+	publicBaseURL string // Public mux URL (e.g. https://coord.example.com:8443) for peer registration API
+	bearerToken   string // Bearer token for public mux endpoints (same token used for registration)
+	accessKey     string
+	secretKey     string
+	httpClient    *http.Client
+	gcRetryDelay  time.Duration // delay between GC 429 retries; 0 means use default (15s)
 }
 
 // NewCoordinatorClient creates a new coordinator S3 API client.
-// baseURL should be the coordinator's URL (e.g., "http://localhost:8081").
-func NewCoordinatorClient(baseURL string, creds *Credentials, insecureSkipVerify bool) *CoordinatorClient {
+// adminURL is the coordinator's admin mux URL (e.g. "https://10.42.0.1:443").
+// publicBaseURL is the coordinator's public mux URL for peer management operations
+// (e.g. "https://coord.example.com:8443"); may be empty if deregistration is not needed.
+// bearerToken is the server auth token used for the public mux.
+func NewCoordinatorClient(adminURL string, creds *Credentials, insecureSkipVerify bool, publicBaseURL, bearerToken string) *CoordinatorClient {
 	return &CoordinatorClient{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		accessKey: creds.AccessKey,
-		secretKey: creds.SecretKey,
+		baseURL:       strings.TrimRight(adminURL, "/"),
+		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		bearerToken:   bearerToken,
+		accessKey:     creds.AccessKey,
+		secretKey:     creds.SecretKey,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
 					InsecureSkipVerify: insecureSkipVerify,
 				},
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConnsPerHost: 10,
 			},
 		},
 	}
@@ -278,6 +287,7 @@ func (c *CoordinatorClient) GetObject(ctx context.Context, bucket, key string) (
 
 // DeleteShare deletes a file share on the coordinator via DELETE /api/shares/{name}.
 // Treats 404 as success (idempotent).
+// nolint:dupl // Idiomatic HTTP DELETE helpers are structurally similar; extracting a helper would obscure intent.
 func (c *CoordinatorClient) DeleteShare(ctx context.Context, name string) error {
 	requestURL := fmt.Sprintf("%s/api/shares/%s", c.baseURL, url.PathEscape(name))
 
@@ -384,6 +394,37 @@ func (c *CoordinatorClient) TriggerGC(ctx context.Context, purgeRecycleBin bool)
 	}
 
 	return nil, fmt.Errorf("trigger GC: server busy after %d retries", maxRetries)
+}
+
+// DeregisterPeer removes this peer from the coordinator via DELETE /api/v1/peers/{name}
+// on the coordinator's public mux. Treats 404 as success (idempotent).
+// Requires publicBaseURL and bearerToken to be set (populated by NewCoordinatorClient).
+func (c *CoordinatorClient) DeregisterPeer(ctx context.Context, name string) error {
+	if c.publicBaseURL == "" {
+		return fmt.Errorf("public base URL not configured: cannot deregister peer")
+	}
+	requestURL := fmt.Sprintf("%s/api/v1/peers/%s", c.publicBaseURL, url.PathEscape(name))
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, requestURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	// DELETE /api/v1/peers/{name} is on the public mux which uses Bearer token auth.
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP DELETE %s: %w", requestURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("deregister peer failed: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
 }
 
 // setBasicAuth sets HTTP Basic Auth header using S3 credentials.

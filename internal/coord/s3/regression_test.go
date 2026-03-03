@@ -418,7 +418,8 @@ func TestRegression_PurgeOrphanedBucketsNilSystemStore(t *testing.T) {
 	_, err = store.PutObject(ctx, docsBucket, "doc.txt", bytes.NewReader([]byte("document")), 8, "text/plain", nil)
 	require.NoError(t, err)
 
-	// Age buckets past grace period
+	// Age buckets well past the 1-hour grace period so the nil-store guard is
+	// the only thing protecting them (not the grace period itself).
 	for _, bname := range []string{photoBucket, docsBucket} {
 		metaPath := filepath.Join(store.DataDir(), "buckets", bname, "_meta.json")
 		data, readErr := os.ReadFile(metaPath)
@@ -426,7 +427,7 @@ func TestRegression_PurgeOrphanedBucketsNilSystemStore(t *testing.T) {
 
 		bMeta, headErr := store.HeadBucket(ctx, bname)
 		require.NoError(t, headErr)
-		oldTime := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339Nano)
+		oldTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 		updated := bytes.Replace(data, []byte(bMeta.CreatedAt.Format(time.RFC3339Nano)), []byte(oldTime), 1)
 		require.NoError(t, os.WriteFile(metaPath, updated, 0644))
 	}
@@ -478,12 +479,12 @@ func TestRegression_PurgeOrphanedBucketsOnReplicaAfterShareDeletion(t *testing.T
 	tempBucket := FileShareBucketPrefix + "temp"
 	require.NoError(t, store.CreateBucket(ctx, tempBucket, "alice", 1, nil))
 
-	// Age the bucket past grace period
+	// Age the bucket past grace period (well past the 1-hour window)
 	metaPath := filepath.Join(store.DataDir(), "buckets", tempBucket, "_meta.json")
 	data, readErr := os.ReadFile(metaPath)
 	require.NoError(t, readErr)
 	bMeta, _ := store.HeadBucket(ctx, tempBucket)
-	oldTime := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339Nano)
+	oldTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	updated := bytes.Replace(data, []byte(bMeta.CreatedAt.Format(time.RFC3339Nano)), []byte(oldTime), 1)
 	require.NoError(t, os.WriteFile(metaPath, updated, 0644))
 
@@ -831,11 +832,11 @@ func TestRegression_PurgeOrphanedBucketsStaleEmptyShares(t *testing.T) {
 
 	photoBucket := FileShareBucketPrefix + "photos"
 
-	// Age bucket
+	// Age bucket past the 1-hour grace period
 	metaPath := filepath.Join(store.DataDir(), "buckets", photoBucket, "_meta.json")
 	data, _ := os.ReadFile(metaPath)
 	bMeta, _ := store.HeadBucket(ctx, photoBucket)
-	oldTime := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339Nano)
+	oldTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	updated := bytes.Replace(data, []byte(bMeta.CreatedAt.Format(time.RFC3339Nano)), []byte(oldTime), 1)
 	_ = os.WriteFile(metaPath, updated, 0644)
 

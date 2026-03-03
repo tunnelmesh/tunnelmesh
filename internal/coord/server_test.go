@@ -1629,6 +1629,57 @@ func TestHandleRegister_IncludesSelfInCoordinatorsList(t *testing.T) {
 		"self-registration must not include self to avoid replication loops")
 }
 
+func TestStalePeerEviction(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Register four peers via the normal HTTP API so IPs are properly allocated.
+	registerPeer := func(name, pubkey string) string {
+		regReq := proto.RegisterRequest{
+			Name:      name,
+			PublicKey: pubkey,
+			SSHPort:   2222,
+		}
+		body, _ := json.Marshal(regReq)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "registration of %s failed", name)
+		var resp proto.RegisterResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		return resp.MeshIP
+	}
+
+	registerPeer("stale-peer", "SHA256:stalekey")   // will be evicted
+	registerPeer("active-peer", "SHA256:activekey") // recent heartbeat — kept
+	registerPeer("zero-peer", "SHA256:zerokey")     // lastStatsTime zero — kept
+	registerPeer("coord-peer", "SHA256:coordkey")   // coordinator — kept
+
+	// Manually set lastStatsTime to control eviction eligibility.
+	srv.peersMu.Lock()
+	srv.peers["stale-peer"].lastStatsTime = time.Now().Add(-(stalePeerTimeout + time.Minute))
+	srv.peers["active-peer"].lastStatsTime = time.Now().Add(-1 * time.Minute)
+	// "zero-peer" left as zero (never heartbeated) — simulates s3bench
+	srv.peers["coord-peer"].lastStatsTime = time.Now().Add(-(stalePeerTimeout + time.Minute))
+	srv.peers["coord-peer"].peer.IsCoordinator = true
+	srv.peersMu.Unlock()
+
+	srv.evictStalePeers()
+
+	srv.peersMu.RLock()
+	_, staleExists := srv.peers["stale-peer"]
+	_, activeExists := srv.peers["active-peer"]
+	_, zeroExists := srv.peers["zero-peer"]
+	_, coordExists := srv.peers["coord-peer"]
+	srv.peersMu.RUnlock()
+
+	assert.False(t, staleExists, "stale peer should be evicted")
+	assert.True(t, activeExists, "recently-heartbeating peer should not be evicted")
+	assert.True(t, zeroExists, "zero-time peer (e.g. s3bench) should not be evicted")
+	assert.True(t, coordExists, "coordinator peer should not be evicted")
+}
+
 func TestServer_RegistrationResponseCoordinatorPeers(t *testing.T) {
 	srv := newTestServerWithS3(t)
 

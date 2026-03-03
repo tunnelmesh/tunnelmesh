@@ -442,11 +442,13 @@ func (s *Server) loadPeerIndexes(ctx context.Context) {
 	// system store result as "local" (wins ties) so forwarded entries are
 	// naturally dropped once the remote peer persists.
 	// Entries older than forwardedEntryTTL are expired to prevent unbounded accumulation.
-	// The TTL must exceed the peer listing pipeline delay: coord-3 persists its listing
-	// to the system store (10s), system store replicates via auto-sync (up to 7 min),
-	// and loadPeerIndexes loads it (up to 60s). Total worst case: ~8 minutes.
-	// 10 minutes provides comfortable margin, matching GCGracePeriod.
-	const forwardedEntryTTL = 10 * time.Minute
+	// The TTL covers the peer listing pipeline delay: a remote coordinator persists
+	// its listing to the system store (10s), the system store replicates it (up to a
+	// few minutes), and loadPeerIndexes loads it (up to 60s). The reconcile cycle
+	// runs every 5 minutes, so in practice the delay is ≤ 5 min + replication lag.
+	// 7 minutes provides a safety margin over the 5-minute reconcile interval
+	// while still tightening the stale-data window versus the previous 10 minutes.
+	const forwardedEntryTTL = 7 * time.Minute
 
 	if old := s.peerListings.Load(); old != nil {
 		now := time.Now()

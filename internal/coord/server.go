@@ -806,6 +806,24 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		s.startHolePunchCleanup(ctx)
 	}
 
+	// Peer eviction and circuit breaker cleanup run unconditionally — they are
+	// general coordinator state management concerns, not gated on S3 being configured.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.evictStalePeers()
+				s.forwardBreaker.Cleanup()
+			}
+		}
+	}()
+
 	if s.s3Store == nil {
 		return
 	}
@@ -935,6 +953,62 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// stalePeerTimeout is how long a non-coordinator peer can go without a heartbeat
+// before being evicted. Only peers that have heartbeated at least once are eligible;
+// zero-time registrations (e.g. s3bench) are excluded and handled via explicit deregistration.
+const stalePeerTimeout = 30 * time.Minute
+
+// evictStalePeers removes non-coordinator peers that have not sent a heartbeat
+// within stalePeerTimeout. This releases their IP allocations, DNS entries, and
+// alias registrations so the coordinator does not accumulate unbounded state.
+// It is called from the periodic GC cycle (every 5 minutes).
+func (s *Server) evictStalePeers() {
+	now := time.Now()
+
+	// Collect names of stale peers under the lock, then call holePunch outside it.
+	type evicted struct {
+		name string
+		info *peerInfo
+	}
+	var toEvict []evicted
+
+	s.peersMu.Lock()
+	for name, info := range s.peers {
+		if info.peer.IsCoordinator {
+			continue // Coordinators have a separate lifecycle
+		}
+		if info.lastStatsTime.IsZero() {
+			continue // Never heartbeated (e.g. s3bench); skip — use explicit deregistration
+		}
+		if now.Sub(info.lastStatsTime) < stalePeerTimeout {
+			continue
+		}
+		toEvict = append(toEvict, evicted{name: name, info: info})
+	}
+
+	for _, e := range toEvict {
+		s.ipAlloc.release(e.info.peer.MeshIP)
+		for _, alias := range e.info.aliases {
+			delete(s.aliasOwner, alias)
+			delete(s.dnsCache, alias)
+		}
+		delete(s.peers, e.name)
+		delete(s.dnsCache, e.name)
+		log.Info().
+			Str("peer", e.name).
+			Dur("since_heartbeat", now.Sub(e.info.lastStatsTime)).
+			Msg("evicted stale peer")
+	}
+	s.peersMu.Unlock()
+
+	// holePunch has its own lock; must be called outside peersMu.
+	if s.holePunch != nil {
+		for _, e := range toEvict {
+			s.holePunch.RemoveEndpoint(e.name)
+		}
+	}
 }
 
 // StartReplicator starts the replication engine if enabled.
@@ -1497,7 +1571,9 @@ func (s *Server) StartS3Server(addr string, tlsCert *tls.Certificate) error {
 	}
 
 	server := &http.Server{
-		Handler: s.s3Server.Handler(),
+		Handler:           s.s3Server.Handler(),
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	if tlsCert != nil {
@@ -2409,7 +2485,13 @@ func (s *Server) lookupPeerLocation(peerName, ip string) {
 // ListenAndServe starts the coordination server.
 func (s *Server) ListenAndServe() error {
 	log.Info().Str("listen", s.cfg.Coordinator.Listen).Msg("starting coordination server")
-	return http.ListenAndServe(s.cfg.Coordinator.Listen, s)
+	srv := &http.Server{
+		Addr:              s.cfg.Coordinator.Listen,
+		Handler:           s,
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 // GetCoordMeshIPs returns the current list of coordinator mesh IPs.
@@ -2598,7 +2680,9 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 	}
 
 	s.adminServer = &http.Server{
-		Handler: redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
+		Handler:           redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	if tlsCert != nil {
