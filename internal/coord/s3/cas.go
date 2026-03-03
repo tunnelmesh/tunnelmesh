@@ -43,8 +43,12 @@ type CAS struct {
 	chunksDir string
 	masterKey [32]byte // Derived from mesh PSK for convergent encryption
 
-	// Compression encoder/decoder pools for reuse
-	encoderPool sync.Pool
+	// encoder is a single shared zstd encoder. EncodeAll is concurrency-safe via
+	// its own internal sub-encoder channel pool. A sync.Pool of Encoders is an
+	// anti-pattern here: each pooled Encoder allocates GOMAXPROCS sub-encoders on
+	// first use (~12.7 MB of hash tables each), causing ~158 MB of permanent heap
+	// after any upload burst that fully saturates the pool.
+	encoder     *zstd.Encoder
 	decoderPool sync.Pool
 }
 
@@ -60,13 +64,17 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 		masterKey: masterKey,
 	}
 
-	// Initialize encoder pool
-	cas.encoderPool = sync.Pool{
-		New: func() interface{} {
-			enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-			return enc
-		},
+	// Initialize single shared encoder with bounded concurrency.
+	// Concurrency(4) caps the internal sub-encoder pool at 4×~12.7 MB ≈ 51 MB
+	// instead of GOMAXPROCS×12.7 MB ≈ 158 MB that a sync.Pool would accumulate.
+	enc, err := zstd.NewWriter(nil,
+		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithEncoderConcurrency(4),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create zstd encoder: %w", err)
 	}
+	cas.encoder = enc
 
 	// Initialize decoder pool
 	cas.decoderPool = sync.Pool{
@@ -321,10 +329,7 @@ func (c *CAS) decrypt(ciphertext []byte, hash string) ([]byte, error) {
 
 // compress compresses data using zstd.
 func (c *CAS) compress(data []byte) ([]byte, error) {
-	enc := c.encoderPool.Get().(*zstd.Encoder)
-	defer c.encoderPool.Put(enc)
-
-	return enc.EncodeAll(data, nil), nil
+	return c.encoder.EncodeAll(data, nil), nil
 }
 
 // decompress decompresses zstd-compressed data.

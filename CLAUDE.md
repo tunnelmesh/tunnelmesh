@@ -423,6 +423,8 @@ tunnelmesh-s3bench run alien_invasion --time-scale 36
 
 ## Monitoring
 
+**Prometheus**: `https://this.tm/prometheus` (via mesh)
+
 ### Prometheus Alert Classification
 
 All alerts in `monitoring/prometheus/alerts.yml` are organised into exactly three Prometheus rule groups:
