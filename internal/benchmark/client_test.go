@@ -206,8 +206,14 @@ func TestClient_MultiplePings(t *testing.T) {
 func BenchmarkClient_Upload(b *testing.B) {
 	ts := httptest.NewTLSServer(NewHTTPHandler())
 	defer ts.Close()
-	u, _ := url.Parse(ts.URL)
-	port, _ := strconv.Atoi(u.Port())
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		b.Fatalf("failed to parse test server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		b.Fatalf("failed to parse port: %v", err)
+	}
 
 	cfg := Config{
 		PeerName:  "bench-peer",

@@ -27,6 +27,11 @@ const (
 // before calling Start.
 func NewHTTPHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// RFC 7230 §6.7: upgrades are initiated with GET.
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		if !strings.EqualFold(r.Header.Get("Upgrade"), upgradeProtocol) {
 			http.Error(w, "expected Upgrade: "+upgradeProtocol, http.StatusBadRequest)
 			return
@@ -57,11 +62,14 @@ func NewHTTPHandler() http.Handler {
 			return
 		}
 
-		// Pass the raw conn (not bufrw) to serveConn. bufrw.Reader may have
-		// buffered bytes that the HTTP server pre-read, but in practice its
-		// read buffer is empty here: the client sends no binary data until it
-		// receives this 101 response, so Hijack() captures the conn at the
-		// exact message boundary.
+		// Sanity check: bufrw.Reader should be empty at this point because the
+		// client sends no binary data until it receives the 101 response.  If
+		// the read buffer is non-empty the protocol assumption has been violated
+		// and we must not silently discard those bytes.
+		if n := bufrw.Reader.Buffered(); n > 0 {
+			log.Error().Int("buffered", n).Msg("benchmark: unexpected pre-read bytes after HTTP upgrade; dropping connection")
+			return
+		}
 		log.Debug().Str("remote", conn.RemoteAddr().String()).Msg("benchmark: HTTP upgrade accepted")
 		serveConn(r.Context(), conn)
 	})
@@ -84,7 +92,11 @@ func dialBenchmarkHTTP(ctx context.Context, addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("dial benchmark: %w", err)
 	}
 
-	host, _, _ := net.SplitHostPort(addr)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("invalid benchmark addr %q: %w", addr, err)
+	}
 
 	// Send HTTP upgrade request.
 	req := "GET " + BenchmarkPath + " HTTP/1.1\r\n" +
@@ -133,6 +145,11 @@ func readUpgradeResponse(conn net.Conn) error {
 		if strings.TrimSpace(line) == "" {
 			break
 		}
+	}
+	// Sanity check: the server sends no binary data until it receives MsgStart,
+	// so the bufio reader must not have captured any application-layer bytes.
+	if n := reader.Buffered(); n > 0 {
+		return fmt.Errorf("benchmark: unexpected %d buffered bytes after HTTP upgrade headers", n)
 	}
 	return nil
 }

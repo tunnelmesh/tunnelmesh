@@ -1319,14 +1319,13 @@ func TestProcessQueuePut_BucketNotFound(t *testing.T) {
 	r.EnqueueReplication("deleted-bucket", "file.txt", "put")
 	r.drainReplicationQueue(context.Background())
 
-	// Wait a moment for any async goroutines to finish.
-	time.Sleep(100 * time.Millisecond)
-
 	// The entry must NOT be re-enqueued — bucket is gone, retrying is pointless.
-	count := 0
-	r.replPending.Range(func(_, _ any) bool {
-		count++
-		return true
-	})
-	assert.Equal(t, 0, count, "bucket-not-found entry must be dropped, not re-enqueued")
+	assert.Eventually(t, func() bool {
+		count := 0
+		r.replPending.Range(func(_, _ any) bool {
+			count++
+			return true
+		})
+		return count == 0
+	}, time.Second, 10*time.Millisecond, "bucket-not-found entry must be dropped, not re-enqueued")
 }
