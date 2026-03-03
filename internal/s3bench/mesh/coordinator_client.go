@@ -38,6 +38,8 @@ func NewCoordinatorClient(baseURL string, creds *Credentials, insecureSkipVerify
 				TLSClientConfig: &tls.Config{
 					InsecureSkipVerify: insecureSkipVerify,
 				},
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConnsPerHost: 10,
 			},
 		},
 	}
