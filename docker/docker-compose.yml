@@ -428,33 +428,38 @@ services:
         restart: true
     restart: unless-stopped
 
-  benchmarker:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.benchmarker
-    container_name: tunnelmesh-benchmarker
-    # Share coord-1's network namespace to access mesh IPs via TUN
-    network_mode: "service:coord-1"
-    environment:
-      - COORD_SERVER_URL=http://localhost:8080
-      - AUTH_TOKEN=${TUNNELMESH_TOKEN}
-      - LOCAL_PEER=benchmarker
-      - BENCHMARK_INTERVAL=30s       # Start new batch every 30s
-      - BENCHMARK_CONCURRENCY=3      # 3 concurrent transfers per batch
-      - BENCHMARK_SIZE=100MB
-      - OUTPUT_DIR=/results
-      - TLS_SKIP_VERIFY=true
-      # Randomized chaos testing (enabled by default)
-      # Each transfer randomly picks from presets: clean, subtle, lossy-wifi,
-      # mobile-3g, mobile-4g, satellite, congested, bandwidth-10/50/100mbps
-      # - RANDOMIZE_CHAOS=false      # Disable to run all clean benchmarks
-    volumes:
-      - benchmark-results:/results
-    depends_on:
-      coord-1:
-        condition: service_healthy
-        restart: true
-    restart: unless-stopped
+  # benchmarker: disabled — was never reachable on port 9998 (not in service_ports);
+  # now that benchmark runs on port 9443 it successfully connects and generates
+  # significant load (3 × 100 MB every 30 s through coord-1's network namespace).
+  # Re-enable when intentional load testing is needed.
+  #
+  # benchmarker:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile.benchmarker
+  #   container_name: tunnelmesh-benchmarker
+  #   # Share coord-1's network namespace to access mesh IPs via TUN
+  #   network_mode: "service:coord-1"
+  #   environment:
+  #     - COORD_SERVER_URL=http://localhost:8080
+  #     - AUTH_TOKEN=${TUNNELMESH_TOKEN}
+  #     - LOCAL_PEER=benchmarker
+  #     - BENCHMARK_INTERVAL=5m        # Start new batch every 5 min
+  #     - BENCHMARK_CONCURRENCY=1      # Sequential transfers (was 3 concurrent)
+  #     - BENCHMARK_SIZE=10MB          # Reduced from 100 MB; matches CLI default
+  #     - OUTPUT_DIR=/results
+  #     - TLS_SKIP_VERIFY=true
+  #     # Randomized chaos testing (enabled by default)
+  #     # Each transfer randomly picks from presets: clean, subtle, lossy-wifi,
+  #     # mobile-3g, mobile-4g, satellite, congested, bandwidth-10/50/100mbps
+  #     # - RANDOMIZE_CHAOS=false      # Disable to run all clean benchmarks
+  #   volumes:
+  #     - benchmark-results:/results
+  #   depends_on:
+  #     coord-1:
+  #       condition: service_healthy
+  #       restart: true
+  #   restart: unless-stopped
 
 networks:
   mesh-control:
