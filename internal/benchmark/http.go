@@ -57,6 +57,11 @@ func NewHTTPHandler() http.Handler {
 			return
 		}
 
+		// Pass the raw conn (not bufrw) to serveConn. bufrw.Reader may have
+		// buffered bytes that the HTTP server pre-read, but in practice its
+		// read buffer is empty here: the client sends no binary data until it
+		// receives this 101 response, so Hijack() captures the conn at the
+		// exact message boundary.
 		log.Debug().Str("remote", conn.RemoteAddr().String()).Msg("benchmark: HTTP upgrade accepted")
 		serveConn(r.Context(), conn)
 	})
@@ -102,6 +107,9 @@ func dialBenchmarkHTTP(ctx context.Context, addr string) (net.Conn, error) {
 }
 
 // readUpgradeResponse reads the HTTP response headers and verifies a 101 status.
+// The bufio.Reader used here may buffer bytes beyond the response headers, but
+// in practice the server sends no binary data until it receives MsgStart from
+// the client, so the reader never captures application-layer bytes.
 func readUpgradeResponse(conn net.Conn) error {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()

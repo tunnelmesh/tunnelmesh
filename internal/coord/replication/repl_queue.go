@@ -197,6 +197,9 @@ func (r *Replicator) processQueuePut(ctx context.Context, entry *replQueueEntry,
 	}
 
 	if !allSucceeded {
+		// bucketMissing takes precedence over any other peer error: if the
+		// source bucket is gone there is nothing to replicate regardless of
+		// what other peers returned, so drop the entry unconditionally.
 		if bucketMissing {
 			span.SetStatus(otelcodes.Ok, "bucket deleted")
 			r.logger.Debug().
