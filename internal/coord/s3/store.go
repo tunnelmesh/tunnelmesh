@@ -3742,6 +3742,8 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 		if !bucketEntry.IsDir() {
 			continue
 		}
+
+		bucketStart := time.Now()
 		bucket := bucketEntry.Name()
 
 		// Scan current objects (walk to include subdirectories like meta/auth/, meta/dns/)
@@ -3809,6 +3811,17 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 			}
 			return nil
 		})
+
+		// Throttle to ~10% CPU duty cycle: sleep 9× the per-bucket scan time.
+		// Fast buckets pause briefly; slow buckets pause proportionally.
+		// GC completes well within the 5-minute interval even with throttling.
+		if elapsed := time.Since(bucketStart); elapsed > 0 {
+			select {
+			case <-ctx.Done():
+				return referencedChunks
+			case <-time.After(elapsed * 9):
+			}
+		}
 	}
 
 	return referencedChunks

@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	s3pkg "github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 )
 
 func createTestReplicatorWithQueue(t *testing.T) (*Replicator, *mockTransport, *mockS3Store) {
@@ -1285,4 +1286,46 @@ func TestTriggerManifestSync_Deduplication(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("worker did not send manifest within 2 seconds")
+}
+
+// TestProcessQueuePut_BucketNotFound verifies that when GetObjectMeta returns
+// ErrBucketNotFound (bucket was deleted before the queued replication ran), the
+// entry is silently dropped — no re-enqueue, no error log — instead of being
+// retried up to maxRetries times.
+func TestProcessQueuePut_BucketNotFound(t *testing.T) {
+	transport := newMockTransport()
+	s3Store := newMockS3Store()
+	registry := newMockChunkRegistry()
+
+	// Configure the mock store to return ErrBucketNotFound from GetObjectMeta.
+	// This simulates ForceDeleteBucket being called before the replication worker runs.
+	s3Store.metaErr = s3pkg.ErrBucketNotFound
+
+	r := NewReplicator(Config{
+		NodeID:              "coord-a",
+		Transport:           transport,
+		S3Store:             s3Store,
+		ChunkRegistry:       registry,
+		Logger:              zerolog.Nop(),
+		ChunkPipelineWindow: 5,
+		AutoSyncInterval:    0,
+	})
+	// Don't call Start() — drain manually to prevent the background worker from
+	// consuming any re-enqueued entries before we check the pending map.
+	t.Cleanup(func() { _ = r.Stop() })
+
+	r.AddPeer("coord-b", "coord-b")
+
+	r.EnqueueReplication("deleted-bucket", "file.txt", "put")
+	r.drainReplicationQueue(context.Background())
+
+	// The entry must NOT be re-enqueued — bucket is gone, retrying is pointless.
+	assert.Eventually(t, func() bool {
+		count := 0
+		r.replPending.Range(func(_, _ any) bool {
+			count++
+			return true
+		})
+		return count == 0
+	}, time.Second, 10*time.Millisecond, "bucket-not-found entry must be dropped, not re-enqueued")
 }

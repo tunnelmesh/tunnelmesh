@@ -31,6 +31,12 @@ func NewAdminServer() *AdminServer {
 	}
 }
 
+// Handle registers an additional handler on the admin server's mux.
+// Must be called before Start.
+func (s *AdminServer) Handle(pattern string, handler http.Handler) {
+	s.mux.Handle(pattern, handler)
+}
+
 // Start starts the admin server with TLS on the given address.
 func (s *AdminServer) Start(addr string, cert *tls.Certificate) error {
 	s.server = &http.Server{

@@ -113,10 +113,11 @@ func (c *realDockerClient) GetContainerStats(ctx context.Context, id string) (*C
 	// Calculate CPU percentage
 	cpuPercent := calculateCPUPercent(&v)
 
-	// Calculate memory percentage
+	// Calculate memory working set (exclude kernel page cache).
+	workingSet := memoryWorkingSet(v.MemoryStats.Usage, v.MemoryStats.Stats)
 	memPercent := 0.0
 	if v.MemoryStats.Limit > 0 {
-		memPercent = float64(v.MemoryStats.Usage) / float64(v.MemoryStats.Limit) * 100.0
+		memPercent = float64(workingSet) / float64(v.MemoryStats.Limit) * 100.0
 	}
 
 	// Get disk size from inspect API (stats API doesn't provide actual disk usage)
@@ -136,7 +137,7 @@ func (c *realDockerClient) GetContainerStats(ctx context.Context, id string) (*C
 		ContainerName: v.Name,
 		Timestamp:     v.Read,
 		CPUPercent:    cpuPercent,
-		MemoryBytes:   v.MemoryStats.Usage,
+		MemoryBytes:   workingSet,
 		MemoryLimit:   v.MemoryStats.Limit,
 		MemoryPercent: memPercent,
 		DiskBytes:     diskBytes,
@@ -307,4 +308,19 @@ func convertInspect(inspect container.InspectResponse) ContainerInfo {
 	}
 
 	return info
+}
+
+// memoryWorkingSet returns the container's working-set memory by subtracting the kernel
+// page cache from the raw cgroup usage counter.
+//
+//   - On cgroup v1, Stats["cache"] holds the page cache bytes.
+//   - On cgroup v2, Stats is often empty; the zero value is used, leaving workingSet == usage.
+//
+// Reading a missing key from a nil/empty map in Go is safe and returns 0.
+func memoryWorkingSet(usage uint64, stats map[string]uint64) uint64 {
+	pageCache := stats["cache"] // 0 when absent (cgroup v2 or Stats is nil)
+	if pageCache < usage {
+		return usage - pageCache
+	}
+	return usage
 }
