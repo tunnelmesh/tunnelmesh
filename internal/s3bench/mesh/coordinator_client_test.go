@@ -696,18 +696,23 @@ func TestDeregisterPeer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var capturedPath string
 			var capturedMethod string
+			var capturedAuth string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				capturedPath = r.URL.Path
 				capturedMethod = r.Method
+				capturedAuth = r.Header.Get("Authorization")
 				w.WriteHeader(tt.serverStatus)
 			}))
 			defer server.Close()
 
+			// publicBaseURL points to the mock server; bearerToken used for auth.
 			client := &CoordinatorClient{
-				baseURL:    server.URL,
-				httpClient: server.Client(),
-				accessKey:  "test-access",
-				secretKey:  "test-secret",
+				baseURL:       "https://10.0.0.1:443", // admin mux — NOT used by DeregisterPeer
+				publicBaseURL: server.URL,
+				bearerToken:   "test-bearer-token",
+				httpClient:    server.Client(),
+				accessKey:     "test-access",
+				secretKey:     "test-secret",
 			}
 
 			err := client.DeregisterPeer(context.Background(), tt.peerName)
@@ -724,7 +729,8 @@ func TestDeregisterPeer(t *testing.T) {
 				}
 			}
 
-			if !tt.expectError || tt.serverStatus == http.StatusNotFound {
+			// Verify request used correct path, method, and Bearer auth.
+			if capturedMethod != "" {
 				if capturedMethod != http.MethodDelete {
 					t.Errorf("Expected DELETE method, got %s", capturedMethod)
 				}
@@ -732,7 +738,24 @@ func TestDeregisterPeer(t *testing.T) {
 				if capturedPath != expectedPath {
 					t.Errorf("Expected path %q, got %q", expectedPath, capturedPath)
 				}
+				if capturedAuth != "Bearer test-bearer-token" {
+					t.Errorf("Expected Bearer token auth, got %q", capturedAuth)
+				}
 			}
 		})
+	}
+}
+
+func TestDeregisterPeer_NoPubicURL(t *testing.T) {
+	// If publicBaseURL is not set, DeregisterPeer should return an error immediately.
+	client := &CoordinatorClient{
+		baseURL:    "https://10.0.0.1:443",
+		httpClient: &http.Client{},
+		accessKey:  "test-access",
+		secretKey:  "test-secret",
+	}
+	err := client.DeregisterPeer(context.Background(), "s3bench")
+	if err == nil || !strings.Contains(err.Error(), "public base URL") {
+		t.Errorf("Expected error about missing public URL, got: %v", err)
 	}
 }

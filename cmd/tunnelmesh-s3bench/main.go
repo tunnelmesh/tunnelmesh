@@ -330,7 +330,7 @@ func runScenario(cmd *cobra.Command, args []string) error {
 		log.Info().
 			Str("s3_endpoint", adminURL).
 			Msg("Using coordinator admin mux")
-		meshClient = mesh.NewCoordinatorClient(adminURL, creds, insecureTLS)
+		meshClient = mesh.NewCoordinatorClient(adminURL, creds, insecureTLS, coordinatorURL, authToken)
 	}
 
 	// Print scenario summary

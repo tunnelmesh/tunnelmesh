@@ -806,6 +806,24 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		s.startHolePunchCleanup(ctx)
 	}
 
+	// Peer eviction and circuit breaker cleanup run unconditionally — they are
+	// general coordinator state management concerns, not gated on S3 being configured.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.evictStalePeers()
+				s.forwardBreaker.Cleanup()
+			}
+		}
+	}()
+
 	if s.s3Store == nil {
 		return
 	}
@@ -874,12 +892,6 @@ func (s *Server) StartPeriodicCleanup(ctx context.Context) {
 		// Collect and persist local capacity, then load peer snapshots
 		s.collectAndPersistCapacity(ctx)
 		s.loadPeerCapacitySnapshots(ctx)
-
-		// Evict peers that stopped heartbeating (frees IP allocations)
-		s.evictStalePeers()
-
-		// Remove expired circuit breaker state entries
-		s.forwardBreaker.Cleanup()
 	}
 
 	// Initialize listing index channel and start background indexer

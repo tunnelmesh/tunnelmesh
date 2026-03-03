@@ -446,8 +446,9 @@ func (s *Server) loadPeerIndexes(ctx context.Context) {
 	// its listing to the system store (10s), the system store replicates it (up to a
 	// few minutes), and loadPeerIndexes loads it (up to 60s). The reconcile cycle
 	// runs every 5 minutes, so in practice the delay is ≤ 5 min + replication lag.
-	// 5 minutes provides adequate margin while tightening the stale-data window.
-	const forwardedEntryTTL = 5 * time.Minute
+	// 7 minutes provides a safety margin over the 5-minute reconcile interval
+	// while still tightening the stale-data window versus the previous 10 minutes.
+	const forwardedEntryTTL = 7 * time.Minute
 
 	if old := s.peerListings.Load(); old != nil {
 		now := time.Now()
