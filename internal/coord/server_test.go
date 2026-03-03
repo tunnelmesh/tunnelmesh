@@ -1532,15 +1532,16 @@ func TestJitterDuration(t *testing.T) {
 }
 
 func TestGCStaggerDelay(t *testing.T) {
-	// %150 produces 0–149 seconds (< 2m30s), under 50% of the 5-minute GC interval
-	maxStagger := 149 * time.Second
+	// %300 produces 0–299 seconds (< 5m), spanning the full 5-minute GC interval
+	// to maximise the pairwise gap between coordinators.
+	maxStagger := 299 * time.Second
 
 	t.Run("within range", func(t *testing.T) {
 		names := []string{"coord1", "coord2", "coord3", "us-east-1", "eu-west-2"}
 		for _, name := range names {
 			d := gcStaggerDelay(name)
 			assert.GreaterOrEqual(t, d, time.Duration(0), "stagger for %q should be >= 0", name)
-			assert.LessOrEqual(t, d, maxStagger, "stagger for %q should be <= 149s", name)
+			assert.LessOrEqual(t, d, maxStagger, "stagger for %q should be <= 299s", name)
 		}
 	})
 
