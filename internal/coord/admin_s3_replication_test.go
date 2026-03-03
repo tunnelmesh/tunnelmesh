@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -250,6 +251,31 @@ func TestFindRecycledObjectSourceIP(t *testing.T) {
 	assert.Equal(t, "", srv.findRecycledObjectSourceIP("mybucket", "deleted-c.txt"), "empty SourceIP should return empty")
 	assert.Equal(t, "", srv.findRecycledObjectSourceIP("mybucket", "nonexistent.txt"))
 	assert.Equal(t, "", srv.findRecycledObjectSourceIP("otherbucket", "deleted-a.txt"))
+}
+
+func TestCircuitBreakerCleanup(t *testing.T) {
+	cb := &coordForwardBreaker{}
+
+	// Inject an expired entry (cooldown already past)
+	cb.state = map[string]*coordBreakerState{
+		"10.0.0.2": {consecutiveFails: 3, cooldownUntil: time.Now().Add(-1 * time.Minute)},
+		// Active entry (cooldown still in future)
+		"10.0.0.3": {consecutiveFails: 1, cooldownUntil: time.Now().Add(5 * time.Minute)},
+	}
+
+	cb.Cleanup()
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	assert.NotContains(t, cb.state, "10.0.0.2", "expired entry should be removed")
+	assert.Contains(t, cb.state, "10.0.0.3", "active entry should remain")
+}
+
+func TestCircuitBreakerCleanup_NilState(t *testing.T) {
+	// Should not panic when state is nil
+	cb := &coordForwardBreaker{}
+	cb.Cleanup() // no-op, no panic
+	assert.Nil(t, cb.state)
 }
 
 func TestObjectPrimaryCoordinator_NilIPs(t *testing.T) {

@@ -330,7 +330,7 @@ func runScenario(cmd *cobra.Command, args []string) error {
 		log.Info().
 			Str("s3_endpoint", adminURL).
 			Msg("Using coordinator admin mux")
-		meshClient = mesh.NewCoordinatorClient(adminURL, creds, insecureTLS)
+		meshClient = mesh.NewCoordinatorClient(adminURL, creds, insecureTLS, coordinatorURL, authToken)
 	}
 
 	// Print scenario summary
@@ -366,7 +366,11 @@ func runScenario(cmd *cobra.Command, args []string) error {
 		// Cleanup between iterations (not after the last one)
 		moreIterations := totalIterations == 0 || iteration < totalIterations
 		if accordion && moreIterations && meshClient != nil {
-			if err := cleanupMeshShares(ctx, meshClient, st, sharePrefix); err != nil {
+			peerName := ""
+			if meshInfo != nil {
+				peerName = meshInfo.PeerName
+			}
+			if err := cleanupMeshShares(ctx, meshClient, st, sharePrefix, peerName); err != nil {
 				return err
 			}
 		}
@@ -510,8 +514,8 @@ func createMeshShares(ctx context.Context, client *mesh.CoordinatorClient, st st
 	return sharePrefix, nil
 }
 
-// cleanupMeshShares deletes all shares and triggers GC to reclaim disk space.
-func cleanupMeshShares(ctx context.Context, client *mesh.CoordinatorClient, st story.Story, prefix string) error {
+// cleanupMeshShares deletes all shares, triggers GC, and deregisters the peer.
+func cleanupMeshShares(ctx context.Context, client *mesh.CoordinatorClient, st story.Story, prefix string, peerName string) error {
 	fmt.Println()
 	log.Info().Msg("Cleaning up shares and triggering GC...")
 
@@ -537,6 +541,14 @@ func cleanupMeshShares(ctx context.Context, client *mesh.CoordinatorClient, st s
 		Int("chunks_deleted", gcStats.ChunksDeleted).
 		Int64("bytes_reclaimed", gcStats.BytesReclaimed).
 		Msg("GC completed")
+
+	// Deregister the peer so the coordinator releases the IP allocation immediately
+	// rather than waiting for the stale-peer eviction TTL.
+	if err := client.DeregisterPeer(ctx, peerName); err != nil {
+		log.Warn().Err(err).Msg("failed to deregister peer (non-fatal)")
+	} else {
+		log.Info().Str("peer", peerName).Msg("peer deregistered from coordinator")
+	}
 
 	// Brief pause before next iteration
 	select {
