@@ -428,11 +428,7 @@ services:
         restart: true
     restart: unless-stopped
 
-  # benchmarker: disabled — was never reachable on port 9998 (not in service_ports);
-  # now that benchmark runs on port 9443 it successfully connects and generates
-  # significant load (3 × 100 MB every 30 s through coord-1's network namespace).
-  # Re-enable when intentional load testing is needed.
-  #
+  # benchmarker: uncomment for intentional load testing only.
   # benchmarker:
   #   build:
   #     context: ..
