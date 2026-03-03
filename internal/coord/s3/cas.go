@@ -16,6 +16,11 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+// casEncoderConcurrency caps the zstd encoder's internal sub-encoder pool.
+// Each sub-encoder holds ~12.7 MB of hash tables, so 4 × 12.7 MB ≈ 51 MB
+// memory budget. Increase for higher throughput at the cost of more memory.
+const casEncoderConcurrency = 4
+
 // CAS (Content-Addressable Storage) manages encrypted, compressed chunks.
 // Chunks are identified by their SHA-256 hash (computed on plaintext).
 // Storage format: plaintext -> zstd compress -> XChaCha20-Poly1305 encrypt -> store
@@ -43,8 +48,12 @@ type CAS struct {
 	chunksDir string
 	masterKey [32]byte // Derived from mesh PSK for convergent encryption
 
-	// Compression encoder/decoder pools for reuse
-	encoderPool sync.Pool
+	// encoder is a single shared zstd encoder. EncodeAll is concurrency-safe via
+	// its own internal sub-encoder channel pool. A sync.Pool of Encoders is an
+	// anti-pattern here: each pooled Encoder allocates GOMAXPROCS sub-encoders on
+	// first use (~12.7 MB of hash tables each), causing ~158 MB of permanent heap
+	// after any upload burst that fully saturates the pool.
+	encoder     *zstd.Encoder
 	decoderPool sync.Pool
 }
 
@@ -60,23 +69,37 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 		masterKey: masterKey,
 	}
 
-	// Initialize encoder pool
-	cas.encoderPool = sync.Pool{
-		New: func() interface{} {
-			enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-			return enc
-		},
+	// Initialize single shared encoder with bounded concurrency.
+	// See casEncoderConcurrency for the memory/throughput tradeoff rationale.
+	enc, err := zstd.NewWriter(nil,
+		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithEncoderConcurrency(casEncoderConcurrency),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create zstd encoder: %w", err)
 	}
+	cas.encoder = enc
 
 	// Initialize decoder pool
 	cas.decoderPool = sync.Pool{
 		New: func() interface{} {
-			dec, _ := zstd.NewReader(nil)
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				// Unreachable: NewReader only fails on invalid options, and we
+				// pass none. Panic rather than silently returning a nil decoder.
+				panic(fmt.Sprintf("zstd.NewReader: %v", err))
+			}
 			return dec
 		},
 	}
 
 	return cas, nil
+}
+
+// Close releases the resources held by the shared encoder (its internal
+// sub-encoder pool). Should be called when the CAS is no longer needed.
+func (c *CAS) Close() error {
+	return c.encoder.Close()
 }
 
 // WriteChunk stores a chunk and returns its content hash and on-disk size.
@@ -321,10 +344,7 @@ func (c *CAS) decrypt(ciphertext []byte, hash string) ([]byte, error) {
 
 // compress compresses data using zstd.
 func (c *CAS) compress(data []byte) ([]byte, error) {
-	enc := c.encoderPool.Get().(*zstd.Encoder)
-	defer c.encoderPool.Put(enc)
-
-	return enc.EncodeAll(data, nil), nil
+	return c.encoder.EncodeAll(data, nil), nil
 }
 
 // decompress decompresses zstd-compressed data.

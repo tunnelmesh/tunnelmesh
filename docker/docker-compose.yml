@@ -93,7 +93,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 15s
+      # 60s: allows async CAS stats walk to complete on large volumes before
+      # coord-3 starts (coord-3 depends_on coord-2: service_healthy).
+      start_period: 60s
     restart: unless-stopped
 
   # Coordinator 3 - Tertiary
@@ -132,7 +134,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 15s
+      # 60s: defense-in-depth alongside async CAS stats init; large volumes on
+      # Docker Desktop can delay HTTP server startup by 20-60s on cold start.
+      start_period: 60s
     restart: unless-stopped
 
   alice:

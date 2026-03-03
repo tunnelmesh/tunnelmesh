@@ -379,8 +379,14 @@ func NewStoreWithCAS(dataDir string, quota *QuotaManager, masterKey [32]byte) (*
 	}
 	store.cas = cas
 
-	// Initialize incremental stats from filesystem (one-time walk at startup)
-	store.initCASStats()
+	// Initialize incremental stats from filesystem (one-time walk at startup).
+	// Run in background so HTTP server can start immediately; stats are only
+	// used for metrics/quota display and the atomic counters start at zero.
+	store.bgWg.Add(1)
+	go func() {
+		defer store.bgWg.Done()
+		store.initCASStats()
+	}()
 
 	return store, nil
 }
@@ -4579,9 +4585,19 @@ func (s *Store) collectAndDeleteAllVersions(bucket, key string) []string {
 // Close flushes any pending operations and syncs the data directory.
 // Since all writes use syncedWriteFile (which calls fsync), this just ensures
 // directory metadata is flushed for durability.
-func (s *Store) Close() error {
+func (s *Store) Close() (retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Defer CAS close so the encoder's internal goroutines are always released,
+	// even if future callers of this function add early-return error paths.
+	if s.cas != nil {
+		defer func() {
+			if err := s.cas.Close(); err != nil && retErr == nil {
+				retErr = fmt.Errorf("close CAS encoder: %w", err)
+			}
+		}()
+	}
 
 	// Sync all bucket directories and their subdirectories to ensure
 	// all filesystem operations are complete before cleanup.
