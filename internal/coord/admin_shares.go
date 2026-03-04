@@ -3,7 +3,6 @@ package coord
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -288,12 +287,6 @@ func (s *Server) forwardBucketDeletionToPeers(ctx context.Context, bucketName st
 		"buckets_only":         true,
 		"no_forward":           true,
 	})
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // mesh-internal
-		},
-	}
 	var wg sync.WaitGroup
 	for _, peerIP := range peers {
 		wg.Add(1)
@@ -306,7 +299,7 @@ func (s *Server) forwardBucketDeletionToPeers(ctx context.Context, bucketName st
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
+			resp, err := s.shareGCClient.Do(req)
 			if err != nil {
 				log.Warn().Err(err).Str("peer", ip).Str("bucket", bucketName).Msg("failed to forward bucket deletion to peer")
 				return
