@@ -401,6 +401,14 @@ func (s *Server) persistLocalIndex(ctx context.Context) {
 		return
 	}
 	s.listingIndexDirty.Store(false)
+
+	// Immediately enqueue the updated listing file for replication so peer coordinators
+	// receive it within ~50 seconds rather than waiting up to 5 minutes for the next
+	// auto-sync cycle. This is critical for accordion mode where stale listing files
+	// from previous iterations would otherwise accumulate in the merged view.
+	if s.replicator != nil {
+		s.replicator.EnqueueReplication(s3.SystemBucket, "listings/"+selfIP+".json", "put")
+	}
 }
 
 // loadPeerIndexes loads replicated peer listing indexes from the system store

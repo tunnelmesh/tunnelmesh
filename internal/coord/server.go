@@ -1352,6 +1352,11 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 		}
 	})
 
+	// Callback for RecycleObject (soft delete): remove from live objects, add to recycled.
+	store.SetOnObjectRecycledCallback(func(bucket, key string) {
+		s.updateListingIndex(bucket, key, nil, "delete")
+	})
+
 	// Callback for ForceDeleteBucket (file share deletion, orphaned bucket GC).
 	store.SetOnBucketRemovedCallback(func(bucket string) {
 		s.removeListingBucket(bucket)

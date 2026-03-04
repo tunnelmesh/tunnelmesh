@@ -215,6 +215,7 @@ type Store struct {
 	coordinatorID            string                   // Local coordinator ID for version vectors (optional)
 	logger                   zerolog.Logger           // Structured logger
 	onObjectRemovedCallback  func(bucket, key string) // Called when an object is permanently removed from disk
+	onObjectRecycledCallback func(bucket, key string) // Called when an object is moved to the recycle bin
 	onBucketRemovedCallback  func(bucket string)      // Called when an entire bucket is removed from disk
 	defaultObjectExpiryDays  int                      // Days until objects expire (0 = never)
 	defaultShareExpiryDays   int                      // Days until file shares expire (0 = never)
@@ -445,6 +446,14 @@ func (s *Store) SetOnObjectRemovedCallback(cb func(bucket, key string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onObjectRemovedCallback = cb
+}
+
+// SetOnObjectRecycledCallback sets a callback invoked when an object is soft-deleted (moved to recycle bin).
+// The callback receives the bucket name and object key that was recycled.
+func (s *Store) SetOnObjectRecycledCallback(cb func(bucket, key string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onObjectRecycledCallback = cb
 }
 
 // SetOnBucketRemovedCallback sets a callback invoked when an entire bucket is removed from disk.
@@ -2137,6 +2146,11 @@ func (s *Store) RecycleObject(ctx context.Context, bucket, key string) error {
 		s.statsLogicalBytes.Add(-meta.Size)
 	}
 	s.statsRecycledBytes.Add(meta.Size)
+
+	// Notify listing index (no deadlock: callback uses atomic CAS, not s.mu)
+	if s.onObjectRecycledCallback != nil {
+		s.onObjectRecycledCallback(bucket, key)
+	}
 
 	return nil
 }
