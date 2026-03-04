@@ -127,6 +127,10 @@ type Server struct {
 	meshTransport           *replication.MeshTransport // Transport for replication messages
 	capacityRegistry        *s3.CapacityRegistry       // Storage capacity tracking for replication
 	listingReconcileStagger time.Duration              // Stagger delay for listing reconcile (0 in tests)
+	// Shared HTTP clients for mesh-internal GC forwarding (avoids per-call TLS handshakes)
+	gcMeshTransport *http.Transport // underlying transport; TLS config set later by SetMeshTLS
+	gcForwardClient *http.Client    // shared TLS client for S3 GC forwarding (10 min timeout)
+	shareGCClient   *http.Client    // shared TLS client for share GC across coordinators (30 s timeout)
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -373,6 +377,15 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
+	// Shared HTTP clients for mesh-internal GC forwarding.
+	// Both share the same Transport; TLS config (mesh CA) is applied later by SetMeshTLS().
+	srv.gcMeshTransport = &http.Transport{
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	srv.gcForwardClient = &http.Client{Timeout: 10 * time.Minute, Transport: srv.gcMeshTransport}
+	srv.shareGCClient = &http.Client{Timeout: 30 * time.Second, Transport: srv.gcMeshTransport}
+
 	// Initialize packet filter
 	srv.filter = routing.NewPacketFilter(cfg.Coordinator.Filter.IsDefaultDeny())
 
@@ -482,6 +495,9 @@ func (s *Server) SetMeshTLS(cfg *tls.Config) {
 	}
 	if s.s3ForwardTransport != nil {
 		s.s3ForwardTransport.TLSClientConfig = cfg
+	}
+	if s.gcMeshTransport != nil {
+		s.gcMeshTransport.TLSClientConfig = cfg
 	}
 }
 
