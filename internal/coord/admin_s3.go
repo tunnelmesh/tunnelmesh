@@ -3,7 +3,6 @@ package coord
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -231,14 +230,6 @@ func (s *Server) forwardGCToPeers(ctx context.Context, purgeRecycleBin bool) {
 		"no_forward":        true,
 	})
 
-	// Share a single HTTP client across all peer requests for connection reuse
-	client := &http.Client{
-		Timeout: 10 * time.Minute,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // mesh-internal
-		},
-	}
-
 	var wg sync.WaitGroup
 	for _, peerIP := range peers {
 		wg.Add(1)
@@ -253,7 +244,7 @@ func (s *Server) forwardGCToPeers(ctx context.Context, purgeRecycleBin bool) {
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			resp, err := client.Do(req)
+			resp, err := s.gcForwardClient.Do(req)
 			if err != nil {
 				log.Warn().Err(err).Str("peer", ip).Msg("failed to forward GC to peer")
 				return

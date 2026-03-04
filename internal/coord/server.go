@@ -127,6 +127,9 @@ type Server struct {
 	meshTransport           *replication.MeshTransport // Transport for replication messages
 	capacityRegistry        *s3.CapacityRegistry       // Storage capacity tracking for replication
 	listingReconcileStagger time.Duration              // Stagger delay for listing reconcile (0 in tests)
+	// Shared HTTP clients for mesh-internal GC forwarding (avoids per-call TLS handshakes)
+	gcForwardClient *http.Client // shared TLS client for S3 GC forwarding (10 min timeout)
+	shareGCClient   *http.Client // shared TLS client for share GC across coordinators (30 s timeout)
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -372,6 +375,16 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
+
+	// Shared HTTP clients for mesh-internal GC forwarding.
+	// Both use the same Transport (identical TLS config) so connections are pooled.
+	gcTransport := &http.Transport{
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // mesh uses self-signed certs
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	srv.gcForwardClient = &http.Client{Timeout: 10 * time.Minute, Transport: gcTransport}
+	srv.shareGCClient = &http.Client{Timeout: 30 * time.Second, Transport: gcTransport}
 
 	// Initialize packet filter
 	srv.filter = routing.NewPacketFilter(cfg.Coordinator.Filter.IsDefaultDeny())
