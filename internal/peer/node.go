@@ -554,11 +554,11 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 				case <-time.After(backoff):
 				}
 				backoff *= 2
+				// Add jitter before applying the cap so the total stays within maxBackoff bounds
+				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
 				if backoff > maxBackoff {
 					backoff = maxBackoff
 				}
-				// Add jitter to avoid thundering herd when multiple peers reconnect simultaneously
-				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
 			}
 			continue
 		}
@@ -582,11 +582,11 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 				case <-time.After(backoff):
 				}
 				backoff *= 2
+				// Add jitter before applying the cap so the total stays within maxBackoff bounds
+				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
 				if backoff > maxBackoff {
 					backoff = maxBackoff
 				}
-				// Add jitter to avoid thundering herd when multiple peers reconnect simultaneously
-				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
 			}
 			continue
 		}

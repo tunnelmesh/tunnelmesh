@@ -269,6 +269,8 @@ func (p *PersistentRelay) writeLoop() {
 				if consecutiveFailures >= maxConsecutiveWriteFailures {
 					log.Warn().Int("failures", consecutiveFailures).Msg("persistent relay closing connection after repeated write failures")
 					_ = conn.Close()
+					// Closing conn causes readLoop to receive an error on its next ReadMessage
+					// call, which sets shouldReconnect=true and triggers autoReconnect.
 					return
 				}
 				continue

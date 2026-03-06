@@ -801,3 +801,73 @@ func TestPersistentRelay_UpdateJWTToken(t *testing.T) {
 
 	assert.Equal(t, "new-token", got, "Connect should use the token set by UpdateJWTToken, not the constructor value")
 }
+
+// TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures verifies that
+// the relay becomes disconnected when the server drops the connection without a
+// clean WebSocket close frame, exercising the writeLoop's consecutive-failure
+// detection path (maxConsecutiveWriteFailures).
+func TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures(t *testing.T) {
+	closeSig := make(chan struct{})
+	serverConns := make(chan *websocket.Conn, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case serverConns <- conn:
+		default:
+		}
+		// Drain reads so the client write buffer doesn't stall.
+		go func() {
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+		// Wait for signal, then drop the TCP conn without sending a WS close frame.
+		// This forces the client's ReadMessage and WriteMessage to return errors
+		// (not a clean close), so readLoop sets shouldReconnect=true and writeLoop
+		// increments consecutiveFailures.
+		<-closeSig
+		_ = conn.UnderlyingConn().Close()
+	}))
+	defer srv.Close()
+
+	relay := NewPersistentRelay(srv.URL, "peer1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := relay.Connect(ctx)
+	require.NoError(t, err)
+	assert.True(t, relay.IsConnected())
+
+	// Wait for the server goroutine to see the connection.
+	select {
+	case <-serverConns:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for server connection")
+	}
+
+	// Signal server to drop the TCP connection.
+	close(closeSig)
+
+	// Give the close a moment to propagate, then queue enough writes to trip the
+	// consecutive-failure threshold in writeLoop.
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < maxConsecutiveWriteFailures+2; i++ {
+		_ = relay.SendTo("peer2", []byte("failure test"))
+	}
+
+	// The relay should detect the broken connection (via readLoop or writeLoop) and
+	// transition to disconnected.
+	assert.Eventually(t, func() bool {
+		return !relay.IsConnected()
+	}, 2*time.Second, 25*time.Millisecond, "relay should disconnect after connection drop")
+
+	// Close the relay to stop any ongoing reconnection attempts.
+	_ = relay.Close()
+}

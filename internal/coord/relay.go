@@ -139,7 +139,11 @@ func (r *relayManager) QueryFilterRules(ctx context.Context, peerName string, ti
 	msg[3] = byte(reqID >> 8)
 	msg[4] = byte(reqID)
 
-	// Check if connection is still active before queuing (prevents sending on a closed/dead connection)
+	// Best-effort pre-flight check: verify the connection is still alive before queuing
+	// the request. This is NOT a strict synchronization guarantee — the connection could
+	// close between this check and the channel send below (classic TOCTOU). The check
+	// eliminates the common "already closed" case; the channel-full default branch and
+	// any downstream write errors in the peer's writeLoop handle the remaining cases.
 	pc.closeMu.Lock()
 	if pc.closed {
 		pc.closeMu.Unlock()
