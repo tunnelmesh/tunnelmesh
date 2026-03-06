@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -99,6 +100,7 @@ func safeGo(ctx context.Context, name string, fn func(), restart bool) {
 				log.Error().
 					Str("goroutine", name).
 					Interface("panic", r).
+					Bytes("stack", debug.Stack()).
 					Msg("goroutine panicked - unexpected crash")
 				if restart {
 					select {
