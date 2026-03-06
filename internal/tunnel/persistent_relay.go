@@ -191,6 +191,7 @@ func (p *PersistentRelay) Connect(ctx context.Context) error {
 	conn, resp, err := dialer.DialContext(ctx, relayURL, headers)
 	if err != nil {
 		if resp != nil {
+			defer func() { _ = resp.Body.Close() }()
 			body := make([]byte, 256)
 			n, _ := resp.Body.Read(body)
 			// Return sentinel errors for specific status codes so callers can react appropriately
