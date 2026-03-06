@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tunnelmesh/tunnelmesh/internal/coord"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -723,4 +724,158 @@ func TestPersistentRelay_HeartbeatIncludesSentAt(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for heartbeat")
 	}
+}
+
+// TestPersistentRelay_Connect_401_ReturnsErrUnauthorized verifies that a 401
+// response from the server is wrapped as coord.ErrUnauthorized.
+func TestPersistentRelay_Connect_401_ReturnsErrUnauthorized(t *testing.T) {
+	// Serve a plain HTTP server that always returns 401 (no WS upgrade)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "token expired", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	relay := NewPersistentRelay(srv.URL, "expired-token")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := relay.Connect(ctx)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, coord.ErrUnauthorized), "expected ErrUnauthorized, got: %v", err)
+}
+
+// TestPersistentRelay_UpdateJWTToken verifies that UpdateJWTToken replaces the
+// stored token so the next Connect call sends the new value in the Authorization header.
+// The test creates a single relay, calls UpdateJWTToken before Connect, then verifies
+// the server sees the updated token — no ordering dependency, no background goroutines
+// racing against the assertion.
+func TestPersistentRelay_UpdateJWTToken(t *testing.T) {
+	var receivedToken string
+	var mu sync.Mutex
+	connected := make(chan struct{}, 1)
+
+	// Server records the token and signals when a connection arrives
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		mu.Lock()
+		receivedToken = token
+		mu.Unlock()
+		conn, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		// Keep open until client closes
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Set placeholder at construction, then update before connecting
+	relay := NewPersistentRelay(srv.URL, "placeholder-token")
+	relay.UpdateJWTToken("new-token")
+
+	err := relay.Connect(ctx)
+	require.NoError(t, err)
+	defer func() { _ = relay.Close() }()
+
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for connection")
+	}
+
+	mu.Lock()
+	got := receivedToken
+	mu.Unlock()
+
+	assert.Equal(t, "new-token", got, "Connect should use the token set by UpdateJWTToken, not the constructor value")
+}
+
+// TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures verifies that
+// the relay becomes disconnected when the server drops the TCP connection
+// without a clean WebSocket close frame. This exercises the readLoop failure
+// path (shouldReconnect=true) and, if writes were in flight, the writeLoop's
+// consecutive-failure detection (maxConsecutiveWriteFailures).
+//
+// The server rejects all reconnection attempts (503) so that autoReconnect's
+// Connect() fails before creating a new writeChan. This avoids the race
+// between readLoop closing the old writeChan and a concurrent SendTo sending
+// to the newly created replacement — a race that would occur if the server
+// accepted the reconnect and the new readLoop immediately exited.
+func TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures(t *testing.T) {
+	var mu sync.Mutex
+	firstHandled := false
+	serverConns := make(chan *websocket.Conn, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		isFirst := !firstHandled
+		firstHandled = true
+		mu.Unlock()
+
+		if !isFirst {
+			// Reject reconnection attempts so Connect() returns an error without
+			// creating a new writeChan, keeping p.writeChan nil and race-free.
+			http.Error(w, "no reconnect", http.StatusServiceUnavailable)
+			return
+		}
+
+		conn, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case serverConns <- conn:
+		default:
+		}
+		// Drain reads so the client write buffer does not stall.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	relay := NewPersistentRelay(srv.URL, "peer1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := relay.Connect(ctx)
+	require.NoError(t, err)
+	assert.True(t, relay.IsConnected())
+
+	// Wait for the server goroutine to see the connection.
+	var sc *websocket.Conn
+	select {
+	case sc = <-serverConns:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for server connection")
+	}
+
+	// Drop the TCP connection without sending a WebSocket close frame. This
+	// forces the client's ReadMessage to return an error (not a clean close),
+	// so readLoop sets shouldReconnect=true and triggers autoReconnect. It
+	// also causes any pending WriteMessage calls in writeLoop to fail.
+	_ = sc.UnderlyingConn().Close()
+
+	// The relay should detect the broken connection and transition to disconnected.
+	assert.Eventually(t, func() bool {
+		return !relay.IsConnected()
+	}, 2*time.Second, 25*time.Millisecond, "relay should disconnect after connection drop")
+
+	// Close the relay to stop any ongoing reconnection attempts.
+	_ = relay.Close()
 }

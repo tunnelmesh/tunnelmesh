@@ -158,6 +158,18 @@ type Config struct {
 	// If nil, a new client with sensible defaults will be created.
 	// Providing a managed client allows proper cleanup during network changes.
 	HTTPClient *http.Client
+
+	// OnDropQueueFull is called each time a packet is dropped because the processing
+	// queue is full. Wire this to a Prometheus counter for operational visibility.
+	OnDropQueueFull func()
+}
+
+// SetOnDropQueueFull sets a callback invoked each time a packet is dropped because
+// the processing queue is full. Safe to call after Start().
+func (t *Transport) SetOnDropQueueFull(fn func()) {
+	t.mu.Lock()
+	t.config.OnDropQueueFull = fn
+	t.mu.Unlock()
 }
 
 // DefaultConfig returns sensible defaults.
@@ -511,15 +523,29 @@ func (t *Transport) receiveLoop(conn *net.UDPConn) {
 		default:
 			// Queue full - drop packet (better than unbounded goroutines)
 			log.Debug().Msg("packet queue full, dropping packet")
+			if t.config.OnDropQueueFull != nil {
+				t.config.OnDropQueueFull()
+			}
 		}
 	}
 }
 
 // packetWorker processes packets from the queue.
 // Multiple workers run concurrently to handle packets.
+// Each iteration has panic recovery so a single malformed packet cannot crash the worker.
 func (t *Transport) packetWorker() {
 	for work := range t.packetQueue {
-		t.handlePacket(work.data, work.remoteAddr, work.conn)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().
+						Interface("panic", r).
+						Str("from", work.remoteAddr.String()).
+						Msg("packet worker panicked - skipping packet")
+				}
+			}()
+			t.handlePacket(work.data, work.remoteAddr, work.conn)
+		}()
 	}
 }
 

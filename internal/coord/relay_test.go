@@ -583,6 +583,32 @@ func TestRelayManager_QueryFilterRules_PeerNotConnected(t *testing.T) {
 	assert.Contains(t, err.Error(), "not connected")
 }
 
+// TestRelayManager_QueryFilterRules_ConnectionClosed verifies that QueryFilterRules
+// returns an error containing "closed" when the persistentConn is marked closed
+// but still present in the relay manager's map.
+func TestRelayManager_QueryFilterRules_ConnectionClosed(t *testing.T) {
+	rm := newRelayManager()
+
+	// Inject a fake persistentConn that is already closed, without a real WebSocket.
+	// We create it with a non-nil writeChan so the struct is valid but mark it closed
+	// directly so that QueryFilterRules hits the closed-check branch before attempting
+	// to enqueue to the write channel.
+	pc := &persistentConn{
+		peerName:  "closed-peer",
+		writeChan: make(chan []byte, 1),
+		closeChan: make(chan struct{}),
+		closed:    true,
+	}
+
+	rm.mu.Lock()
+	rm.persistent["closed-peer"] = pc
+	rm.mu.Unlock()
+
+	_, err := rm.QueryFilterRules(context.Background(), "closed-peer", 1*time.Second)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "closed")
+}
+
 func TestRelayManager_StoresReportedLatency(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.Coordinator.Enabled = true

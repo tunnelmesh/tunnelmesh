@@ -346,7 +346,7 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 
 	// Initialize relay manager early so recoverCoordinatorState (called from
 	// initS3Storage) can restore any state.
-	srv.relay = newRelayManager(ctx)
+	srv.relay = newRelayManager()
 
 	// Initialize S3 storage (always enabled, must be before IP allocator)
 	if err := srv.initS3Storage(ctx, cfg); err != nil {

@@ -18,6 +18,9 @@ import (
 // ErrPeerNotFound is returned when the peer is not registered with the server.
 var ErrPeerNotFound = errors.New("peer not found")
 
+// ErrUnauthorized is returned when the server rejects authentication (e.g., expired JWT).
+var ErrUnauthorized = errors.New("peer unauthorized")
+
 // Client is a client for the coordination server.
 type Client struct {
 	baseURL   string

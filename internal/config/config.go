@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
@@ -342,6 +343,19 @@ func (c *PeerConfig) Validate() error {
 	}
 	if c.TUN.MTU < 576 || c.TUN.MTU > 65535 {
 		return fmt.Errorf("tun.mtu must be between 576 and 65535")
+	}
+	// 0 means "use default" (LoadPeerConfig sets 9443); reject negative and out-of-range values
+	if c.MetricsPort < 0 || c.MetricsPort > 65535 {
+		return fmt.Errorf("metrics_port must be between 0 and 65535, got %d", c.MetricsPort)
+	}
+	if c.HeartbeatInterval != "" {
+		d, err := time.ParseDuration(c.HeartbeatInterval)
+		if err != nil {
+			return fmt.Errorf("heartbeat_interval is not a valid duration (%q): %w", c.HeartbeatInterval, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("heartbeat_interval must be positive, got %q", c.HeartbeatInterval)
+		}
 	}
 	// Validate geolocation if any coordinate is set
 	if c.Geolocation.Latitude != 0 || c.Geolocation.Longitude != 0 {

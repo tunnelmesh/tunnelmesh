@@ -2,14 +2,22 @@ package peer
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tunnelmesh/tunnelmesh/internal/config"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord"
+	"github.com/tunnelmesh/tunnelmesh/internal/tunnel"
+	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
 func TestNewMeshNode(t *testing.T) {
@@ -399,4 +407,114 @@ func TestMeshNode_InboundCancelsOutbound_Integration(t *testing.T) {
 
 	// Verify outbound was cancelled
 	assert.True(t, outboundCancelled.Load(), "outbound should have been cancelled")
+}
+
+// TestSetupRelayHandlers_ErrUnauthorized_TriggersReregistration verifies the full
+// 401-recovery flow end-to-end:
+//
+//  1. Relay connects successfully (state 0)
+//  2. Server closes the connection → autoReconnect fires
+//  3. Reconnect attempt gets 401 (state 1) → ErrUnauthorized
+//  4. Error handler calls Register → server returns fresh JWT
+//  5. Relay calls UpdateJWTToken with the fresh JWT
+//  6. Next reconnect attempt (state 2) uses the fresh JWT and succeeds
+func TestSetupRelayHandlers_ErrUnauthorized_TriggersReregistration(t *testing.T) {
+	var state atomic.Int32
+	var registerCalled atomic.Bool
+	var finalToken string
+	var tokenMu sync.Mutex
+	reconnectedWithFreshToken := make(chan struct{})
+
+	const freshJWT = "fresh-jwt-after-reregister"
+
+	wsUpgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/register":
+			registerCalled.Store(true)
+			resp := proto.RegisterResponse{
+				MeshIP:   "10.42.0.1",
+				MeshCIDR: "10.42.0.0/16",
+				Token:    freshJWT,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case r.URL.Path == "/api/v1/relay/persistent":
+			s := state.Load()
+			switch s {
+			case 0:
+				// Accept initial connection, then close immediately to trigger autoReconnect
+				state.Store(1)
+				conn, err := wsUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				_ = conn.Close()
+			case 1:
+				// Return 401 to trigger ErrUnauthorized → error handler
+				state.Store(2)
+				http.Error(w, "token expired", http.StatusUnauthorized)
+			default:
+				// Final attempt: record the token and accept
+				tokenMu.Lock()
+				finalToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				tokenMu.Unlock()
+				conn, err := wsUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				select {
+				case reconnectedWithFreshToken <- struct{}{}:
+				default:
+				}
+				_ = conn.Close()
+			}
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	identity := &PeerIdentity{
+		Name:          "test-node",
+		PubKeyEncoded: "test-key",
+		MeshCIDR:      "10.42.0.0/16",
+		Config: &config.PeerConfig{
+			Name: "test-node",
+		},
+	}
+
+	client := coord.NewClient(srv.URL, "auth-token")
+	node := NewMeshNode(identity, client)
+
+	// Create relay with an expired token pointing at the mock server
+	relay := tunnel.NewPersistentRelay(srv.URL, "expired-token")
+	node.setupRelayHandlers(relay)
+
+	// Connect: server accepts then closes → autoReconnect fires
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := relay.Connect(ctx)
+	require.NoError(t, err, "initial connect should succeed")
+
+	// Wait for the full 401 → re-register → reconnect-with-fresh-token sequence
+	// autoReconnect backoff starts at 1s so allow up to 5s
+	select {
+	case <-reconnectedWithFreshToken:
+		// Success
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for relay to reconnect with fresh JWT")
+	}
+
+	assert.True(t, registerCalled.Load(), "Register should have been called on ErrUnauthorized")
+
+	tokenMu.Lock()
+	got := finalToken
+	tokenMu.Unlock()
+	assert.Equal(t, freshJWT, got, "relay should have reconnected with the fresh JWT token")
+
+	_ = relay.Close()
 }

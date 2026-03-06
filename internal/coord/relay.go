@@ -98,11 +98,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // newRelayManager creates a new relay manager.
-// ctx is the server lifecycle context used for background operations.
-func newRelayManager(ctx context.Context) *relayManager {
-	// Note: ctx parameter kept for future use (e.g., initializing background workers)
-	// but not stored in struct per Go best practices
-	_ = ctx
+func newRelayManager() *relayManager {
 	return &relayManager{
 		pending:     make(map[string]*relayConn),
 		persistent:  make(map[string]*persistentConn),
@@ -142,6 +138,18 @@ func (r *relayManager) QueryFilterRules(ctx context.Context, peerName string, ti
 	msg[2] = byte(reqID >> 16)
 	msg[3] = byte(reqID >> 8)
 	msg[4] = byte(reqID)
+
+	// Best-effort pre-flight check: verify the connection is still alive before queuing
+	// the request. This is NOT a strict synchronization guarantee — the connection could
+	// close between this check and the channel send below (classic TOCTOU). The check
+	// eliminates the common "already closed" case; the channel-full default branch and
+	// any downstream write errors in the peer's writeLoop handle the remaining cases.
+	pc.closeMu.Lock()
+	if pc.closed {
+		pc.closeMu.Unlock()
+		return nil, fmt.Errorf("peer connection closed: %s", peerName)
+	}
+	pc.closeMu.Unlock()
 
 	// Send request via async write channel
 	select {
@@ -703,7 +711,7 @@ func (r *relayManager) PushServicePorts(peerName string, ports []uint16) {
 // Admin mux: Preferred by peers with mesh connectivity for better security.
 func (s *Server) setupRelayRoutes(ctx context.Context) {
 	if s.relay == nil {
-		s.relay = newRelayManager(ctx)
+		s.relay = newRelayManager()
 	}
 	s.mux.HandleFunc("/api/v1/relay/persistent", s.handlePersistentRelay)
 	s.mux.HandleFunc("/api/v1/relay/", s.handleRelay)
@@ -774,16 +782,16 @@ func (s *Server) handlePersistentRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Notify other peers that this peer has (re)connected
 	// This allows them to invalidate stale direct tunnels
-	go s.relay.BroadcastPeerReconnected(peerName)
+	s.relay.BroadcastPeerReconnected(peerName)
 
 	// Push coordinator filter rules to the peer
 	if len(s.cfg.Filter.Rules) > 0 {
-		go s.relay.PushFilterRules(peerName, s.cfg.Filter.Rules)
+		s.relay.PushFilterRules(peerName, s.cfg.Filter.Rules)
 	}
 
 	// Push coordinator service ports (so peers auto-allow access to admin, metrics, etc.)
 	if servicePorts := s.getServicePorts(); len(servicePorts) > 0 {
-		go s.relay.PushServicePorts(peerName, servicePorts)
+		s.relay.PushServicePorts(peerName, servicePorts)
 	}
 
 	// Set up ping/pong handlers for keepalive

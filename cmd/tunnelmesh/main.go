@@ -87,6 +87,34 @@ var (
 	serviceRunMode string
 )
 
+// safeGo runs fn in a goroutine with panic recovery. If restart is true,
+// the goroutine is automatically re-launched after a 5-second delay when
+// a panic occurs — suitable for long-running background workers that must
+// stay alive for the lifetime of the process.
+func safeGo(ctx context.Context, name string, fn func(), restart bool) {
+	var launch func()
+	launch = func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error().
+					Str("goroutine", name).
+					Interface("panic", r).
+					Msg("goroutine panicked - unexpected crash")
+				if restart {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+					}
+					go launch()
+				}
+			}
+		}()
+		fn()
+	}
+	go launch()
+}
+
 func main() {
 	// Check if running as a service (invoked by service manager)
 	if svc.IsServiceMode(os.Args) {
@@ -875,13 +903,13 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 			log.Warn().Err(err).Msg("failed to start replicator (will run without replication)")
 		}
 
-		// Start coordinator HTTP server in background
-		go func() {
+		// Start coordinator HTTP server in background with panic recovery
+		safeGo(ctx, "coordinator-server", func() {
 			if err := srv.ListenAndServe(); err != nil {
 				log.Error().Err(err).Msg("coordinator server error - server stopped")
 				// Note: Process continues running but coordinator services unavailable
 			}
-		}()
+		}, false)
 
 		// Wait for coordinator server to be ready (up to 30 seconds)
 		localServerURL := "http://127.0.0.1" + cfg.Coordinator.Listen
@@ -1316,6 +1344,9 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	go node.HandleIncomingSSH(ctx, sshListener)
 	log.Info().Int("port", cfg.SSHPort).Msg("SSH transport listening")
 
+	// udpTransportRef captures the UDP transport for later metric wiring (after peerMetrics init).
+	var udpTransportRef *udptransport.Transport
+
 	// Create and register UDP transport (for lower latency when direct connection possible)
 	edPrivKey, err := config.LoadED25519PrivateKey(cfg.PrivateKey)
 	if err != nil {
@@ -1459,6 +1490,9 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 					node.LatencyProber = peer.NewLatencyProber(udpTransport)
 					go node.LatencyProber.Start(ctx)
 					log.Info().Msg("latency prober started for peer RTT measurement")
+
+					// Capture reference for metric wiring after peerMetrics init (below)
+					udpTransportRef = udpTransport
 				}
 			}
 		}
@@ -1637,6 +1671,11 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	peerMetrics := metrics.InitMetrics(cfg.Name, resp.MeshIP, Version)
 	node.OnConnectionSetup = peerMetrics.RecordConnectionSetup
 
+	// Wire UDP queue-full counter now that peerMetrics is initialized
+	if udpTransportRef != nil {
+		udpTransportRef.SetOnDropQueueFull(peerMetrics.DroppedQueueFull.Inc)
+	}
+
 	// Initialize Loki log shipping if enabled
 	if cfg.Loki.Enabled && cfg.Loki.URL != "" {
 		flushInterval, err := time.ParseDuration(cfg.Loki.FlushInterval)
@@ -1731,7 +1770,9 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	// Shutdown coordinator server if running
 	if srv != nil {
 		log.Info().Msg("shutting down coordinator server")
-		if err := srv.Shutdown(context.Background()); err != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Warn().Err(err).Msg("failed to shutdown coordinator server")
 		}
 	}
@@ -1741,12 +1782,13 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		removeSystemResolver(resp.Domain, cfg.TUN.Name)
 	}
 
-	// Close all connections via FSM (properly transitions states and triggers observers)
-	node.Connections.CloseAll()
-
+	// Shut down DNS resolver before closing connections to avoid orphaned in-flight queries
 	if node.Resolver != nil {
 		_ = node.Resolver.Shutdown()
 	}
+
+	// Close all connections via FSM (properly transitions states and triggers observers)
+	node.Connections.CloseAll()
 
 	// Show exit instructions
 	fmt.Fprintln(os.Stderr)

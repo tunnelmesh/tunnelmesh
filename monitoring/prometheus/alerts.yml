@@ -13,6 +13,17 @@ groups:
           summary: "Elevated packet drops detected"
           description: "Packet drop rate exceeds 1/s for 2 minutes"
 
+      # Mesh: UDP packet queue drops — processing backlog indicates CPU saturation
+      - alert: ElevatedUDPQueueDrops
+        expr: sum(rate(tunnelmesh_dropped_queue_full_total[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+          category: mesh
+        annotations:
+          summary: "Elevated UDP packet queue drops"
+          description: "UDP receive queue dropping >10 packets/s for 2 minutes — CPU may be saturated or worker pool undersized"
+
       # Mesh: Reconnection attempts increasing
       - alert: ReconnectionAttempts
         expr: sum(rate(tunnelmesh_reconnects_total[5m])) > 0.1
@@ -394,17 +405,19 @@ groups:
           summary: "No TunnelMesh peers responding"
           description: "Cannot reach any TunnelMesh peer metrics - possible complete network outage"
 
-      # Data: S3 service down
-      # Note: Also triggers when idle; consider changing to `absent()` only if false positives occur
+      # Data: S3 metrics absent (coordinator down or metrics export broken)
+      # 5m avoids false positives during normal maintenance restarts.
+      # count(tunnelmesh_peer_info) > 1 ensures at least one peer is up and reporting,
+      # so the alert fires only when the mesh is active but S3 metrics have gone silent.
       - alert: S3Down
-        expr: absent(tunnelmesh_s3_requests_total) or sum(rate(tunnelmesh_s3_requests_total[1m])) == 0
-        for: 2m
+        expr: absent(tunnelmesh_s3_requests_total) AND count(tunnelmesh_peer_info) > 1
+        for: 5m
         labels:
           severity: page
           category: data
         annotations:
-          summary: "S3 service down or not receiving requests"
-          description: "No S3 metrics reported for 2 minutes"
+          summary: "S3 metrics not being exported"
+          description: "S3 request metrics absent from Prometheus for 5+ minutes while peers are active — coordinator may be down or metrics export broken"
 
       # Data: S3 quota near full - immediate action required
       # Threshold: 92% leaves only 8% buffer; under high load this could fill in minutes

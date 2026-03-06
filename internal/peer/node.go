@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,11 +13,14 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/dns"
 	"github.com/tunnelmesh/tunnelmesh/internal/peer/connection"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/internal/transport"
 	sshtransport "github.com/tunnelmesh/tunnelmesh/internal/transport/ssh"
 	udptransport "github.com/tunnelmesh/tunnelmesh/internal/transport/udp"
 	"github.com/tunnelmesh/tunnelmesh/internal/tunnel"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // networkBypassWindow is the duration after a network change during which
@@ -437,10 +441,17 @@ func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
 		m.TriggerDiscovery()
 	})
 
-	// Set up handler for reconnection errors to detect when we need to re-register
+	// Set up handler for reconnection errors to detect when we need to re-register.
+	// Handles both 404 (peer deregistered) and 401 (JWT expired) by re-registering
+	// and pushing the fresh token into the relay so the next attempt succeeds.
 	relay.SetReconnectErrorHandler(func(err error) {
-		if errors.Is(err, coord.ErrPeerNotFound) {
-			log.Info().Msg("peer not registered on server, re-registering...")
+		needsReregister := errors.Is(err, coord.ErrPeerNotFound) || errors.Is(err, coord.ErrUnauthorized)
+		if needsReregister {
+			if errors.Is(err, coord.ErrUnauthorized) {
+				log.Info().Msg("relay JWT expired, re-registering to refresh token...")
+			} else {
+				log.Info().Msg("peer not registered on server, re-registering...")
+			}
 			publicIPs, privateIPs, behindNAT := m.identity.GetLocalIPs()
 			hasMonitoring := m.identity.Config.Coordinator.Enabled &&
 				(m.identity.Config.Coordinator.Monitoring.PrometheusURL != "" || m.identity.Config.Coordinator.Monitoring.GrafanaURL != "")
@@ -450,10 +461,12 @@ func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
 				m.identity.Config.ExitPeer, m.identity.Config.AllowExitTraffic, m.identity.Config.DNS.Aliases,
 				m.identity.Config.Coordinator.Enabled, hasMonitoring,
 			); regErr != nil {
-				log.Error().Err(regErr).Msg("failed to re-register after peer not found")
+				log.Error().Err(regErr).Msg("failed to re-register after relay auth failure")
 			} else {
 				log.Info().Msg("re-registered with coordination server")
 				m.SetHeartbeatIPs(publicIPs, privateIPs, behindNAT)
+				// Push fresh JWT into relay so the next autoReconnect attempt uses it
+				relay.UpdateJWTToken(m.client.JWTToken())
 			}
 		}
 	})
@@ -505,6 +518,10 @@ func (m *MeshNode) ConnectPersistentRelay(ctx context.Context) error {
 // It uses atomic swap to keep the old relay active until the new one connects,
 // preventing packet loss during the reconnection window.
 func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
+	ctx, span := tracing.Tracer("tunnelmesh/peer").Start(ctx, "peer.relay.reconnect")
+	defer span.End()
+	span.SetAttributes(attribute.String("relay.url", m.client.BaseURL()))
+
 	oldRelay := m.PersistentRelay
 	// Note: We intentionally do NOT close or clear the old relay here.
 	// The forwarder continues using it until the new relay is ready.
@@ -515,12 +532,26 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 	maxBackoff := 10 * time.Second    // Cap backoff lower for faster recovery
 	maxAttempts := 15                 // More attempts with faster backoff
 
+	// advanceBackoff doubles the backoff, adds jitter, then caps at maxBackoff.
+	// Defined once here to avoid duplicating the formula across multiple retry sites.
+	advanceBackoff := func(d time.Duration) time.Duration {
+		d *= 2
+		d += time.Duration(rand.Int63n(int64(d / 4))) // jitter before cap
+		if d > maxBackoff {
+			d = maxBackoff
+		}
+		return d
+	}
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
+			span.SetStatus(otelcodes.Error, "context cancelled")
 			return
 		default:
 		}
+
+		span.SetAttributes(attribute.Int("relay.attempt", attempt))
 
 		// Get fresh JWT token for new connection
 		jwtToken := m.client.JWTToken()
@@ -529,13 +560,11 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 			if attempt < maxAttempts {
 				select {
 				case <-ctx.Done():
+					span.SetStatus(otelcodes.Error, "context cancelled")
 					return
 				case <-time.After(backoff):
 				}
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+				backoff = advanceBackoff(backoff)
 			}
 			continue
 		}
@@ -547,19 +576,18 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 		m.setupRelayHandlers(newRelay)
 
 		if err := newRelay.Connect(ctx); err != nil {
+			span.RecordError(err)
 			log.Warn().Err(err).Int("attempt", attempt).Msg("relay reconnection failed")
 			_ = newRelay.Close()
 
 			if attempt < maxAttempts {
 				select {
 				case <-ctx.Done():
+					span.SetStatus(otelcodes.Error, "context cancelled")
 					return
 				case <-time.After(backoff):
 				}
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+				backoff = advanceBackoff(backoff)
 			}
 			continue
 		}
@@ -576,6 +604,8 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 			_ = oldRelay.Close()
 		}
 
+		span.SetStatus(otelcodes.Ok, "")
+		span.SetAttributes(attribute.Int("relay.attempts_total", attempt))
 		log.Info().Int("attempt", attempt).Msg("persistent relay reconnected after network change")
 		return
 	}
@@ -588,6 +618,7 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 	if m.Forwarder != nil {
 		m.Forwarder.SetRelay(nil)
 	}
+	span.SetStatus(otelcodes.Error, "max attempts exceeded")
 	log.Error().Msg("gave up reconnecting persistent relay after max attempts")
 }
 
