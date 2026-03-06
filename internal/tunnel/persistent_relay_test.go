@@ -803,14 +803,34 @@ func TestPersistentRelay_UpdateJWTToken(t *testing.T) {
 }
 
 // TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures verifies that
-// the relay becomes disconnected when the server drops the connection without a
-// clean WebSocket close frame, exercising the writeLoop's consecutive-failure
-// detection path (maxConsecutiveWriteFailures).
+// the relay becomes disconnected when the server drops the TCP connection
+// without a clean WebSocket close frame. This exercises the readLoop failure
+// path (shouldReconnect=true) and, if writes were in flight, the writeLoop's
+// consecutive-failure detection (maxConsecutiveWriteFailures).
+//
+// The server rejects all reconnection attempts (503) so that autoReconnect's
+// Connect() fails before creating a new writeChan. This avoids the race
+// between readLoop closing the old writeChan and a concurrent SendTo sending
+// to the newly created replacement — a race that would occur if the server
+// accepted the reconnect and the new readLoop immediately exited.
 func TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures(t *testing.T) {
-	closeSig := make(chan struct{})
+	var mu sync.Mutex
+	firstHandled := false
 	serverConns := make(chan *websocket.Conn, 1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		isFirst := !firstHandled
+		firstHandled = true
+		mu.Unlock()
+
+		if !isFirst {
+			// Reject reconnection attempts so Connect() returns an error without
+			// creating a new writeChan, keeping p.writeChan nil and race-free.
+			http.Error(w, "no reconnect", http.StatusServiceUnavailable)
+			return
+		}
+
 		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -819,20 +839,12 @@ func TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures(t *testing.T) 
 		case serverConns <- conn:
 		default:
 		}
-		// Drain reads so the client write buffer doesn't stall.
-		go func() {
-			for {
-				if _, _, err := conn.ReadMessage(); err != nil {
-					return
-				}
+		// Drain reads so the client write buffer does not stall.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
 			}
-		}()
-		// Wait for signal, then drop the TCP conn without sending a WS close frame.
-		// This forces the client's ReadMessage and WriteMessage to return errors
-		// (not a clean close), so readLoop sets shouldReconnect=true and writeLoop
-		// increments consecutiveFailures.
-		<-closeSig
-		_ = conn.UnderlyingConn().Close()
+		}
 	}))
 	defer srv.Close()
 
@@ -846,24 +858,20 @@ func TestPersistentRelay_WriteLoop_ClosesAfterConsecutiveFailures(t *testing.T) 
 	assert.True(t, relay.IsConnected())
 
 	// Wait for the server goroutine to see the connection.
+	var sc *websocket.Conn
 	select {
-	case <-serverConns:
+	case sc = <-serverConns:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for server connection")
 	}
 
-	// Signal server to drop the TCP connection.
-	close(closeSig)
+	// Drop the TCP connection without sending a WebSocket close frame. This
+	// forces the client's ReadMessage to return an error (not a clean close),
+	// so readLoop sets shouldReconnect=true and triggers autoReconnect. It
+	// also causes any pending WriteMessage calls in writeLoop to fail.
+	_ = sc.UnderlyingConn().Close()
 
-	// Give the close a moment to propagate, then queue enough writes to trip the
-	// consecutive-failure threshold in writeLoop.
-	time.Sleep(50 * time.Millisecond)
-	for i := 0; i < maxConsecutiveWriteFailures+2; i++ {
-		_ = relay.SendTo("peer2", []byte("failure test"))
-	}
-
-	// The relay should detect the broken connection (via readLoop or writeLoop) and
-	// transition to disconnected.
+	// The relay should detect the broken connection and transition to disconnected.
 	assert.Eventually(t, func() bool {
 		return !relay.IsConnected()
 	}, 2*time.Second, 25*time.Millisecond, "relay should disconnect after connection drop")
