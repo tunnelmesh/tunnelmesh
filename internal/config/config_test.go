@@ -124,6 +124,41 @@ func TestPeerConfig_Validate(t *testing.T) {
 			modify:  func(c *PeerConfig) { c.TUN.MTU = 100 },
 			wantErr: true,
 		},
+		{
+			name:    "metrics_port out of range",
+			modify:  func(c *PeerConfig) { c.MetricsPort = 99999 },
+			wantErr: true,
+		},
+		{
+			name:    "metrics_port negative",
+			modify:  func(c *PeerConfig) { c.MetricsPort = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "heartbeat_interval invalid string",
+			modify:  func(c *PeerConfig) { c.HeartbeatInterval = "notaduration" },
+			wantErr: true,
+		},
+		{
+			name:    "heartbeat_interval negative",
+			modify:  func(c *PeerConfig) { c.HeartbeatInterval = "-1s" },
+			wantErr: true,
+		},
+		{
+			name:    "heartbeat_interval zero",
+			modify:  func(c *PeerConfig) { c.HeartbeatInterval = "0s" },
+			wantErr: true,
+		},
+		{
+			name:    "heartbeat_interval valid",
+			modify:  func(c *PeerConfig) { c.HeartbeatInterval = "30s" },
+			wantErr: false,
+		},
+		{
+			name:    "metrics_port valid custom",
+			modify:  func(c *PeerConfig) { c.MetricsPort = 9090 },
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -24,6 +24,9 @@ type PeerMetrics struct {
 	DroppedNonIPv4  prometheus.Counter
 	ForwarderErrors prometheus.Counter
 
+	// UDP transport stats
+	DroppedQueueFull prometheus.Counter // Packets dropped due to full packet-processing queue
+
 	// Packet filter stats (counters, labeled by protocol and source peer)
 	DroppedFiltered *prometheus.CounterVec // labels: protocol (tcp, udp), source_peer
 
@@ -118,6 +121,13 @@ func InitMetrics(peerName, meshIP, version string) *PeerMetrics {
 		ForwarderErrors: promauto.With(Registry).NewCounter(prometheus.CounterOpts{
 			Name:        "tunnelmesh_forwarder_errors_total",
 			Help:        "Total forwarder errors",
+			ConstLabels: constLabels,
+		}),
+
+		// UDP transport stats
+		DroppedQueueFull: promauto.With(Registry).NewCounter(prometheus.CounterOpts{
+			Name:        "tunnelmesh_dropped_queue_full_total",
+			Help:        "Packets dropped because the UDP packet processing queue was full",
 			ConstLabels: constLabels,
 		}),
 

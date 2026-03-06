@@ -225,6 +225,10 @@ func (p *PersistentRelay) Connect(ctx context.Context) error {
 	return nil
 }
 
+// maxConsecutiveWriteFailures is the number of consecutive write failures before
+// the writeLoop closes the connection to force a reconnect via the readLoop.
+const maxConsecutiveWriteFailures = 3
+
 // writeLoop processes queued writes to prevent blocking on slow network writes.
 func (p *PersistentRelay) writeLoop() {
 	defer close(p.writeLoopDone)
@@ -234,6 +238,8 @@ func (p *PersistentRelay) writeLoop() {
 	closedChan := p.closedChan
 	writeChan := p.writeChan
 	p.mu.RUnlock()
+
+	consecutiveFailures := 0
 
 	for {
 		select {
@@ -255,9 +261,20 @@ func (p *PersistentRelay) writeLoop() {
 			}
 
 			if err := conn.WriteMessage(websocket.BinaryMessage, req.data); err != nil {
-				log.Debug().Err(err).Msg("persistent relay write failed")
+				consecutiveFailures++
+				log.Debug().Err(err).Int("failures", consecutiveFailures).Msg("persistent relay write failed")
+				if req.pooled {
+					relayPacketPool.Put(&req.data)
+				}
+				if consecutiveFailures >= maxConsecutiveWriteFailures {
+					log.Warn().Int("failures", consecutiveFailures).Msg("persistent relay closing connection after repeated write failures")
+					_ = conn.Close()
+					return
+				}
+				continue
 			}
 
+			consecutiveFailures = 0
 			if req.pooled {
 				relayPacketPool.Put(&req.data)
 			}

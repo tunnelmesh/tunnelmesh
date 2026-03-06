@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,11 +13,14 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/dns"
 	"github.com/tunnelmesh/tunnelmesh/internal/peer/connection"
 	"github.com/tunnelmesh/tunnelmesh/internal/routing"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/internal/transport"
 	sshtransport "github.com/tunnelmesh/tunnelmesh/internal/transport/ssh"
 	udptransport "github.com/tunnelmesh/tunnelmesh/internal/transport/udp"
 	"github.com/tunnelmesh/tunnelmesh/internal/tunnel"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 )
 
 // networkBypassWindow is the duration after a network change during which
@@ -514,6 +518,10 @@ func (m *MeshNode) ConnectPersistentRelay(ctx context.Context) error {
 // It uses atomic swap to keep the old relay active until the new one connects,
 // preventing packet loss during the reconnection window.
 func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
+	ctx, span := tracing.Tracer("tunnelmesh/peer").Start(ctx, "peer.relay.reconnect")
+	defer span.End()
+	span.SetAttributes(attribute.String("relay.url", m.client.BaseURL()))
+
 	oldRelay := m.PersistentRelay
 	// Note: We intentionally do NOT close or clear the old relay here.
 	// The forwarder continues using it until the new relay is ready.
@@ -527,9 +535,12 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
+			span.SetStatus(otelcodes.Error, "context cancelled")
 			return
 		default:
 		}
+
+		span.SetAttributes(attribute.Int("relay.attempt", attempt))
 
 		// Get fresh JWT token for new connection
 		jwtToken := m.client.JWTToken()
@@ -538,6 +549,7 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 			if attempt < maxAttempts {
 				select {
 				case <-ctx.Done():
+					span.SetStatus(otelcodes.Error, "context cancelled")
 					return
 				case <-time.After(backoff):
 				}
@@ -545,6 +557,8 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 				if backoff > maxBackoff {
 					backoff = maxBackoff
 				}
+				// Add jitter to avoid thundering herd when multiple peers reconnect simultaneously
+				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
 			}
 			continue
 		}
@@ -556,12 +570,14 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 		m.setupRelayHandlers(newRelay)
 
 		if err := newRelay.Connect(ctx); err != nil {
+			span.RecordError(err)
 			log.Warn().Err(err).Int("attempt", attempt).Msg("relay reconnection failed")
 			_ = newRelay.Close()
 
 			if attempt < maxAttempts {
 				select {
 				case <-ctx.Done():
+					span.SetStatus(otelcodes.Error, "context cancelled")
 					return
 				case <-time.After(backoff):
 				}
@@ -569,6 +585,8 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 				if backoff > maxBackoff {
 					backoff = maxBackoff
 				}
+				// Add jitter to avoid thundering herd when multiple peers reconnect simultaneously
+				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
 			}
 			continue
 		}
@@ -585,6 +603,8 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 			_ = oldRelay.Close()
 		}
 
+		span.SetStatus(otelcodes.Ok, "")
+		span.SetAttributes(attribute.Int("relay.attempts_total", attempt))
 		log.Info().Int("attempt", attempt).Msg("persistent relay reconnected after network change")
 		return
 	}
@@ -597,6 +617,7 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 	if m.Forwarder != nil {
 		m.Forwarder.SetRelay(nil)
 	}
+	span.SetStatus(otelcodes.Error, "max attempts exceeded")
 	log.Error().Msg("gave up reconnecting persistent relay after max attempts")
 }
 
