@@ -746,45 +746,58 @@ func TestPersistentRelay_Connect_401_ReturnsErrUnauthorized(t *testing.T) {
 }
 
 // TestPersistentRelay_UpdateJWTToken verifies that UpdateJWTToken replaces the
-// stored token so subsequent Connect calls use the new value in the Authorization header.
+// stored token so the next Connect call sends the new value in the Authorization header.
+// The test creates a single relay, calls UpdateJWTToken before Connect, then verifies
+// the server sees the updated token — no ordering dependency, no background goroutines
+// racing against the assertion.
 func TestPersistentRelay_UpdateJWTToken(t *testing.T) {
-	var receivedTokens []string
+	var receivedToken string
 	var mu sync.Mutex
+	connected := make(chan struct{}, 1)
 
-	// Server records the token from each connection attempt and upgrades to WS
+	// Server records the token and signals when a connection arrives
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		token := strings.TrimPrefix(auth, "Bearer ")
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		mu.Lock()
-		receivedTokens = append(receivedTokens, token)
+		receivedToken = token
 		mu.Unlock()
 		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		// Close immediately after accepting
-		_ = conn.Close()
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		// Keep open until client closes
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
 	}))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Connect with old token
-	relay1 := NewPersistentRelay(srv.URL, "old-token")
-	_ = relay1.Connect(ctx)
-	time.Sleep(50 * time.Millisecond)
+	// Set placeholder at construction, then update before connecting
+	relay := NewPersistentRelay(srv.URL, "placeholder-token")
+	relay.UpdateJWTToken("new-token")
 
-	// Connect with new token via UpdateJWTToken
-	relay2 := NewPersistentRelay(srv.URL, "placeholder")
-	relay2.UpdateJWTToken("new-token")
-	_ = relay2.Connect(ctx)
-	time.Sleep(50 * time.Millisecond)
+	err := relay.Connect(ctx)
+	require.NoError(t, err)
+	defer func() { _ = relay.Close() }()
+
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for connection")
+	}
 
 	mu.Lock()
-	defer mu.Unlock()
+	got := receivedToken
+	mu.Unlock()
 
-	require.GreaterOrEqual(t, len(receivedTokens), 2, "expected at least 2 connection attempts")
-	assert.Equal(t, "old-token", receivedTokens[0], "first connect should use old token")
-	assert.Equal(t, "new-token", receivedTokens[len(receivedTokens)-1], "last connect should use new token")
+	assert.Equal(t, "new-token", got, "Connect should use the token set by UpdateJWTToken, not the constructor value")
 }
