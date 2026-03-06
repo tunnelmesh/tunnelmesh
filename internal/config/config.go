@@ -3,7 +3,10 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -390,6 +393,49 @@ func (c *PeerConfig) PrimaryServer() string {
 		return ""
 	}
 	return c.Servers[0]
+}
+
+// Validate checks if the coordinator configuration is valid.
+func (c *CoordinatorConfig) Validate() error {
+	if c.Listen == "" {
+		return fmt.Errorf("coordinator.listen is required")
+	}
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("coordinator.listen %q is not a valid host:port address: %w", c.Listen, err)
+	}
+	if c.S3.MaxSize > 0 && c.S3.MaxObjectSize > 0 && c.S3.MaxObjectSize > c.S3.MaxSize {
+		return fmt.Errorf("coordinator.s3.max_object_size (%s) must not exceed max_size (%s)",
+			c.S3.MaxObjectSize, c.S3.MaxSize)
+	}
+	for i, seed := range c.MemberlistSeeds {
+		// Seeds may be "host" or "host:port"; both are valid.
+		host := seed
+		if h, _, err := net.SplitHostPort(seed); err == nil {
+			host = h
+		} else if strings.ContainsRune(seed, ':') {
+			// Looks like it has a colon but didn't parse as host:port — invalid.
+			return fmt.Errorf("coordinator.memberlist_seeds[%d] %q is not a valid host or host:port: %w", i, seed, err)
+		}
+		if host == "" {
+			return fmt.Errorf("coordinator.memberlist_seeds[%d] %q has an empty host", i, seed)
+		}
+	}
+	for i, pattern := range c.AdminPeers {
+		// Validate that the pattern is a valid glob. path.Match returns ErrBadPattern for
+		// patterns with invalid syntax; use a dry-run match against an empty string.
+		if _, err := path.Match(pattern, ""); err != nil {
+			return fmt.Errorf("coordinator.admin_peers[%d] %q is not a valid glob pattern: %w", i, pattern, err)
+		}
+	}
+	if c.Monitoring.OTLPEndpoint != "" {
+		if _, err := url.ParseRequestURI(c.Monitoring.OTLPEndpoint); err != nil {
+			return fmt.Errorf("coordinator.monitoring.otlp_endpoint %q is not a valid URL: %w", c.Monitoring.OTLPEndpoint, err)
+		}
+	}
+	if err := c.Filter.Validate(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ValidateAliases checks if DNS aliases are valid DNS labels.

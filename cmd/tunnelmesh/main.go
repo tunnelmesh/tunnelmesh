@@ -498,6 +498,12 @@ func runJoinFromService(ctx context.Context, configPath string) error {
 	// Enable coordinator mode for bootstrap if no server URL
 	ensureCoordinatorConfig(cfg)
 
+	if cfg.Coordinator.Enabled {
+		if err := cfg.Coordinator.Validate(); err != nil {
+			return fmt.Errorf("coordinator config: %w", err)
+		}
+	}
+
 	if cfg.AuthToken == "" {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable")
 	}
@@ -602,7 +608,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 func generateAuthToken() string {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatal().Err(err).Msg("failed to generate cryptographic random token")
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -759,6 +767,12 @@ func runJoin(cmd *cobra.Command, args []string) error {
 	// Enable coordinator mode for bootstrap if no server URL
 	ensureCoordinatorConfig(cfg)
 
+	if cfg.Coordinator.Enabled {
+		if err := cfg.Coordinator.Validate(); err != nil {
+			return fmt.Errorf("coordinator config: %w", err)
+		}
+	}
+
 	if cfg.AuthToken == "" {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable\nExample: export TUNNELMESH_TOKEN=\"your-token\" && tunnelmesh join coord.example.com:8443")
 	}
@@ -866,6 +880,12 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 
 	// Enable coordinator mode for bootstrap if no server URL
 	ensureCoordinatorConfig(cfg)
+
+	if cfg.Coordinator.Enabled {
+		if err := cfg.Coordinator.Validate(); err != nil {
+			return fmt.Errorf("coordinator config: %w", err)
+		}
+	}
 
 	if cfg.AuthToken == "" {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable")

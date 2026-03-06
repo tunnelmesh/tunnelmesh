@@ -20,12 +20,6 @@ const (
 	// MessageTypeAck is sent in response to a successful replication
 	MessageTypeAck MessageType = "ack"
 
-	// MessageTypeSyncRequest is sent to request a full sync of all state
-	MessageTypeSyncRequest MessageType = "sync_request"
-
-	// MessageTypeSyncResponse contains the full state snapshot in response to a sync request
-	MessageTypeSyncResponse MessageType = "sync_response"
-
 	// Chunk-level replication message types (added in Phase 2)
 
 	// MessageTypeChunkOwnershipUpdate is broadcast when a coordinator adds/removes chunk ownership
@@ -85,28 +79,6 @@ type AckPayload struct {
 	Success       bool          `json:"success"`
 	ErrorMessage  string        `json:"error_message,omitempty"`
 	VersionVector VersionVector `json:"version_vector"` // Final version vector after merge
-}
-
-// SyncRequestPayload requests a full state sync.
-type SyncRequestPayload struct {
-	RequestedBuckets []string `json:"requested_buckets,omitempty"` // Empty means all buckets
-}
-
-// SyncResponsePayload contains the full state snapshot.
-type SyncResponsePayload struct {
-	StateSnapshot []byte            `json:"state_snapshot"` // Serialized replication state
-	Objects       []SyncObjectEntry `json:"objects"`        // All S3 objects
-}
-
-// SyncObjectEntry represents a single S3 object in a sync response.
-type SyncObjectEntry struct {
-	Bucket        string            `json:"bucket"`
-	Key           string            `json:"key"`
-	Data          []byte            `json:"data"`
-	VersionVector VersionVector     `json:"version_vector"`
-	ContentType   string            `json:"content_type,omitempty"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	Versions      []VersionEntry    `json:"versions,omitempty"` // Version history entries
 }
 
 // Chunk-level replication payloads (added in Phase 2)
@@ -235,38 +207,6 @@ func NewAckMessage(id, from string, payload AckPayload) (*Message, error) {
 	}, nil
 }
 
-// NewSyncRequestMessage creates a new sync request message.
-func NewSyncRequestMessage(id, from string, payload SyncRequestPayload) (*Message, error) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal sync request payload: %w", err)
-	}
-
-	return &Message{
-		Version: ProtocolVersion,
-		Type:    MessageTypeSyncRequest,
-		ID:      id,
-		From:    from,
-		Payload: data,
-	}, nil
-}
-
-// NewSyncResponseMessage creates a new sync response message.
-func NewSyncResponseMessage(id, from string, payload SyncResponsePayload) (*Message, error) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal sync response payload: %w", err)
-	}
-
-	return &Message{
-		Version: ProtocolVersion,
-		Type:    MessageTypeSyncResponse,
-		ID:      id,
-		From:    from,
-		Payload: data,
-	}, nil
-}
-
 // DecodeReplicatePayload decodes a replicate payload from a message.
 func (m *Message) DecodeReplicatePayload() (*ReplicatePayload, error) {
 	if m.Type != MessageTypeReplicate {
@@ -290,34 +230,6 @@ func (m *Message) DecodeAckPayload() (*AckPayload, error) {
 	var payload AckPayload
 	if err := json.Unmarshal(m.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal ack payload: %w", err)
-	}
-
-	return &payload, nil
-}
-
-// DecodeSyncRequestPayload decodes a sync request payload from a message.
-func (m *Message) DecodeSyncRequestPayload() (*SyncRequestPayload, error) {
-	if m.Type != MessageTypeSyncRequest {
-		return nil, fmt.Errorf("message type is %s, not sync_request", m.Type)
-	}
-
-	var payload SyncRequestPayload
-	if err := json.Unmarshal(m.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("unmarshal sync request payload: %w", err)
-	}
-
-	return &payload, nil
-}
-
-// DecodeSyncResponsePayload decodes a sync response payload from a message.
-func (m *Message) DecodeSyncResponsePayload() (*SyncResponsePayload, error) {
-	if m.Type != MessageTypeSyncResponse {
-		return nil, fmt.Errorf("message type is %s, not sync_response", m.Type)
-	}
-
-	var payload SyncResponsePayload
-	if err := json.Unmarshal(m.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("unmarshal sync response payload: %w", err)
 	}
 
 	return &payload, nil
