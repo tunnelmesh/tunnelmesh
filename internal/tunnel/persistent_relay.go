@@ -168,6 +168,8 @@ func (p *PersistentRelay) Connect(ctx context.Context) error {
 		p.mu.Unlock()
 		return nil // Already connected
 	}
+	// Capture jwtToken under lock to avoid a data race with UpdateJWTToken.
+	jwtToken := p.jwtToken
 	p.mu.Unlock()
 
 	wsURL, err := httpToWSURL(p.serverURL)
@@ -184,16 +186,19 @@ func (p *PersistentRelay) Connect(ctx context.Context) error {
 	}
 
 	headers := http.Header{}
-	headers.Set("Authorization", "Bearer "+p.jwtToken)
+	headers.Set("Authorization", "Bearer "+jwtToken)
 
 	conn, resp, err := dialer.DialContext(ctx, relayURL, headers)
 	if err != nil {
 		if resp != nil {
 			body := make([]byte, 256)
 			n, _ := resp.Body.Read(body)
-			// Return sentinel error for 404 so callers can trigger re-registration
+			// Return sentinel errors for specific status codes so callers can react appropriately
 			if resp.StatusCode == http.StatusNotFound {
 				return fmt.Errorf("%w: %s", coord.ErrPeerNotFound, string(body[:n]))
+			}
+			if resp.StatusCode == http.StatusUnauthorized {
+				return fmt.Errorf("%w: %s", coord.ErrUnauthorized, string(body[:n]))
 			}
 			return fmt.Errorf("persistent relay connection failed: %s - %s", resp.Status, string(body[:n]))
 		}
@@ -841,6 +846,15 @@ func (p *PersistentRelay) SetReconnectErrorHandler(handler func(err error)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onReconnectError = handler
+}
+
+// UpdateJWTToken replaces the JWT token used for relay authentication.
+// Call this after re-registering with the coordinator so the next reconnect
+// attempt uses the fresh token rather than the expired one.
+func (p *PersistentRelay) UpdateJWTToken(token string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.jwtToken = token
 }
 
 // SetFilterRulesSyncHandler sets a callback for coordinator filter rules sync.

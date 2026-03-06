@@ -394,17 +394,16 @@ groups:
           summary: "No TunnelMesh peers responding"
           description: "Cannot reach any TunnelMesh peer metrics - possible complete network outage"
 
-      # Data: S3 service down
-      # Note: Also triggers when idle; consider changing to `absent()` only if false positives occur
+      # Data: S3 metrics absent (coordinator down or metrics export broken)
       - alert: S3Down
-        expr: absent(tunnelmesh_s3_requests_total) or sum(rate(tunnelmesh_s3_requests_total[1m])) == 0
+        expr: absent(tunnelmesh_s3_requests_total)
         for: 2m
         labels:
           severity: page
           category: data
         annotations:
-          summary: "S3 service down or not receiving requests"
-          description: "No S3 metrics reported for 2 minutes"
+          summary: "S3 metrics not being exported"
+          description: "S3 request metrics absent from Prometheus for 2+ minutes — coordinator may be down or metrics export broken"
 
       # Data: S3 quota near full - immediate action required
       # Threshold: 92% leaves only 8% buffer; under high load this could fill in minutes

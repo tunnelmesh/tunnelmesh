@@ -437,10 +437,17 @@ func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
 		m.TriggerDiscovery()
 	})
 
-	// Set up handler for reconnection errors to detect when we need to re-register
+	// Set up handler for reconnection errors to detect when we need to re-register.
+	// Handles both 404 (peer deregistered) and 401 (JWT expired) by re-registering
+	// and pushing the fresh token into the relay so the next attempt succeeds.
 	relay.SetReconnectErrorHandler(func(err error) {
-		if errors.Is(err, coord.ErrPeerNotFound) {
-			log.Info().Msg("peer not registered on server, re-registering...")
+		needsReregister := errors.Is(err, coord.ErrPeerNotFound) || errors.Is(err, coord.ErrUnauthorized)
+		if needsReregister {
+			if errors.Is(err, coord.ErrUnauthorized) {
+				log.Info().Msg("relay JWT expired, re-registering to refresh token...")
+			} else {
+				log.Info().Msg("peer not registered on server, re-registering...")
+			}
 			publicIPs, privateIPs, behindNAT := m.identity.GetLocalIPs()
 			hasMonitoring := m.identity.Config.Coordinator.Enabled &&
 				(m.identity.Config.Coordinator.Monitoring.PrometheusURL != "" || m.identity.Config.Coordinator.Monitoring.GrafanaURL != "")
@@ -450,10 +457,12 @@ func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
 				m.identity.Config.ExitPeer, m.identity.Config.AllowExitTraffic, m.identity.Config.DNS.Aliases,
 				m.identity.Config.Coordinator.Enabled, hasMonitoring,
 			); regErr != nil {
-				log.Error().Err(regErr).Msg("failed to re-register after peer not found")
+				log.Error().Err(regErr).Msg("failed to re-register after relay auth failure")
 			} else {
 				log.Info().Msg("re-registered with coordination server")
 				m.SetHeartbeatIPs(publicIPs, privateIPs, behindNAT)
+				// Push fresh JWT into relay so the next autoReconnect attempt uses it
+				relay.UpdateJWTToken(m.client.JWTToken())
 			}
 		}
 	})

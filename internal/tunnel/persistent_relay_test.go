@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tunnelmesh/tunnelmesh/internal/coord"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 )
 
@@ -723,4 +724,67 @@ func TestPersistentRelay_HeartbeatIncludesSentAt(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for heartbeat")
 	}
+}
+
+// TestPersistentRelay_Connect_401_ReturnsErrUnauthorized verifies that a 401
+// response from the server is wrapped as coord.ErrUnauthorized.
+func TestPersistentRelay_Connect_401_ReturnsErrUnauthorized(t *testing.T) {
+	// Serve a plain HTTP server that always returns 401 (no WS upgrade)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "token expired", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	relay := NewPersistentRelay(srv.URL, "expired-token")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := relay.Connect(ctx)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, coord.ErrUnauthorized), "expected ErrUnauthorized, got: %v", err)
+}
+
+// TestPersistentRelay_UpdateJWTToken verifies that UpdateJWTToken replaces the
+// stored token so subsequent Connect calls use the new value in the Authorization header.
+func TestPersistentRelay_UpdateJWTToken(t *testing.T) {
+	var receivedTokens []string
+	var mu sync.Mutex
+
+	// Server records the token from each connection attempt and upgrades to WS
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(auth, "Bearer ")
+		mu.Lock()
+		receivedTokens = append(receivedTokens, token)
+		mu.Unlock()
+		conn, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Close immediately after accepting
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Connect with old token
+	relay1 := NewPersistentRelay(srv.URL, "old-token")
+	_ = relay1.Connect(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	// Connect with new token via UpdateJWTToken
+	relay2 := NewPersistentRelay(srv.URL, "placeholder")
+	relay2.UpdateJWTToken("new-token")
+	_ = relay2.Connect(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.GreaterOrEqual(t, len(receivedTokens), 2, "expected at least 2 connection attempts")
+	assert.Equal(t, "old-token", receivedTokens[0], "first connect should use old token")
+	assert.Equal(t, "new-token", receivedTokens[len(receivedTokens)-1], "last connect should use new token")
 }
