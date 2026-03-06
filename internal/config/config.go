@@ -428,8 +428,12 @@ func (c *CoordinatorConfig) Validate() error {
 		}
 	}
 	if c.Monitoring.OTLPEndpoint != "" {
-		if _, err := url.ParseRequestURI(c.Monitoring.OTLPEndpoint); err != nil {
+		u, err := url.ParseRequestURI(c.Monitoring.OTLPEndpoint)
+		if err != nil {
 			return fmt.Errorf("coordinator.monitoring.otlp_endpoint %q is not a valid URL: %w", c.Monitoring.OTLPEndpoint, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("coordinator.monitoring.otlp_endpoint scheme must be http or https, got %q", u.Scheme)
 		}
 	}
 	if err := c.Filter.Validate(); err != nil {

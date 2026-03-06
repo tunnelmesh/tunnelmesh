@@ -166,28 +166,28 @@ func (f *Forwarder) SetLocalIP(ip net.IP) {
 }
 
 // SetRelay sets the persistent relay for fallback routing.
+// Typed-nil values (e.g. (*T)(nil) satisfying the interface) are normalised to
+// a plain nil holder here at write time so that loadRelay() needs no reflection.
 func (f *Forwarder) SetRelay(relay RelayPacketSender) {
 	oldRelay := f.loadRelay()
-	f.relay.Store(relayHolder{r: relay})
 	isNil := relay == nil || reflect.ValueOf(relay).IsNil()
-	if !isNil {
+	if isNil {
+		f.relay.Store(relayHolder{r: nil})
+		log.Debug().Bool("old_was_nil", oldRelay == nil).Msg("forwarder relay reference cleared")
+	} else {
+		f.relay.Store(relayHolder{r: relay})
 		log.Debug().
 			Bool("old_was_nil", oldRelay == nil).
 			Bool("new_connected", relay.IsConnected()).
 			Msg("forwarder relay reference updated")
-	} else {
-		log.Debug().Bool("old_was_nil", oldRelay == nil).Msg("forwarder relay reference cleared")
 	}
 }
 
-// loadRelay returns the current relay, or nil if none is set or the relay is a typed nil.
+// loadRelay returns the current relay, or nil if none is set.
+// Typed-nil inputs are normalised in SetRelay, so a plain nil check suffices here.
 func (f *Forwarder) loadRelay() RelayPacketSender {
 	h, ok := f.relay.Load().(relayHolder)
 	if !ok || h.r == nil {
-		return nil
-	}
-	// Guard against typed-nil (e.g. (*concreteType)(nil) stored as interface).
-	if reflect.ValueOf(h.r).IsNil() {
 		return nil
 	}
 	return h.r

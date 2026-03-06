@@ -541,7 +541,7 @@ func (t *Transport) packetWorker() {
 					log.Error().
 						Interface("panic", r).
 						Str("from", work.remoteAddr.String()).
-						Bytes("stack", debug.Stack()).
+						Str("stack", string(debug.Stack())).
 						Msg("packet worker panicked - skipping packet")
 				}
 			}()

@@ -1186,6 +1186,14 @@ func TestCoordinatorConfig_Validate(t *testing.T) {
 			wantErr: "otlp_endpoint",
 		},
 		{
+			name: "otlp_endpoint invalid scheme",
+			cfg: CoordinatorConfig{
+				Listen:     ":8443",
+				Monitoring: MonitoringConfig{OTLPEndpoint: "ftp://collector:4318"},
+			},
+			wantErr: "scheme must be http or https",
+		},
+		{
 			name: "memberlist empty host",
 			cfg: CoordinatorConfig{
 				Listen:          ":8443",

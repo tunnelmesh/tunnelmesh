@@ -44,6 +44,9 @@ func newNoLeadingZeroIDGenerator() *noLeadingZeroIDGenerator {
 var cryptoRandRead = cryptorand.Read
 
 // mathRandID fills b with math/rand bytes as a fallback when crypto/rand fails.
+// It writes 8 bytes per iteration; trailing bytes (len(b) % 8 != 0) are left zero.
+// All callers use 16-byte TraceIDs or 8-byte SpanIDs — both divisible by 8 — so
+// no bytes are silently skipped in practice.
 func mathRandID(b []byte) {
 	for i := 0; i+8 <= len(b); i += 8 {
 		binary.LittleEndian.PutUint64(b[i:], mrand.Uint64()) //nolint:gosec // intentional fallback for non-crypto use
