@@ -532,6 +532,17 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 	maxBackoff := 10 * time.Second    // Cap backoff lower for faster recovery
 	maxAttempts := 15                 // More attempts with faster backoff
 
+	// advanceBackoff doubles the backoff, adds jitter, then caps at maxBackoff.
+	// Defined once here to avoid duplicating the formula across multiple retry sites.
+	advanceBackoff := func(d time.Duration) time.Duration {
+		d *= 2
+		d += time.Duration(rand.Int63n(int64(d / 4))) // jitter before cap
+		if d > maxBackoff {
+			d = maxBackoff
+		}
+		return d
+	}
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
@@ -553,12 +564,7 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 					return
 				case <-time.After(backoff):
 				}
-				backoff *= 2
-				// Add jitter before applying the cap so the total stays within maxBackoff bounds
-				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+				backoff = advanceBackoff(backoff)
 			}
 			continue
 		}
@@ -581,12 +587,7 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 					return
 				case <-time.After(backoff):
 				}
-				backoff *= 2
-				// Add jitter before applying the cap so the total stays within maxBackoff bounds
-				backoff += time.Duration(rand.Int63n(int64(backoff / 4)))
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
+				backoff = advanceBackoff(backoff)
 			}
 			continue
 		}

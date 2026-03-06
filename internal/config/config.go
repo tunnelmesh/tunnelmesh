@@ -344,9 +344,9 @@ func (c *PeerConfig) Validate() error {
 	if c.TUN.MTU < 576 || c.TUN.MTU > 65535 {
 		return fmt.Errorf("tun.mtu must be between 576 and 65535")
 	}
-	// 0 means "use default" (LoadPeerConfig sets 9443); reject explicitly invalid values
-	if c.MetricsPort != 0 && (c.MetricsPort < 1 || c.MetricsPort > 65535) {
-		return fmt.Errorf("metrics_port must be between 1 and 65535, got %d", c.MetricsPort)
+	// 0 means "use default" (LoadPeerConfig sets 9443); reject negative and out-of-range values
+	if c.MetricsPort < 0 || c.MetricsPort > 65535 {
+		return fmt.Errorf("metrics_port must be between 0 and 65535, got %d", c.MetricsPort)
 	}
 	if c.HeartbeatInterval != "" {
 		d, err := time.ParseDuration(c.HeartbeatInterval)
