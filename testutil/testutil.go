@@ -104,6 +104,22 @@ func FreePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// FreeUDPPort returns an available UDP port on 127.0.0.1.
+// Use this instead of FreePort when the caller will bind a UDP socket — on
+// Windows the TCP and UDP port spaces can diverge, so a port that is free for
+// TCP may already be occupied for UDP.
+func FreeUDPPort(t *testing.T) int {
+	t.Helper()
+
+	l, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("failed to find free UDP port: %v", err)
+	}
+	port := l.LocalAddr().(*net.UDPAddr).Port
+	_ = l.Close()
+	return port
+}
+
 // MockConn is a mock net.Conn for testing.
 type MockConn struct {
 	ReadData  []byte

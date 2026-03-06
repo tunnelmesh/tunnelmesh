@@ -88,7 +88,7 @@ func TestResolver_ResolveNonexistent(t *testing.T) {
 }
 
 func TestResolver_DNSServer(t *testing.T) {
-	port := testutil.FreePort(t)
+	port := testutil.FreeUDPPort(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 
 	r := NewResolver(".tunnelmesh", 60)
@@ -120,7 +120,7 @@ func TestResolver_DNSServer(t *testing.T) {
 }
 
 func TestResolver_DNSServer_NXDOMAIN(t *testing.T) {
-	port := testutil.FreePort(t)
+	port := testutil.FreeUDPPort(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 
 	r := NewResolver(".tunnelmesh", 60)
@@ -200,7 +200,7 @@ func TestResolver_ResolveAll_RegularHostname(t *testing.T) {
 }
 
 func TestResolver_DNSServer_MultipleARecords(t *testing.T) {
-	port := testutil.FreePort(t)
+	port := testutil.FreeUDPPort(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 
 	r := NewResolver(".tunnelmesh", 60)
@@ -230,7 +230,7 @@ func TestResolver_DNSServer_MultipleARecords(t *testing.T) {
 }
 
 func TestResolver_DNSServer_AllCoordinatorsDeregistered(t *testing.T) {
-	port := testutil.FreePort(t)
+	port := testutil.FreeUDPPort(t)
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 
 	r := NewResolver(".tunnelmesh", 60)
