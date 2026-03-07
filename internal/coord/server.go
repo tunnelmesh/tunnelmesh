@@ -1670,6 +1670,7 @@ func (s *Server) StartS3Server(addr string, tlsCert *tls.Certificate) error {
 		server.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{*tlsCert},
 			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"http/1.1"}, // disable HTTP/2: RST needed for chunk-stream errors
 		}
 		log.Info().Str("addr", addr).Msg("starting S3 server (HTTPS)")
 		s.wg.Add(1)
@@ -2817,6 +2818,7 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 			// Request client certs for user identification, but don't require them
 			// This allows getRequestOwner() to identify users for operations like share creation
 			ClientAuth: tls.RequestClientCert,
+			NextProtos: []string{"http/1.1"}, // disable HTTP/2: RST needed for chunk-stream errors
 		}
 		log.Info().Str("addr", addr).Msg("starting admin server (HTTPS)")
 		s.wg.Add(1)
