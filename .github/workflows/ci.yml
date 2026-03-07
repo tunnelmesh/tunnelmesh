@@ -98,12 +98,17 @@ jobs:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          COUNT=$(go test -short -list '.*' $(go list ./... | grep -v s3bench) 2>/dev/null | grep -c '^Test' || echo 0)
+          PKGS=$(go list ./... | grep -v s3bench)
+          COUNT=$(go test -short -list '.*' $PKGS 2>/dev/null | grep -c '^Test' || echo 0)
           echo "Test count: $COUNT"
+          INNER="{\\\"schemaVersion\\\":1,\\\"label\\\":\\\"tests\\\","
+          INNER="${INNER}\\\"message\\\":\\\"${COUNT}\\\","
+          INNER="${INNER}\\\"color\\\":\\\"brightgreen\\\"}"
+          DATA="{\"files\":{\"tunnelmesh-tests.json\":{\"content\":\"${INNER}\"}}}"
           curl -s -X PATCH \
             -H "Authorization: token $GIST_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"files\":{\"tunnelmesh-tests.json\":{\"content\":\"{\\\"schemaVersion\\\":1,\\\"label\\\":\\\"tests\\\",\\\"message\\\":\\\"$COUNT\\\",\\\"color\\\":\\\"brightgreen\\\"}\"}}}" \
+            -d "$DATA" \
             "https://api.github.com/gists/$GIST_ID"
 
   lint-frontend:
