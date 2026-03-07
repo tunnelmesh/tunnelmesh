@@ -1120,8 +1120,9 @@ func isInLocalSubnet(ip net.IP) bool {
 	if err != nil {
 		return false
 	}
+	const wantFlags = net.FlagUp | net.FlagRunning
 	for _, iface := range ifaces {
-		if iface.Flags&(net.FlagUp|net.FlagRunning) != (net.FlagUp | net.FlagRunning) {
+		if iface.Flags&wantFlags != wantFlags {
 			continue
 		}
 		addrs, _ := iface.Addrs()
