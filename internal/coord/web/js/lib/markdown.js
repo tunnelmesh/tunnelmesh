@@ -59,7 +59,8 @@
             .replace(/&lt;/g, '<')
             .replace(/&gt;/g, '>')
             .replace(/&quot;/g, '"')
-            .replace(/&#039;/g, "'");
+            .replace(/&#039;/g, "'")
+            .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
     }
 
     /**

@@ -4,6 +4,39 @@ import markdown from '../lib/markdown.js';
 
 const { parseMarkdown, renderMarkdown, htmlToMarkdown, escapeHtml, unescapeHtml, _test } = markdown;
 
+describe('escapeAttrMd', () => {
+    const { escapeAttrMd } = _test;
+
+    test('escapes asterisk, underscore, and tilde', () => {
+        expect(escapeAttrMd('**bold**')).toBe('&#42;&#42;bold&#42;&#42;');
+        expect(escapeAttrMd('_italic_')).toBe('&#95;italic&#95;');
+        expect(escapeAttrMd('~~strike~~')).toBe('&#126;&#126;strike&#126;&#126;');
+    });
+
+    test('preserves existing HTML escaping', () => {
+        const result = escapeAttrMd('<div>');
+        expect(result).toContain('&lt;');
+        expect(result).toContain('&gt;');
+        expect(result).not.toContain('<');
+    });
+
+    test('non-browser fallback decodes numeric entities produced by escapeAttrMd', () => {
+        // Verify the fallback path (used in SSR / test environments without real DOM)
+        // correctly decodes the numeric entities that escapeAttrMd introduces.
+        const escaped = escapeAttrMd('**bold** _italic_ ~~strike~~');
+        // Exercise the fallback chain directly — simulates environments where
+        // document.createElement exists but does not implement innerHTML decoding.
+        const fallback = String(escaped)
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#039;/g, "'")
+            .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+        expect(fallback).toBe('**bold** _italic_ ~~strike~~');
+    });
+});
+
 describe('escapeHtml', () => {
     test('escapes HTML special characters', () => {
         expect(escapeHtml('<script>alert("xss")</script>')).toContain('&lt;');

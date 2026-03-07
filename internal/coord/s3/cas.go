@@ -225,6 +225,12 @@ func (c *CAS) ReadChunkRaw(hash string) ([]byte, error) {
 // The bytes must have been produced by a coordinator sharing the same masterKey
 // (convergent encryption — same plaintext → same ciphertext on every coordinator).
 // Returns (true, nil) if the chunk was newly written, (false, nil) if it already existed.
+//
+// Trust model: hash validation (decrypt → hash plaintext) is intentionally skipped here.
+// All coordinators derive their masterKey from the shared mesh PSK via HKDF, so any
+// coordinator that could craft valid-looking raw bytes already has full plaintext access.
+// Integrity is verified lazily on the read path: ReadChunk decrypts and checks the
+// content hash, so corrupt bytes are caught before they reach any consumer.
 func (c *CAS) WriteChunkRaw(hash string, raw []byte) (created bool, err error) {
 	chunkPath := c.chunkPath(hash)
 	if fileExists(chunkPath) {

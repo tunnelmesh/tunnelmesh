@@ -227,7 +227,9 @@ func EncodeStream(r io.Reader, size int64, k, m int, dataWriters, parityWriters 
 	remaining := size
 	for i, f := range tmpFiles {
 		toWrite := shardSize
-		if remaining < shardSize {
+		if remaining <= 0 {
+			toWrite = 0
+		} else if remaining < shardSize {
 			toWrite = remaining
 		}
 
