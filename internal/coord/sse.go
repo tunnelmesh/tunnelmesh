@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -37,7 +38,8 @@ func (h *sseHub) register(client *sseClient) {
 	log.Debug().Int("clients", len(h.clients)).Msg("SSE client connected")
 }
 
-// unregister removes a client from the hub.
+// unregister removes a client from the hub. Safe to call multiple times (idempotent):
+// the existence check prevents double-close of client.events.
 func (h *sseHub) unregister(client *sseClient) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -49,17 +51,24 @@ func (h *sseHub) unregister(client *sseClient) {
 }
 
 // broadcast sends an event to all connected clients.
+// If a client's buffer is full (slow consumer), it is disconnected.
 func (h *sseHub) broadcast(event string) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
+	var slowClients []*sseClient
 	for client := range h.clients {
 		select {
 		case client.events <- event:
 		default:
-			// Client buffer full, skip
-			log.Debug().Msg("SSE client buffer full, skipping event")
+			// Client buffer full — mark for disconnection.
+			slowClients = append(slowClients, client)
 		}
+	}
+	h.mu.RUnlock()
+
+	// Disconnect slow clients outside the read lock to avoid lock inversion.
+	for _, client := range slowClients {
+		log.Warn().Msg("SSE client too slow, disconnecting")
+		h.unregister(client)
 	}
 }
 
@@ -92,6 +101,12 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
+
+	// Disable the server-level WriteTimeout for this connection — SSE streams are
+	// long-lived by design and would be killed by the global 120s write deadline.
+	// Client disconnect is detected via r.Context().Done() instead.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")

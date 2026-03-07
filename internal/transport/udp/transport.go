@@ -97,6 +97,7 @@ type Transport struct {
 	// Worker pool for packet processing (avoids per-packet goroutine spawning)
 	packetQueue chan packetWork
 	workerWg    sync.WaitGroup
+	receiveWg   sync.WaitGroup // tracks receiveLoop goroutines; must drain before packetQueue close
 
 	// State
 	running atomic.Bool
@@ -452,9 +453,11 @@ func (t *Transport) Start() error {
 
 	// Start packet receivers for each socket
 	if t.conn != nil {
+		t.receiveWg.Add(1)
 		go t.receiveLoop(t.conn)
 	}
 	if t.conn6 != nil {
+		t.receiveWg.Add(1)
 		go t.receiveLoop(t.conn6)
 	}
 
@@ -518,6 +521,7 @@ func (t *Transport) startPortMapper() error {
 
 // receiveLoop processes incoming UDP packets from the given connection.
 func (t *Transport) receiveLoop(conn *net.UDPConn) {
+	defer t.receiveWg.Done()
 	buf := make([]byte, 2000) // Larger than MTU
 	consecutiveErrors := 0
 
@@ -1688,14 +1692,17 @@ func (t *Transport) Close() error {
 		_ = t.portMapper.Stop()
 	}
 
-	// Close UDP sockets first so receiveLoop returns an error and exits,
-	// preventing any new sends to packetQueue after it is closed (P0 fix).
+	// Close UDP sockets so receiveLoop unblocks from ReadFrom and exits.
 	if t.conn != nil {
 		_ = t.conn.Close()
 	}
 	if t.conn6 != nil {
 		_ = t.conn6.Close()
 	}
+
+	// Wait for all receiveLoop goroutines to exit BEFORE closing packetQueue.
+	// This prevents the race between a receiveLoop send and Close's channel close.
+	t.receiveWg.Wait()
 
 	// Close packet queue to signal workers to exit, then wait for them.
 	if t.packetQueue != nil {
