@@ -35,10 +35,8 @@ import (
 // For large file uploads or high-latency networks: Consider 1 hour or more
 const GCGracePeriod = 10 * time.Minute
 
-// MaxErasureCodingFileSize is the maximum file size for erasure coding (Phase 1).
-// Files larger than this will use standard replication.
-// Streaming encoder (Phase 6) will remove this limit.
-const MaxErasureCodingFileSize = 100 * 1024 * 1024 // 100 MB
+// erasureCodingMaxK is the maximum number of data shards allowed.
+const erasureCodingMaxK = 32
 
 // contextCheckInterval is how often to check for context cancellation during
 // chunk fetching loops (~400KB at average chunk size of 4KB).
@@ -1326,24 +1324,24 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 }
 
 // putObjectWithErasureCoding stores an object using Reed-Solomon erasure coding.
-// The entire file is buffered in memory, encoded into data+parity shards, then stored.
 // Data shards are CDC chunked (preserves deduplication), parity shards are stored directly.
 //
-// NOTE: This is Phase 1 implementation with full buffering. Streaming encoder will be added in Phase 6.
+// Uses EncodeStream to avoid loading the entire file into memory.
+// Peak memory: O(m × shardSize) for parity buffers + O(chunkSize) for CDC.
 //
-//nolint:gocyclo // Complexity will be reduced when streaming encoder is added (Phase 6)
+//nolint:gocyclo
 func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key string, reader io.Reader, size int64, contentType string, metadata map[string]string, bucketMeta *BucketMeta) (*ObjectMeta, error) {
-	// Lock strategy: global lock is NOT held during the expensive read/encode/CAS-write
+	// Lock strategy: global lock is NOT held during the expensive encode/CAS-write
 	// phases. It is acquired only for the brief metadata operations at the end.
 
 	k := bucketMeta.ErasureCoding.DataShards
 	m := bucketMeta.ErasureCoding.ParityShards
 
-	if k < 1 || k > 32 || m < 1 || m > 32 || k+m > 64 {
-		return nil, fmt.Errorf("invalid erasure coding config: k=%d, m=%d (max 32 each, 64 total)", k, m)
+	if k < 1 || k > erasureCodingMaxK || m < 1 || m > erasureCodingMaxK || k+m > 64 {
+		return nil, fmt.Errorf("invalid erasure coding config: k=%d, m=%d (max %d each, 64 total)", k, m, erasureCodingMaxK)
 	}
 
-	// Acquire semaphore to limit concurrent erasure coding operations (memory safety)
+	// Acquire semaphore to limit concurrent erasure coding operations.
 	select {
 	case s.erasureCodingSemaphore <- struct{}{}:
 		defer func() { <-s.erasureCodingSemaphore }()
@@ -1353,34 +1351,49 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 
 	metaPath := s.objectMetaPath(bucket, key)
 
-	// Phase 1: Read + encode + write chunks to CAS without holding the global lock.
+	// Phase 1: Encode + write chunks to CAS without holding the global lock.
 	// CAS writes are content-addressed and use atomic rename, safe for concurrent access.
+	//
+	// EncodeStream splits the input into k temp files, RS-encodes parity, then
+	// streams each data shard through a pipe to the CDC chunker below.
+	// Peak memory: m × shardSize parity buffers + one CDC chunk at a time.
 
-	data, err := io.ReadAll(io.LimitReader(reader, size))
-	if err != nil {
-		return nil, fmt.Errorf("read file data: %w", err)
+	shardSize := (size + int64(k) - 1) / int64(k) // ceil(size / k)
+
+	// Create k pipe pairs: EncodeStream writes data shards; we read and CDC-chunk them.
+	dataPipeReaders := make([]*io.PipeReader, k)
+	dataPipeWriters := make([]*io.PipeWriter, k)
+	dataWriters := make([]io.Writer, k)
+	for i := range dataPipeReaders {
+		dataPipeReaders[i], dataPipeWriters[i] = io.Pipe()
+		dataWriters[i] = dataPipeWriters[i]
 	}
-	if int64(len(data)) != size {
-		return nil, fmt.Errorf("file size mismatch: expected %d bytes, got %d", size, len(data))
+
+	// Parity shards are buffered in memory (m × shardSize).
+	parityBufs := make([]*bytes.Buffer, m)
+	parityWriters := make([]io.Writer, m)
+	for i := range parityBufs {
+		parityBufs[i] = &bytes.Buffer{}
+		parityWriters[i] = parityBufs[i]
 	}
+
+	// Run EncodeStream in a goroutine so we can process data shard pipes below.
+	// EncodeStream closes each dataPipeWriter after writing its shard (io.Closer check
+	// inside EncodeStream), so the CDC reader on the corresponding pipe reader sees EOF.
+	encErrCh := make(chan error, 1)
+	go func() {
+		err := EncodeStream(reader, size, k, m, dataWriters, parityWriters)
+		// If EncodeStream returned an error, close any remaining pipe writers with the
+		// error so that CDC readers unblock immediately.
+		if err != nil {
+			for _, pw := range dataPipeWriters {
+				_ = pw.CloseWithError(err)
+			}
+		}
+		encErrCh <- err
+	}()
 
 	versionID := generateVersionID()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("context canceled before encoding: %w", ctx.Err())
-	default:
-	}
-
-	dataShards, parityShards, err := EncodeFile(data, k, m)
-	if err != nil {
-		return nil, fmt.Errorf("encode file with erasure coding (k=%d,m=%d,size=%d): %w", k, m, size, err)
-	}
-
-	shardSize := int64(0)
-	if len(dataShards) > 0 && len(dataShards[0]) > 0 {
-		shardSize = int64(len(dataShards[0]))
-	}
 
 	now := time.Now().UTC()
 	coordID := s.coordinatorID
@@ -1415,12 +1428,23 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		}
 	}()
 
-	// Process data shards: chunk them using CDC to preserve deduplication
-	md5Hasher := md5.New()
-	for i, shard := range dataShards {
-		md5Hasher.Write(shard)
+	// Process data shards: read from pipe readers and CDC-chunk into CAS.
+	// EncodeStream writes shards sequentially (shard 0 then 1 etc.) so we read
+	// each pipe in order — the pipe blocks until EncodeStream writes to it.
+	// cancelPipes closes all remaining pipe readers so EncodeStream's goroutine
+	// sees an error and exits, preventing goroutine leaks on early returns.
+	cancelPipes := func(fromIndex int) {
+		for j := fromIndex; j < len(dataPipeReaders); j++ {
+			_ = dataPipeReaders[j].CloseWithError(fmt.Errorf("encode cancelled"))
+		}
+	}
 
-		shardChunker := NewStreamingChunker(bytes.NewReader(shard))
+	md5Hasher := md5.New()
+	for i, pr := range dataPipeReaders {
+		// Hash the shard data as we process it (tee into md5Hasher for ETag).
+		shardTee := io.TeeReader(pr, md5Hasher)
+
+		shardChunker := NewStreamingChunker(shardTee)
 		chunkSeq := 0
 		for {
 			chunk, chunkHash, err := shardChunker.NextChunk()
@@ -1428,11 +1452,13 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 				break
 			}
 			if err != nil {
+				cancelPipes(i)
 				return nil, fmt.Errorf("chunk data shard %d/%d (versionID=%s): %w", i, k, versionID, err)
 			}
 
 			_, onDiskBytes, err := s.cas.WriteChunk(ctx, chunk)
 			if err != nil {
+				cancelPipes(i)
 				return nil, fmt.Errorf("write data shard %d/%d chunk %s (versionID=%s): %w", i, k, chunkHash[:8], versionID, err)
 			}
 
@@ -1484,8 +1510,15 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		}
 	}
 
-	// Process parity shards
-	for i, shard := range parityShards {
+	// Wait for EncodeStream goroutine to finish (it may still be running if an
+	// error occurred, or it may have already finished if data shards drained).
+	if encErr := <-encErrCh; encErr != nil {
+		return nil, fmt.Errorf("encode stream (k=%d,m=%d,size=%d): %w", k, m, size, encErr)
+	}
+
+	// Process parity shards (from bytes.Buffers filled by EncodeStream).
+	for i, buf := range parityBufs {
+		shard := buf.Bytes()
 		parityHash, parityOnDiskBytes, err := s.cas.WriteChunk(ctx, shard)
 		if err != nil {
 			return nil, fmt.Errorf("write parity shard %d/%d (versionID=%s): %w", i, m, versionID, err)
@@ -1724,8 +1757,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	replicationFactor := bucketMeta.ReplicationFactor
 	useErasureCoding := bucketMeta.ErasureCoding != nil &&
 		bucketMeta.ErasureCoding.Enabled &&
-		size > 0 &&
-		size <= MaxErasureCodingFileSize
+		size > 0
 	s.mu.RUnlock()
 
 	if useErasureCoding {
@@ -2674,6 +2706,36 @@ func (s *Store) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	}
 
 	return s.cas.ReadChunk(ctx, hash)
+}
+
+// ReadChunkRaw returns the raw (encrypted+compressed) on-disk bytes for a chunk.
+// Used by the replication sender to avoid the decrypt+re-encrypt cycle.
+func (s *Store) ReadChunkRaw(hash string) ([]byte, error) {
+	if s.cas == nil {
+		return nil, fmt.Errorf("CAS not initialized")
+	}
+	return s.cas.ReadChunkRaw(hash)
+}
+
+// WriteChunkDirectRaw writes raw (encrypted+compressed) chunk bytes directly to CAS
+// without re-processing. Only updates stats and registry for newly written chunks.
+// Used by the replication receiver when the sender set RawTransfer=true.
+func (s *Store) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	if s.cas == nil {
+		return fmt.Errorf("CAS not initialized")
+	}
+	created, err := s.cas.WriteChunkRaw(hash, raw)
+	if err != nil {
+		return fmt.Errorf("write raw chunk: %w", err)
+	}
+	if created {
+		s.statsChunkCount.Add(1)
+		s.statsChunkBytes.Add(int64(len(raw)))
+		if s.chunkRegistry != nil {
+			_ = s.chunkRegistry.RegisterChunk(hash, int64(len(raw)))
+		}
+	}
+	return nil
 }
 
 // WriteChunkDirect writes chunk data directly to CAS.

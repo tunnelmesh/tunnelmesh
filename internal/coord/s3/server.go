@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -99,7 +100,12 @@ func (s *Server) withMetrics(w http.ResponseWriter, r *http.Request, operation s
 
 // traceIDFromContext extracts the OTel trace ID from the context for exemplar linking.
 // Returns empty string if tracing is not active or the trace is not sampled.
+// Gated behind tracing.IsEnabled() to avoid the OTel context traversal on every
+// request when no exporter is configured.
 func traceIDFromContext(ctx context.Context) string {
+	if !tracing.IsEnabled() {
+		return ""
+	}
 	return TraceIDFromContext(ctx)
 }
 

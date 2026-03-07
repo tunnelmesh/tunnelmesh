@@ -2,8 +2,10 @@ package s3
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -165,16 +167,131 @@ func DecodeFile(shards [][]byte, k, m int, originalSize int64) ([]byte, error) {
 	return data, nil
 }
 
-// EncodeStream encodes data from a reader into shards, writing them to provided writers.
-// This is a streaming version for large files to avoid loading everything into memory.
-// NOT IMPLEMENTED YET - placeholder for Phase 6 (future work).
-func EncodeStream(r io.Reader, k, m int, dataWriters, parityWriters []io.Writer) error {
-	return fmt.Errorf("streaming encoder not yet implemented")
+// EncodeStream encodes data from a reader into k data shards + m parity shards,
+// writing each to the corresponding writer. Peak memory is O(shardSize) rather
+// than O(fileSize × 2.5) as with EncodeFile.
+//
+// Algorithm:
+//  1. Split input into k temp files (shardSize = ceil(size/k); last shard zero-padded)
+//  2. RS-stream-encode the k temp files → parityWriters
+//  3. Copy each temp file sequentially to the corresponding dataWriter
+//
+// size must equal the total bytes that will be read from r.
+// len(dataWriters) must equal k; len(parityWriters) must equal m.
+func EncodeStream(r io.Reader, size int64, k, m int, dataWriters, parityWriters []io.Writer) error {
+	if k < 1 {
+		return fmt.Errorf("data shards (k) must be >= 1, got %d", k)
+	}
+	if m < 1 {
+		return fmt.Errorf("parity shards (m) must be >= 1, got %d", m)
+	}
+	if len(dataWriters) != k {
+		return fmt.Errorf("dataWriters length %d must equal k=%d", len(dataWriters), k)
+	}
+	if len(parityWriters) != m {
+		return fmt.Errorf("parityWriters length %d must equal m=%d", len(parityWriters), m)
+	}
+	if size <= 0 {
+		return fmt.Errorf("size must be > 0, got %d", size)
+	}
+
+	// shardSize = ceil(size / k) — same formula as EncodeFile for interoperability.
+	shardSize := (size + int64(k) - 1) / int64(k)
+
+	// Step 1: write each data shard to a temp file, padding the last one with zeros.
+	tmpDir := os.TempDir()
+	tmpFiles := make([]*os.File, k)
+	for i := range tmpFiles {
+		f, err := os.CreateTemp(tmpDir, ".erasure-shard-*.tmp")
+		if err != nil {
+			// Clean up already-created files
+			for j := 0; j < i; j++ {
+				_ = tmpFiles[j].Close()
+				_ = os.Remove(tmpFiles[j].Name())
+			}
+			return fmt.Errorf("create temp shard file: %w", err)
+		}
+		tmpFiles[i] = f
+	}
+	cleanup := func() {
+		for _, f := range tmpFiles {
+			if f != nil {
+				_ = f.Close()
+				_ = os.Remove(f.Name())
+			}
+		}
+	}
+	defer cleanup()
+
+	// Write shards sequentially from the input reader
+	remaining := size
+	for i, f := range tmpFiles {
+		toWrite := shardSize
+		if remaining < shardSize {
+			toWrite = remaining
+		}
+
+		// Copy exactly toWrite bytes from r into the temp file
+		n, err := io.CopyN(f, r, toWrite)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("read shard %d: %w", i, err)
+		}
+		remaining -= n
+
+		// Zero-pad to shardSize if this is the last (short) shard
+		if n < shardSize {
+			pad := make([]byte, shardSize-n)
+			if _, err := f.Write(pad); err != nil {
+				return fmt.Errorf("pad shard %d: %w", i, err)
+			}
+		}
+
+		// Rewind for RS encoding
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seek shard %d: %w", i, err)
+		}
+	}
+
+	// Step 2: RS-stream encode — reads from k temp files, writes parity to parityWriters.
+	enc, err := reedsolomon.NewStream(k, m)
+	if err != nil {
+		return fmt.Errorf("create RS stream encoder: %w", err)
+	}
+
+	dataReaders := make([]io.Reader, k)
+	for i, f := range tmpFiles {
+		dataReaders[i] = f
+	}
+	if err := enc.Encode(dataReaders, parityWriters); err != nil {
+		return fmt.Errorf("RS stream encode: %w", err)
+	}
+
+	// Step 3: copy each temp file to the corresponding dataWriter, then close it.
+	// Closing is important when dataWriters are io.PipeWriters: the matching pipe
+	// reader blocks until EOF, which only comes when the writer is closed.
+	// bytes.Buffer and similar writers ignore the Close (they don't implement io.Closer).
+	for i, f := range tmpFiles {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewind shard %d for copy: %w", i, err)
+		}
+		if _, err := io.Copy(dataWriters[i], f); err != nil {
+			return fmt.Errorf("copy shard %d to writer: %w", i, err)
+		}
+		// Close the writer so the consumer (e.g. pipe reader) sees EOF before
+		// we start writing the next shard.
+		if c, ok := dataWriters[i].(io.Closer); ok {
+			if err := c.Close(); err != nil {
+				return fmt.Errorf("close shard %d writer: %w", i, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // DecodeStream reconstructs data from shard readers, writing to a writer.
 // This is a streaming version for large files.
-// NOT IMPLEMENTED YET - placeholder for Phase 6 (future work).
+// NOT IMPLEMENTED YET - placeholder for Phase 7 (future work).
 func DecodeStream(shardReaders []io.Reader, k, m int, w io.Writer, originalSize int64) error {
 	return fmt.Errorf("streaming decoder not yet implemented")
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"testing"
 )
 
@@ -428,5 +429,189 @@ func BenchmarkDecodeFile(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestEncodeStream_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		size int
+		k    int
+		m    int
+	}{
+		{"small-1KB-3+2", 1024, 3, 2},
+		{"medium-64KB-4+2", 64 * 1024, 4, 2},
+		{"uneven-37B-3+2", 37, 3, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := make([]byte, tt.size)
+			_, err := rand.Read(data)
+			if err != nil {
+				t.Fatalf("rand.Read: %v", err)
+			}
+
+			// Encode via EncodeStream
+			dataWriters := make([]io.Writer, tt.k)
+			parityWriters := make([]io.Writer, tt.m)
+			dataBufs := make([]*bytes.Buffer, tt.k)
+			parityBufs := make([]*bytes.Buffer, tt.m)
+			for i := range dataBufs {
+				dataBufs[i] = &bytes.Buffer{}
+				dataWriters[i] = dataBufs[i]
+			}
+			for i := range parityBufs {
+				parityBufs[i] = &bytes.Buffer{}
+				parityWriters[i] = parityBufs[i]
+			}
+
+			err = EncodeStream(bytes.NewReader(data), int64(tt.size), tt.k, tt.m, dataWriters, parityWriters)
+			if err != nil {
+				t.Fatalf("EncodeStream: %v", err)
+			}
+
+			// Reassemble shards for DecodeFile
+			shards := make([][]byte, tt.k+tt.m)
+			for i, buf := range dataBufs {
+				shards[i] = buf.Bytes()
+			}
+			for i, buf := range parityBufs {
+				shards[tt.k+i] = buf.Bytes()
+			}
+
+			// Verify all shards same size
+			shardSize := len(shards[0])
+			for i, s := range shards {
+				if len(s) != shardSize {
+					t.Errorf("shard %d size %d != %d", i, len(s), shardSize)
+				}
+			}
+
+			// Decode using DecodeFile
+			got, err := DecodeFile(shards, tt.k, tt.m, int64(tt.size))
+			if err != nil {
+				t.Fatalf("DecodeFile: %v", err)
+			}
+
+			if !bytes.Equal(data, got) {
+				t.Error("decoded data does not match original")
+			}
+		})
+	}
+}
+
+func TestEncodeStream_LargeFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large file test in short mode")
+	}
+
+	sizes := []int{1 * 1024 * 1024, 10 * 1024 * 1024}
+	k, m := 4, 2
+
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("%dMB", size/(1024*1024)), func(t *testing.T) {
+			data := make([]byte, size)
+			_, _ = rand.Read(data)
+
+			dataWriters := make([]io.Writer, k)
+			parityWriters := make([]io.Writer, m)
+			dataBufs := make([]*bytes.Buffer, k)
+			parityBufs := make([]*bytes.Buffer, m)
+			for i := range dataBufs {
+				dataBufs[i] = &bytes.Buffer{}
+				dataWriters[i] = dataBufs[i]
+			}
+			for i := range parityBufs {
+				parityBufs[i] = &bytes.Buffer{}
+				parityWriters[i] = parityBufs[i]
+			}
+
+			if err := EncodeStream(bytes.NewReader(data), int64(size), k, m, dataWriters, parityWriters); err != nil {
+				t.Fatalf("EncodeStream: %v", err)
+			}
+
+			shards := make([][]byte, k+m)
+			for i, buf := range dataBufs {
+				shards[i] = buf.Bytes()
+			}
+			for i, buf := range parityBufs {
+				shards[k+i] = buf.Bytes()
+			}
+
+			got, err := DecodeFile(shards, k, m, int64(size))
+			if err != nil {
+				t.Fatalf("DecodeFile: %v", err)
+			}
+
+			if !bytes.Equal(data, got) {
+				t.Error("decoded data does not match original")
+			}
+		})
+	}
+}
+
+func TestEncodeStream_MatchesEncodeFile(t *testing.T) {
+	// Verify that EncodeStream produces the same shard content as EncodeFile
+	// so the on-disk format is interoperable.
+	k, m := 3, 2
+	data := make([]byte, 1024)
+	_, _ = rand.Read(data)
+
+	// Encode via EncodeFile
+	dataShards, parityShards, err := EncodeFile(data, k, m)
+	if err != nil {
+		t.Fatalf("EncodeFile: %v", err)
+	}
+
+	// Encode via EncodeStream
+	dataWriters := make([]io.Writer, k)
+	parityWriters := make([]io.Writer, m)
+	streamDataBufs := make([]*bytes.Buffer, k)
+	streamParityBufs := make([]*bytes.Buffer, m)
+	for i := range streamDataBufs {
+		streamDataBufs[i] = &bytes.Buffer{}
+		dataWriters[i] = streamDataBufs[i]
+	}
+	for i := range streamParityBufs {
+		streamParityBufs[i] = &bytes.Buffer{}
+		parityWriters[i] = streamParityBufs[i]
+	}
+	if err := EncodeStream(bytes.NewReader(data), int64(len(data)), k, m, dataWriters, parityWriters); err != nil {
+		t.Fatalf("EncodeStream: %v", err)
+	}
+
+	// Compare data shards
+	for i := range dataShards {
+		if !bytes.Equal(dataShards[i], streamDataBufs[i].Bytes()) {
+			t.Errorf("data shard %d differs between EncodeFile and EncodeStream", i)
+		}
+	}
+
+	// Compare parity shards
+	for i := range parityShards {
+		if !bytes.Equal(parityShards[i], streamParityBufs[i].Bytes()) {
+			t.Errorf("parity shard %d differs between EncodeFile and EncodeStream", i)
+		}
+	}
+}
+
+func TestEncodeStream_InvalidArgs(t *testing.T) {
+	data := []byte("test")
+	w := &bytes.Buffer{}
+	writers1 := []io.Writer{w}
+	writers2 := []io.Writer{w, w}
+
+	// k < 1
+	if err := EncodeStream(bytes.NewReader(data), int64(len(data)), 0, 2, writers1, writers2); err == nil {
+		t.Error("expected error for k=0")
+	}
+	// m < 1
+	if err := EncodeStream(bytes.NewReader(data), int64(len(data)), 3, 0, writers1, writers2); err == nil {
+		t.Error("expected error for m=0")
+	}
+	// wrong number of writers
+	if err := EncodeStream(bytes.NewReader(data), int64(len(data)), 3, 2, writers1, writers2); err == nil {
+		t.Error("expected error for wrong dataWriters count")
 	}
 }

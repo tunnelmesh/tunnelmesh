@@ -87,11 +87,19 @@ type S3Store interface {
 	// ChunkExists checks if a chunk exists in CAS without reading its data.
 	ChunkExists(ctx context.Context, hash string) bool
 
-	// ReadChunk reads a chunk from CAS by hash
+	// ReadChunk reads a chunk from CAS by hash (returns decrypted plaintext)
 	ReadChunk(ctx context.Context, hash string) ([]byte, error)
 
-	// WriteChunkDirect writes chunk data directly to CAS (for replication receiver)
+	// ReadChunkRaw reads the raw on-disk (encrypted+compressed) bytes for a chunk.
+	// Used by the replication sender to avoid decrypt+decompress overhead.
+	ReadChunkRaw(ctx context.Context, hash string) ([]byte, error)
+
+	// WriteChunkDirect writes plaintext chunk data directly to CAS (for replication receiver)
 	WriteChunkDirect(ctx context.Context, hash string, data []byte) error
+
+	// WriteChunkDirectRaw writes raw (encrypted+compressed) bytes directly to CAS.
+	// Used by the replication receiver when the sender set RawTransfer=true.
+	WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error
 
 	// ImportObjectMeta writes object metadata directly (for replication receiver).
 	// bucketOwner is used when auto-creating the bucket (empty = "system").
@@ -1530,11 +1538,18 @@ collect:
 }
 
 // replicateSingleChunk reads and sends a single chunk to a peer.
+// Preferentially sends raw on-disk bytes (encrypted+compressed) to avoid double
+// crypto overhead on sender and receiver. Falls back to plaintext if the chunk is
+// missing locally and must be fetched from a peer.
 func (r *Replicator) replicateSingleChunk(ctx context.Context, peerID, bucket, key, chunkHash string, meta *ObjectMeta) error {
-	// Read chunk data from local CAS. If the chunk is missing locally
-	// (e.g. GC cleaned it up), fall back to fetching from a peer.
-	chunkData, err := r.s3.ReadChunk(ctx, chunkHash)
+	// Try to read raw (encrypted+compressed) bytes from local CAS first.
+	// This avoids the decrypt+decompress (sender) + compress+encrypt (receiver) cycle.
+	chunkData, err := r.s3.ReadChunkRaw(ctx, chunkHash)
+	rawTransfer := err == nil
+
 	if err != nil {
+		// Chunk missing locally (e.g. GC cleaned it up) — fall back to peer fetch.
+		// Peer fetch returns plaintext, so the receiver will use WriteChunkDirect.
 		localErr := err
 		chunkData, err = r.fetchChunkFromPeers(ctx, chunkHash)
 		if err != nil {
@@ -1569,6 +1584,7 @@ func (r *Replicator) replicateSingleChunk(ctx context.Context, peerID, bucket, k
 		TotalChunks:   len(meta.Chunks),
 		ChunkSize:     chunkMeta.Size,
 		VersionVector: VersionVector(chunkMeta.VersionVector),
+		RawTransfer:   rawTransfer,
 	}
 
 	return r.sendReplicateChunk(ctx, peerID, payload)
@@ -1719,11 +1735,19 @@ func (r *Replicator) handleReplicateChunk(msg *Message) error {
 		return r.sendChunkAck(msg.ID, msg.From, payload.Bucket, payload.Key, payload.ChunkHash, payload.ChunkIndex, false, "storage capacity exceeded")
 	}
 
-	// Store chunk in local CAS
-	if err := r.s3.WriteChunkDirect(r.ctx, payload.ChunkHash, payload.ChunkData); err != nil {
-		r.logger.Error().Err(err).Str("chunk", truncateHashForLog(payload.ChunkHash)).Msg("Failed to write chunk")
+	// Store chunk in local CAS.
+	// RawTransfer=true means ChunkData is already encrypted+compressed on-disk bytes;
+	// use WriteChunkDirectRaw to skip the re-encrypt cycle.
+	var writeErr error
+	if payload.RawTransfer {
+		writeErr = r.s3.WriteChunkDirectRaw(r.ctx, payload.ChunkHash, payload.ChunkData)
+	} else {
+		writeErr = r.s3.WriteChunkDirect(r.ctx, payload.ChunkHash, payload.ChunkData)
+	}
+	if writeErr != nil {
+		r.logger.Error().Err(writeErr).Str("chunk", truncateHashForLog(payload.ChunkHash)).Msg("Failed to write chunk")
 		// Error ACK stays synchronous
-		return r.sendChunkAck(msg.ID, msg.From, payload.Bucket, payload.Key, payload.ChunkHash, payload.ChunkIndex, false, err.Error())
+		return r.sendChunkAck(msg.ID, msg.From, payload.Bucket, payload.Key, payload.ChunkHash, payload.ChunkIndex, false, writeErr.Error())
 	}
 
 	// Update chunk registry (mark us as owner)

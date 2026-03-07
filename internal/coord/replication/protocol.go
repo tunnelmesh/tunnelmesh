@@ -114,14 +114,15 @@ type ChunkLocationResponsePayload struct {
 
 // ReplicateChunkPayload contains data for chunk-level replication.
 type ReplicateChunkPayload struct {
-	Bucket        string        `json:"bucket"`         // File this chunk belongs to
-	Key           string        `json:"key"`            // File key
-	ChunkHash     string        `json:"chunk_hash"`     // SHA-256 of chunk plaintext
-	ChunkData     []byte        `json:"chunk_data"`     // Compressed + encrypted chunk
-	ChunkIndex    int           `json:"chunk_index"`    // Position in file (for ordering)
-	TotalChunks   int           `json:"total_chunks"`   // Total number of chunks in file
-	ChunkSize     int64         `json:"chunk_size"`     // Uncompressed chunk size
-	VersionVector VersionVector `json:"version_vector"` // Per-chunk version vector
+	Bucket        string        `json:"bucket"`                 // File this chunk belongs to
+	Key           string        `json:"key"`                    // File key
+	ChunkHash     string        `json:"chunk_hash"`             // SHA-256 of chunk plaintext
+	ChunkData     []byte        `json:"chunk_data"`             // Raw on-disk bytes: encrypt(compress(plaintext)) when RawTransfer=true; plaintext when false
+	ChunkIndex    int           `json:"chunk_index"`            // Position in file (for ordering)
+	TotalChunks   int           `json:"total_chunks"`           // Total number of chunks in file
+	ChunkSize     int64         `json:"chunk_size"`             // Uncompressed chunk size
+	VersionVector VersionVector `json:"version_vector"`         // Per-chunk version vector
+	RawTransfer   bool          `json:"raw_transfer,omitempty"` // If true, ChunkData is raw encrypted+compressed bytes; if false, plaintext
 }
 
 // ChunkAckPayload acknowledges chunk replication.

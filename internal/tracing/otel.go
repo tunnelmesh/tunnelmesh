@@ -196,6 +196,7 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	globalTracerProvider = tp
+	SetEnabled(true)
 	globalTPMu.Unlock()
 	return nil
 }
@@ -206,6 +207,7 @@ func ShutdownOTel(ctx context.Context) error {
 	globalTPMu.Lock()
 	tp := globalTracerProvider
 	globalTracerProvider = nil
+	SetEnabled(false)
 	globalTPMu.Unlock()
 	if tp == nil {
 		return nil

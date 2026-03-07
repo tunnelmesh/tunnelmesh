@@ -230,3 +230,47 @@ func TestCAS_NoOrphanedTempFiles(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestCAS_ReadWriteChunkRaw(t *testing.T) {
+	cas := newTestCAS(t)
+	ctx := context.Background()
+	data := []byte("hello raw chunk transfer test data")
+
+	// Write via normal WriteChunk (compresses+encrypts), then read raw bytes.
+	hash, _, err := cas.WriteChunk(ctx, data)
+	require.NoError(t, err)
+
+	raw, err := cas.ReadChunkRaw(hash)
+	require.NoError(t, err)
+
+	// Raw bytes must not equal plaintext (they're encrypted).
+	assert.NotEqual(t, data, raw, "ReadChunkRaw should return encrypted bytes, not plaintext")
+	assert.Greater(t, len(raw), 0)
+
+	// Write the raw bytes to a second CAS (same master key = convergent encryption).
+	cas2, err := NewCAS(t.TempDir(), cas.masterKey)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cas2.Close() })
+
+	created, err := cas2.WriteChunkRaw(hash, raw)
+	require.NoError(t, err)
+	assert.True(t, created, "chunk should be newly created")
+
+	// ReadChunk on the second CAS should return original plaintext.
+	got, err := cas2.ReadChunk(ctx, hash)
+	require.NoError(t, err)
+	assert.Equal(t, data, got, "ReadChunk after WriteChunkRaw should return original plaintext")
+
+	// Writing same raw again is a dedup hit (created=false).
+	created2, err := cas2.WriteChunkRaw(hash, raw)
+	require.NoError(t, err)
+	assert.False(t, created2, "second WriteChunkRaw should be a dedup hit")
+}
+
+func TestCAS_ReadChunkRaw_NotFound(t *testing.T) {
+	cas := newTestCAS(t)
+
+	_, err := cas.ReadChunkRaw("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chunk not found")
+}

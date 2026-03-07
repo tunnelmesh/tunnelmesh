@@ -165,6 +165,16 @@ func (a *S3StoreAdapter) ReadChunk(ctx context.Context, hash string) ([]byte, er
 	return data, nil
 }
 
+// ReadChunkRaw reads the raw on-disk (encrypted+compressed) bytes for a chunk.
+// Used by the replication sender to avoid decrypt+decompress overhead.
+func (a *S3StoreAdapter) ReadChunkRaw(_ context.Context, hash string) ([]byte, error) {
+	raw, err := a.store.ReadChunkRaw(hash)
+	if err != nil {
+		return nil, fmt.Errorf("read chunk raw: %w", err)
+	}
+	return raw, nil
+}
+
 // WriteChunkDirect writes chunk data directly to CAS (Phase 4).
 func (a *S3StoreAdapter) WriteChunkDirect(ctx context.Context, hash string, data []byte) error {
 	err := a.store.WriteChunkDirect(ctx, hash, data)
@@ -172,6 +182,16 @@ func (a *S3StoreAdapter) WriteChunkDirect(ctx context.Context, hash string, data
 		return fmt.Errorf("write chunk direct: %w", err)
 	}
 
+	return nil
+}
+
+// WriteChunkDirectRaw writes raw (encrypted+compressed) bytes directly to CAS.
+// Used by the replication receiver when the sender set RawTransfer=true.
+func (a *S3StoreAdapter) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	err := a.store.WriteChunkDirectRaw(ctx, hash, raw)
+	if err != nil {
+		return fmt.Errorf("write chunk direct raw: %w", err)
+	}
 	return nil
 }
 

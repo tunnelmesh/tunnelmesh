@@ -234,6 +234,23 @@ func (m *mockS3Store) ReadChunk(ctx context.Context, hash string) ([]byte, error
 	return data, nil
 }
 
+// ReadChunkRaw returns the raw bytes stored for a chunk (in the mock, same as ReadChunk).
+func (m *mockS3Store) ReadChunkRaw(_ context.Context, hash string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.chunkErr != nil {
+		return nil, m.chunkErr
+	}
+
+	data, exists := m.chunks[hash]
+	if !exists {
+		return nil, fmt.Errorf("chunk not found: %s", hash)
+	}
+
+	return data, nil
+}
+
 // WriteChunkDirect writes a chunk to CAS.
 func (m *mockS3Store) WriteChunkDirect(ctx context.Context, hash string, data []byte) error {
 	m.mu.Lock()
@@ -244,6 +261,19 @@ func (m *mockS3Store) WriteChunkDirect(ctx context.Context, hash string, data []
 	}
 
 	m.chunks[hash] = append([]byte(nil), data...)
+	return nil
+}
+
+// WriteChunkDirectRaw writes raw bytes for a chunk to CAS (same as WriteChunkDirect in mock).
+func (m *mockS3Store) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.chunkErr != nil {
+		return m.chunkErr
+	}
+
+	m.chunks[hash] = append([]byte(nil), raw...)
 	return nil
 }
 
@@ -2236,4 +2266,202 @@ func TestSendSemaphoreRespectsContextCancellation(t *testing.T) {
 
 	// Release the slot
 	r.releaseSendSlot()
+}
+
+// TestReplicateSingleChunk_SendsRawBytes verifies that replicateSingleChunk sets
+// RawTransfer=true and sends the exact bytes returned by ReadChunkRaw.
+// Uses the broker to get a real ACK from the receiver.
+func TestReplicateSingleChunk_SendsRawBytes(t *testing.T) {
+	broker := newTestTransportBroker()
+
+	senderS3 := newMockS3Store()
+	receiverS3 := newMockS3Store()
+
+	chunkHash := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	rawBytes := []byte("raw-encrypted-chunk-bytes-for-replication")
+	senderS3.mu.Lock()
+	senderS3.chunks[chunkHash] = append([]byte(nil), rawBytes...)
+	senderS3.mu.Unlock()
+
+	meta := &ObjectMeta{
+		Key:    "file.txt",
+		Chunks: []string{chunkHash},
+		ChunkMetadata: map[string]*ChunkMetadata{
+			chunkHash: {Hash: chunkHash, Size: int64(len(rawBytes))},
+		},
+	}
+
+	// Capture the payload that the sender sends
+	var capturedPayload ReplicateChunkPayload
+	var capturedMu sync.Mutex
+
+	// Intercept transport: capture the message then forward to receiver
+	senderTransport := broker.newTransportFor("coord-sender")
+	receiverTransport := broker.newTransportFor("coord-receiver")
+
+	receiver := NewReplicator(Config{
+		NodeID:    "coord-receiver",
+		Transport: receiverTransport,
+		S3Store:   receiverS3,
+		Logger:    zerolog.Nop(),
+	})
+	require.NoError(t, receiver.Start())
+	t.Cleanup(func() { _ = receiver.Stop() })
+
+	// Wrap the broker's send on the sender side to capture the payload
+	wrappedSenderTransport := &capturingTransport{
+		inner:    senderTransport,
+		captured: &capturedPayload,
+		mu:       &capturedMu,
+	}
+
+	sender := NewReplicator(Config{
+		NodeID:          "coord-sender",
+		Transport:       wrappedSenderTransport,
+		S3Store:         senderS3,
+		ChunkAckTimeout: 2 * time.Second,
+		Logger:          zerolog.Nop(),
+	})
+	require.NoError(t, sender.Start())
+	t.Cleanup(func() { _ = sender.Stop() })
+
+	err := sender.replicateSingleChunk(context.Background(), "coord-receiver", "bucket", "file.txt", chunkHash, meta)
+	require.NoError(t, err)
+
+	capturedMu.Lock()
+	defer capturedMu.Unlock()
+
+	assert.True(t, capturedPayload.RawTransfer, "RawTransfer should be true when chunk is local")
+	assert.Equal(t, rawBytes, capturedPayload.ChunkData, "ChunkData should be raw bytes from ReadChunkRaw")
+	assert.Equal(t, chunkHash, capturedPayload.ChunkHash)
+}
+
+// capturingTransport wraps a Transport and captures the first ReplicateChunkPayload sent.
+type capturingTransport struct {
+	inner    Transport
+	captured *ReplicateChunkPayload
+	mu       *sync.Mutex
+}
+
+func (c *capturingTransport) SendToCoordinator(ctx context.Context, to string, data []byte) error {
+	// Try to parse as a chunk replication message
+	msg, err := UnmarshalMessage(data)
+	if err == nil && msg.Type == MessageTypeReplicateChunk {
+		var p ReplicateChunkPayload
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.mu.Lock()
+			*c.captured = p
+			c.mu.Unlock()
+		}
+	}
+	// Forward to the real transport
+	return c.inner.SendToCoordinator(ctx, to, data)
+}
+
+func (c *capturingTransport) RegisterHandler(handler func(ctx context.Context, from string, data []byte) error) {
+	c.inner.RegisterHandler(handler)
+}
+
+// TestHandleReplicateChunk_RawTransfer verifies that when RawTransfer=true, the receiver
+// calls WriteChunkDirectRaw (which stores bytes without re-processing).
+func TestHandleReplicateChunk_RawTransfer(t *testing.T) {
+	receiverStore := newMockS3Store()
+	transport := newMockTransport()
+
+	r := NewReplicator(Config{
+		NodeID:    "coord-receiver",
+		Transport: transport,
+		S3Store:   receiverStore,
+		Logger:    zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	chunkHash := "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	rawBytes := []byte("encrypted+compressed bytes — not plaintext")
+
+	payload := ReplicateChunkPayload{
+		Bucket:      "bucket",
+		Key:         "file.txt",
+		ChunkHash:   chunkHash,
+		ChunkData:   rawBytes,
+		ChunkIndex:  0,
+		TotalChunks: 1,
+		RawTransfer: true,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	msg := &Message{
+		Version: ProtocolVersion,
+		Type:    MessageTypeReplicateChunk,
+		ID:      "test-raw-chunk",
+		From:    "coord-sender",
+		Payload: json.RawMessage(payloadJSON),
+	}
+	data, err := msg.Marshal()
+	require.NoError(t, err)
+
+	transport.RegisterHandler(r.handleIncomingMessage)
+	err = transport.simulateReceive("coord-sender", data)
+	require.NoError(t, err)
+
+	// Verify the chunk was stored with the exact raw bytes
+	receiverStore.mu.Lock()
+	stored, exists := receiverStore.chunks[chunkHash]
+	receiverStore.mu.Unlock()
+
+	require.True(t, exists, "chunk should exist in receiver store")
+	assert.Equal(t, rawBytes, stored, "stored bytes should be the raw encrypted bytes")
+}
+
+// TestHandleReplicateChunk_PlaintextTransfer verifies that when RawTransfer=false, the
+// receiver calls WriteChunkDirect (plaintext path — used for peer-fetch fallback).
+func TestHandleReplicateChunk_PlaintextTransfer(t *testing.T) {
+	receiverStore := newMockS3Store()
+	transport := newMockTransport()
+
+	r := NewReplicator(Config{
+		NodeID:    "coord-receiver",
+		Transport: transport,
+		S3Store:   receiverStore,
+		Logger:    zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = r.Stop() })
+
+	chunkHash := "cafebabe1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+	plaintext := []byte("plaintext chunk data from peer fetch fallback")
+
+	payload := ReplicateChunkPayload{
+		Bucket:      "bucket",
+		Key:         "file.txt",
+		ChunkHash:   chunkHash,
+		ChunkData:   plaintext,
+		ChunkIndex:  0,
+		TotalChunks: 1,
+		RawTransfer: false, // explicit false — plaintext path
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	msg := &Message{
+		Version: ProtocolVersion,
+		Type:    MessageTypeReplicateChunk,
+		ID:      "test-plaintext-chunk",
+		From:    "coord-sender",
+		Payload: json.RawMessage(payloadJSON),
+	}
+	data, err := msg.Marshal()
+	require.NoError(t, err)
+
+	transport.RegisterHandler(r.handleIncomingMessage)
+	err = transport.simulateReceive("coord-sender", data)
+	require.NoError(t, err)
+
+	// Chunk should be stored (via WriteChunkDirect)
+	receiverStore.mu.Lock()
+	_, exists := receiverStore.chunks[chunkHash]
+	receiverStore.mu.Unlock()
+	assert.True(t, exists, "chunk should exist in receiver store after plaintext transfer")
 }

@@ -210,6 +210,50 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	return data, nil
 }
 
+// ReadChunkRaw returns the raw on-disk bytes (encrypted+compressed) for a chunk.
+// Used by the replication sender to avoid the decrypt+decompress cycle that ReadChunk does.
+func (c *CAS) ReadChunkRaw(hash string) ([]byte, error) {
+	chunkPath := c.chunkPath(hash)
+	data, err := os.ReadFile(chunkPath)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("chunk not found: %s", hash)
+	}
+	return data, err
+}
+
+// WriteChunkRaw stores pre-encrypted+compressed bytes for a chunk without re-processing.
+// The bytes must have been produced by a coordinator sharing the same masterKey
+// (convergent encryption — same plaintext → same ciphertext on every coordinator).
+// Returns (true, nil) if the chunk was newly written, (false, nil) if it already existed.
+func (c *CAS) WriteChunkRaw(hash string, raw []byte) (created bool, err error) {
+	chunkPath := c.chunkPath(hash)
+	if fileExists(chunkPath) {
+		return false, nil
+	}
+	tmpFile, err := os.CreateTemp(filepath.Dir(chunkPath), ".chunk-*.tmp")
+	if err != nil {
+		return false, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return false, fmt.Errorf("write raw chunk: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, chunkPath); err != nil {
+		_ = os.Remove(tmpPath)
+		if fileExists(chunkPath) {
+			return false, nil // concurrent writer won the race
+		}
+		return false, fmt.Errorf("rename raw chunk: %w", err)
+	}
+	return true, nil
+}
+
 // DeleteChunk removes a chunk from storage and returns the freed bytes.
 // Returns 0 if the chunk didn't exist.
 func (c *CAS) DeleteChunk(ctx context.Context, hash string) (int64, error) {
