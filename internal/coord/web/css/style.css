@@ -26,6 +26,8 @@
     --color-btn-primary: #2563eb;
     --color-btn-primary-hover: #3b82f6;
     --color-btn-danger: #f85149;
+    --color-btn-success: #1a7f3c;
+    --color-btn-success-hover: #238f45;
 
     /* Focus ring — sky blue */
     --color-focus-ring: rgb(96 165 250 / 0.3);
@@ -503,6 +505,25 @@ main {
 
 .btn-primary:hover:not(:disabled) {
     background: var(--color-btn-primary-hover);
+}
+
+.btn-success {
+    background: var(--color-btn-success);
+    color: #fff;
+    border: 1px solid var(--color-btn-success);
+    border-radius: var(--btn-border-radius);
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    transition: background 0.2s;
+}
+
+.btn-success:hover:not(:disabled) {
+    background: var(--color-btn-success-hover);
 }
 
 .btn-primary:disabled {
@@ -1741,7 +1762,7 @@ a.logs-container {
     pointer-events: none;
 }
 
-/* Primary button (green) */
+/* Primary button (blue) */
 .s3-btn.btn-primary {
     background: var(--color-btn-primary);
     border-color: var(--color-btn-primary);
@@ -1751,6 +1772,18 @@ a.logs-container {
 .s3-btn.btn-primary:hover {
     background: var(--color-btn-primary-hover);
     border-color: var(--color-btn-primary-hover);
+}
+
+/* Success button (green) */
+.s3-btn.btn-success {
+    background: var(--color-btn-success);
+    border-color: var(--color-btn-success);
+    color: #fff;
+}
+
+.s3-btn.btn-success:hover {
+    background: var(--color-btn-success-hover);
+    border-color: var(--color-btn-success-hover);
 }
 
 /* Save button highlight when dirty */
@@ -2221,8 +2254,8 @@ a.logs-container {
     word-spacing: 0.08em;
     white-space: normal;
     overflow-wrap: break-word;
-    padding: 0.75rem 1rem 0.75rem 7rem;
-    background: linear-gradient(90deg, var(--color-bg-secondary) 6rem, var(--color-bg-primary) 6rem);
+    padding: 0.75rem 1rem;
+    background: var(--color-bg-primary);
     overflow: auto;
 }
 
@@ -2233,6 +2266,33 @@ a.logs-container {
 /* Hide line numbers in WYSIWYG mode */
 .s3-editor-wrap.wysiwyg-mode .s3-line-numbers {
     display: none;
+}
+
+/* Preview mode margin watermark */
+.s3-preview-margin {
+    display: none;
+    width: 5.25rem;
+    border-right: 1px solid var(--color-border-primary);
+    background: var(--color-bg-secondary);
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    user-select: none;
+}
+
+.s3-preview-margin::after {
+    content: 'PREVIEW';
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
+    font-size: 4.5rem;
+    font-weight: 700;
+    color: rgb(148 163 184 / 0.18);
+}
+
+.s3-editor-wrap.wysiwyg-mode .s3-preview-margin {
+    display: flex;
 }
 
 /* Markdown headings - futuristic spacing */
