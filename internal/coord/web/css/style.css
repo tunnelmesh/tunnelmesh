@@ -2271,7 +2271,7 @@ a.logs-container {
 /* Preview mode margin watermark */
 .s3-preview-margin {
     display: none;
-    width: 3.5rem;
+    width: 5.25rem;
     border-right: 1px solid var(--color-border-primary);
     background: var(--color-bg-secondary);
     flex-shrink: 0;
@@ -2286,7 +2286,7 @@ a.logs-container {
     writing-mode: vertical-rl;
     text-orientation: mixed;
     transform: rotate(180deg);
-    font-size: 3rem;
+    font-size: 4.5rem;
     font-weight: 700;
     color: rgb(148 163 184 / 0.18);
 }
