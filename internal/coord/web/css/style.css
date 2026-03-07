@@ -1762,7 +1762,7 @@ a.logs-container {
     pointer-events: none;
 }
 
-/* Primary button (green) */
+/* Primary button (blue) */
 .s3-btn.btn-primary {
     background: var(--color-btn-primary);
     border-color: var(--color-btn-primary);
@@ -1772,6 +1772,18 @@ a.logs-container {
 .s3-btn.btn-primary:hover {
     background: var(--color-btn-primary-hover);
     border-color: var(--color-btn-primary-hover);
+}
+
+/* Success button (green) */
+.s3-btn.btn-success {
+    background: var(--color-btn-success);
+    border-color: var(--color-btn-success);
+    color: #fff;
+}
+
+.s3-btn.btn-success:hover {
+    background: var(--color-btn-success-hover);
+    border-color: var(--color-btn-success-hover);
 }
 
 /* Save button highlight when dirty */
@@ -2242,8 +2254,8 @@ a.logs-container {
     word-spacing: 0.08em;
     white-space: normal;
     overflow-wrap: break-word;
-    padding: 0.75rem 1rem 0.75rem 7rem;
-    background: linear-gradient(90deg, var(--color-bg-secondary) 6rem, var(--color-bg-primary) 6rem);
+    padding: 0.75rem 1rem;
+    background: var(--color-bg-primary);
     overflow: auto;
 }
 
@@ -2274,8 +2286,7 @@ a.logs-container {
     writing-mode: vertical-rl;
     text-orientation: mixed;
     transform: rotate(180deg);
-    letter-spacing: 0.25em;
-    font-size: 0.75rem;
+    font-size: 3rem;
     font-weight: 700;
     color: rgb(148 163 184 / 0.18);
 }
