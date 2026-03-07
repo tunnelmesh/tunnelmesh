@@ -1,6 +1,13 @@
 // Import constants from TM.utils (loaded via lib/utils.js)
-const { POLL_INTERVAL_MS, SSE_RETRY_DELAY_MS, MAX_SSE_RETRIES, ROWS_PER_PAGE, TOAST_DURATION_MS, TOAST_FADE_MS, MAX_HISTORY_POINTS } =
-    TM.utils.CONSTANTS;
+const {
+    POLL_INTERVAL_MS,
+    SSE_RETRY_DELAY_MS,
+    MAX_SSE_RETRIES,
+    ROWS_PER_PAGE,
+    TOAST_DURATION_MS,
+    TOAST_FADE_MS,
+    MAX_HISTORY_POINTS,
+} = TM.utils.CONSTANTS;
 
 // Import utilities from TM modules
 const { escapeHtml } = TM.utils;
@@ -158,6 +165,10 @@ let sseRetryCount = 0;
 let _heartbeatDebounce = null;
 
 function setupSSE() {
+    // Cancel any pending debounced fetch from the previous connection
+    clearTimeout(_heartbeatDebounce);
+    _heartbeatDebounce = null;
+
     // Check if EventSource is supported
     if (typeof EventSource === 'undefined') {
         console.log('SSE not supported, falling back to polling');
@@ -210,6 +221,8 @@ function startPolling() {
 
 // Cleanup on page unload to prevent memory leaks
 function cleanup() {
+    clearTimeout(_heartbeatDebounce);
+    _heartbeatDebounce = null;
     if (state.eventSource) {
         state.eventSource.close();
         state.eventSource = null;
@@ -2671,6 +2684,8 @@ window.addEventListener('pagehide', (e) => {
     if (e.persisted) {
         // Entering bfcache — only close the network connection;
         // preserve JS objects so they survive restoration
+        clearTimeout(_heartbeatDebounce);
+        _heartbeatDebounce = null;
         if (state.eventSource) {
             state.eventSource.close();
             state.eventSource = null;
@@ -2684,6 +2699,7 @@ window.addEventListener('pagehide', (e) => {
 window.addEventListener('pageshow', (e) => {
     if (e.persisted) {
         state.peerHistory = {};
+        sseRetryCount = 0;
         if (state.visualizer) {
             state.visualizer.skipNextAnimation = true;
         }
