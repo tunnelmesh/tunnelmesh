@@ -349,7 +349,7 @@ func (m *MeshNode) HandleRelayPacketForAsymmetricDetection(sourcePeer string) bo
 
 // setupRelayHandlers configures the packet and peer reconnection handlers for a relay.
 // This is extracted to ensure consistent behavior between initial connect and reconnect.
-func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
+func (m *MeshNode) setupRelayHandlers(ctx context.Context, relay *tunnel.PersistentRelay) {
 	// Set up packet handler to route incoming relay packets to forwarder
 	relay.SetPacketHandler(func(sourcePeer string, data []byte) {
 		if m.Forwarder != nil {
@@ -478,11 +478,11 @@ func (m *MeshNode) setupRelayHandlers(relay *tunnel.PersistentRelay) {
 	// and should continue processing even during shutdown.
 	relay.SetRelayNotifyHandler(func(peers []string) {
 		log.Debug().Strs("peers", peers).Msg("received relay notification via WebSocket")
-		m.HandleRelayRequests(context.Background(), peers)
+		m.HandleRelayRequests(ctx, peers)
 	})
 	relay.SetHolePunchNotifyHandler(func(peers []string) {
 		log.Debug().Strs("peers", peers).Msg("received hole-punch notification via WebSocket")
-		m.HandleHolePunchRequests(context.Background(), peers)
+		m.HandleHolePunchRequests(ctx, peers)
 	})
 }
 
@@ -498,7 +498,7 @@ func (m *MeshNode) ConnectPersistentRelay(ctx context.Context) error {
 	m.PersistentRelay = tunnel.NewPersistentRelay(m.client.BaseURL(), jwtToken)
 
 	// Set up handlers BEFORE connecting
-	m.setupRelayHandlers(m.PersistentRelay)
+	m.setupRelayHandlers(ctx, m.PersistentRelay)
 
 	if err := m.PersistentRelay.Connect(ctx); err != nil {
 		log.Warn().Err(err).Msg("failed to connect persistent relay")
@@ -573,7 +573,7 @@ func (m *MeshNode) ReconnectPersistentRelay(ctx context.Context) {
 		newRelay := tunnel.NewPersistentRelay(m.client.BaseURL(), jwtToken)
 
 		// Set up handlers BEFORE connecting (uses shared handler setup)
-		m.setupRelayHandlers(newRelay)
+		m.setupRelayHandlers(ctx, newRelay)
 
 		if err := newRelay.Connect(ctx); err != nil {
 			span.RecordError(err)

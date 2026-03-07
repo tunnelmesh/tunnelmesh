@@ -151,6 +151,7 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 			remoteAddr: r.client.RemoteAddr(),
 		}
 		conn.initActivity()
+		conn.startIdleWatchdog(ctx)
 		return conn, nil
 	}
 }
@@ -414,4 +415,34 @@ func (c *Connection) LastActivity() time.Time {
 // Should be called when the connection is established.
 func (c *Connection) initActivity() {
 	c.lastRecv.Store(time.Now())
+}
+
+// SSHIdleTimeout is the duration after which an idle SSH connection is closed.
+const SSHIdleTimeout = 5 * time.Minute
+
+// startIdleWatchdog starts a goroutine that closes the connection if it is idle
+// for longer than SSHIdleTimeout. The goroutine exits when ctx is cancelled.
+func (c *Connection) startIdleWatchdog(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				c.mu.Lock()
+				if c.closed {
+					c.mu.Unlock()
+					return
+				}
+				c.mu.Unlock()
+				if last := c.LastActivity(); !last.IsZero() && time.Since(last) > SSHIdleTimeout {
+					log.Warn().Str("peer", c.peerName).Msg("SSH connection idle timeout")
+					_ = c.Close()
+					return
+				}
+			}
+		}
+	}()
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"golang.org/x/time/rate"
 )
 
 // peerInfo wraps a peer with stats and metadata for admin UI.
@@ -131,6 +132,8 @@ type Server struct {
 	gcMeshTransport *http.Transport // underlying transport; TLS config set later by SetMeshTLS
 	gcForwardClient *http.Client    // shared TLS client for S3 GC forwarding (10 min timeout)
 	shareGCClient   *http.Client    // shared TLS client for share GC across coordinators (30 s timeout)
+	// Per-IP registration rate limiters (keyed by IP string, value *rate.Limiter)
+	registrationLimiter sync.Map
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -1780,6 +1783,17 @@ func isReservedPeerName(name string) bool {
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Per-IP registration rate limiting (10 reg/s sustained, burst 20)
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if clientIP == "" {
+		clientIP = r.RemoteAddr
+	}
+	limiterIface, _ := s.registrationLimiter.LoadOrStore(clientIP, rate.NewLimiter(rate.Limit(10), 20))
+	if !limiterIface.(*rate.Limiter).Allow() {
+		s.jsonError(w, "registration rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 

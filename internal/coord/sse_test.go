@@ -110,9 +110,15 @@ func TestHandleSSE(t *testing.T) {
 		t.Fatalf("failed to create server: %v", err)
 	}
 
-	// Create test request with cancellable context
+	// Generate a valid JWT token for authentication
+	token, err := srv.GenerateToken("test-peer", "10.0.0.1")
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	// Create test request with cancellable context and auth token as query param
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest("GET", "/admin/api/events", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", "/admin/api/events?token="+token, nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	// Run handler in goroutine since it blocks
@@ -152,6 +158,65 @@ func TestHandleSSE(t *testing.T) {
 	}
 	if !strings.Contains(body, "test-peer") {
 		t.Errorf("missing peer name in heartbeat event: %s", body)
+	}
+}
+
+func TestHandleSSE_Unauthorized(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+
+	srv, err := NewServer(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/admin/api/events", nil)
+	w := httptest.NewRecorder()
+
+	srv.handleSSE(w, req)
+
+	if w.Code != 401 {
+		t.Errorf("expected 401 Unauthorized, got %d", w.Code)
+	}
+}
+
+func TestHandleSSE_BearerToken(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+
+	srv, err := NewServer(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	token, err := srv.GenerateToken("test-peer", "10.0.0.1")
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("GET", "/admin/api/events", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	done := make(chan bool)
+	go func() {
+		srv.handleSSE(w, req)
+		done <- true
+	}()
+
+	// Give it a moment to write initial event
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel context to stop the handler
+	cancel()
+	<-done
+
+	if w.Code == 401 {
+		t.Error("expected non-401 response for valid Bearer token, got 401")
+	}
+	if !strings.Contains(w.Body.String(), "event: connected") {
+		t.Errorf("expected connected event in response: %s", w.Body.String())
 	}
 }
 

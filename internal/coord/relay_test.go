@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"golang.org/x/time/rate"
 )
 
 // Helper to create a WebSocket connection to the relay endpoint
@@ -784,4 +785,176 @@ func drainMetricChan(ch <-chan prometheus.Metric) []prometheus.Metric {
 		result = append(result, m)
 	}
 	return result
+}
+
+// readUntilType reads WebSocket messages until msgType is found or deadline expires.
+func readUntilType(t *testing.T, conn *websocket.Conn, msgType byte, deadline time.Duration) ([]byte, bool) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(deadline))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return nil, false
+		}
+		if len(data) > 0 && data[0] == msgType {
+			return data, true
+		}
+	}
+}
+
+// TestRelayManager_SendPacket_RoutingAuth verifies relay routing authorization:
+// packets to registered peers are forwarded, packets to unregistered peers are dropped.
+func TestRelayManager_SendPacket_RoutingAuth(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	peerA, peerB := "relay-auth-a", "relay-auth-b"
+	tokenA := registerPeerAndGetToken(t, ts.URL, peerA, cfg.AuthToken)
+	tokenB := registerPeerAndGetToken(t, ts.URL, peerB, cfg.AuthToken)
+
+	connA := connectRelay(t, ts.URL, peerA, tokenA)
+	defer func() { _ = connA.Close() }()
+	connB := connectRelay(t, ts.URL, peerB, tokenB)
+	defer func() { _ = connB.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = waitFor(ctx, 10*time.Millisecond, func() bool {
+		srv.relay.mu.Lock()
+		defer srv.relay.mu.Unlock()
+		return srv.relay.persistent[peerA] != nil && srv.relay.persistent[peerB] != nil
+	})
+	require.NoError(t, err, "both connections must be registered")
+
+	t.Run("registered target receives packet", func(t *testing.T) {
+		payload := []byte("hello-registered")
+		msg := make([]byte, 2+len(peerB)+len(payload))
+		msg[0] = MsgTypeSendPacket
+		msg[1] = byte(len(peerB))
+		copy(msg[2:], peerB)
+		copy(msg[2+len(peerB):], payload)
+
+		require.NoError(t, connA.WriteMessage(websocket.BinaryMessage, msg))
+
+		data, found := readUntilType(t, connB, MsgTypeRecvPacket, 2*time.Second)
+		require.True(t, found, "peerB should receive the forwarded packet")
+		assert.Equal(t, MsgTypeRecvPacket, data[0])
+	})
+
+	t.Run("unregistered target is dropped", func(t *testing.T) {
+		target := "nonexistent-peer-xyz"
+		payload := []byte("should-be-dropped")
+		msg := make([]byte, 2+len(target)+len(payload))
+		msg[0] = MsgTypeSendPacket
+		msg[1] = byte(len(target))
+		copy(msg[2:], target)
+		copy(msg[2+len(target):], payload)
+
+		require.NoError(t, connA.WriteMessage(websocket.BinaryMessage, msg))
+
+		// peerB should not receive anything (short deadline → expect timeout)
+		_ = connB.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, _, readErr := connB.ReadMessage()
+		assert.Error(t, readErr, "no packet should be forwarded when target is unregistered")
+		_ = connB.SetReadDeadline(time.Time{})
+	})
+}
+
+// TestRelayManager_QueryFilterRules_Limit verifies that QueryFilterRules fails fast
+// when the pending API requests map is full.
+func TestRelayManager_QueryFilterRules_Limit(t *testing.T) {
+	rm := newRelayManager()
+
+	// Pre-fill the apiRequests map to the limit
+	rm.apiRequestsMu.Lock()
+	for i := 0; i < maxPendingAPIRequests; i++ {
+		rm.apiRequests[uint32(i)] = make(chan []byte, 1)
+	}
+	rm.apiRequestsMu.Unlock()
+
+	// Insert a fake persistentConn so the "peer not connected" check passes
+	pc := &persistentConn{
+		peerName:  "limit-peer",
+		writeChan: make(chan []byte, 1),
+		closeChan: make(chan struct{}),
+	}
+	rm.mu.Lock()
+	rm.persistent["limit-peer"] = pc
+	rm.mu.Unlock()
+
+	_, err := rm.QueryFilterRules(context.Background(), "limit-peer", 5*time.Second)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too many pending relay API requests")
+}
+
+// TestRelayManager_SendPacket_RateLimit verifies that per-peer relay rate limiting
+// drops packets when the rate limiter is exhausted.
+func TestRelayManager_SendPacket_RateLimit(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	peerA, peerB := "rate-limit-a", "rate-limit-b"
+	tokenA := registerPeerAndGetToken(t, ts.URL, peerA, cfg.AuthToken)
+	tokenB := registerPeerAndGetToken(t, ts.URL, peerB, cfg.AuthToken)
+
+	connA := connectRelay(t, ts.URL, peerA, tokenA)
+	defer func() { _ = connA.Close() }()
+	connB := connectRelay(t, ts.URL, peerB, tokenB)
+	defer func() { _ = connB.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = waitFor(ctx, 10*time.Millisecond, func() bool {
+		srv.relay.mu.Lock()
+		defer srv.relay.mu.Unlock()
+		return srv.relay.persistent[peerA] != nil && srv.relay.persistent[peerB] != nil
+	})
+	require.NoError(t, err, "both connections must be registered")
+
+	// Replace peerA's rate limiter with a very restrictive one (1 pkt/s, burst 1)
+	srv.relay.mu.Lock()
+	srv.relay.persistent[peerA].rateLimiter = rate.NewLimiter(1, 1)
+	srv.relay.mu.Unlock()
+
+	// Send 10 packets rapidly from A to B
+	payload := []byte("rate-test")
+	for i := 0; i < 10; i++ {
+		msg := make([]byte, 2+len(peerB)+len(payload))
+		msg[0] = MsgTypeSendPacket
+		msg[1] = byte(len(peerB))
+		copy(msg[2:], peerB)
+		copy(msg[2+len(peerB):], payload)
+		require.NoError(t, connA.WriteMessage(websocket.BinaryMessage, msg))
+	}
+
+	// Count packets received by peerB within a short window
+	received := 0
+	_ = connB.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	for {
+		_, data, readErr := connB.ReadMessage()
+		if readErr != nil {
+			break
+		}
+		if len(data) > 0 && data[0] == MsgTypeRecvPacket {
+			received++
+		}
+	}
+
+	// With burst=1 rate limiter, only 1 packet should pass
+	assert.Equal(t, 1, received, "rate limiter should allow only 1 packet (burst=1)")
 }

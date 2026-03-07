@@ -3,6 +3,7 @@ package coord
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -70,11 +71,31 @@ func (h *sseHub) clientCount() int {
 
 // handleSSE handles SSE connections for the admin dashboard.
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	// Authenticate via JWT (Bearer header or ?token= query param for EventSource)
+	tokenStr := ""
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		parts := strings.SplitN(auth, " ", 2)
+		if len(parts) == 2 && parts[0] == "Bearer" {
+			tokenStr = parts[1]
+		}
+	}
+	if tokenStr == "" {
+		tokenStr = r.URL.Query().Get("token")
+	}
+	if tokenStr == "" {
+		http.Error(w, "missing authorization", http.StatusUnauthorized)
+		return
+	}
+	if _, err := s.ValidateToken(tokenStr); err != nil {
+		log.Debug().Err(err).Msg("SSE auth failed")
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Check if we can flush
 	flusher, ok := w.(http.Flusher)
@@ -85,7 +106,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Create client
 	client := &sseClient{
-		events: make(chan string, 10), // Buffer up to 10 events
+		events: make(chan string, 64), // Buffer up to 64 events
 		done:   make(chan struct{}),
 	}
 
