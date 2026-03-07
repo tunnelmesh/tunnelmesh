@@ -13,6 +13,20 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/auth"
 )
 
+// AllowAllAuthorizer is a test-only authorizer that allows all requests.
+// Never use in production handlers.
+type AllowAllAuthorizer struct {
+	UserID string
+}
+
+func (a *AllowAllAuthorizer) AuthorizeRequest(r *http.Request, verb, resource, bucket, objectKey string) (string, error) {
+	return a.UserID, nil
+}
+
+func (a *AllowAllAuthorizer) GetAllowedPrefixes(userID, bucket string) []string {
+	return nil
+}
+
 func TestDeriveS3Credentials(t *testing.T) {
 	publicKey := "test-public-key-12345"
 

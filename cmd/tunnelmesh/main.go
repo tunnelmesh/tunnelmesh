@@ -89,12 +89,13 @@ var (
 )
 
 // safeGo runs fn in a goroutine with panic recovery. If restart is true,
-// the goroutine is automatically re-launched after a 5-second delay when
-// a panic occurs — suitable for long-running background workers that must
-// stay alive for the lifetime of the process.
+// the goroutine is automatically re-launched after an exponential back-off
+// delay (1s → 2s → 4s … capped at 60s) when a panic occurs.
+// The back-off resets on a clean (non-panic) return.
+// NOTE: restart=true must only be used for stateless, idempotent workers.
 func safeGo(ctx context.Context, name string, fn func(), restart bool) {
-	var launch func()
-	launch = func() {
+	var launch func(delay time.Duration)
+	launch = func(delay time.Duration) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error().
@@ -103,18 +104,25 @@ func safeGo(ctx context.Context, name string, fn func(), restart bool) {
 					Str("stack", string(debug.Stack())).
 					Msg("goroutine panicked - unexpected crash")
 				if restart {
+					next := delay * 2
+					if next == 0 {
+						next = time.Second
+					}
+					if next > 60*time.Second {
+						next = 60 * time.Second
+					}
 					select {
 					case <-ctx.Done():
 						return
-					case <-time.After(5 * time.Second):
+					case <-time.After(next):
 					}
-					go launch()
+					go launch(next)
 				}
 			}
 		}()
 		fn()
 	}
-	go launch()
+	go launch(0)
 }
 
 func main() {
@@ -1688,9 +1696,13 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 	peerMetrics := metrics.InitMetrics(cfg.Name, resp.MeshIP, Version)
 	node.OnConnectionSetup = peerMetrics.RecordConnectionSetup
 
-	// Wire UDP queue-full counter now that peerMetrics is initialized
+	// Wire UDP counters now that peerMetrics is initialized
 	if udpTransportRef != nil {
 		udpTransportRef.SetOnDropQueueFull(peerMetrics.DroppedQueueFull.Inc)
+		udpTransportRef.SetOnHandshakeFailure(func(reason string) {
+			peerMetrics.HandshakeFailures.WithLabelValues(reason).Inc()
+		})
+		udpTransportRef.SetOnSessionRejected(peerMetrics.SessionRejected.Inc)
 	}
 
 	// Initialize Loki log shipping if enabled

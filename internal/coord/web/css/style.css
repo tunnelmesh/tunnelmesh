@@ -26,6 +26,8 @@
     --color-btn-primary: #2563eb;
     --color-btn-primary-hover: #3b82f6;
     --color-btn-danger: #f85149;
+    --color-btn-success: #1a7f3c;
+    --color-btn-success-hover: #238f45;
 
     /* Focus ring — sky blue */
     --color-focus-ring: rgb(96 165 250 / 0.3);
@@ -505,10 +507,10 @@ main {
     background: var(--color-btn-primary-hover);
 }
 
-.btn-success, .btn.btn-success {
-    background: #1a7f3c;
+.btn-success {
+    background: var(--color-btn-success);
     color: #fff;
-    border: 1px solid #1a7f3c;
+    border: 1px solid var(--color-btn-success);
     border-radius: var(--btn-border-radius);
     padding: 0.5rem 1rem;
     font-size: 0.875rem;
@@ -521,7 +523,7 @@ main {
 }
 
 .btn-success:hover:not(:disabled) {
-    background: #238f45;
+    background: var(--color-btn-success-hover);
 }
 
 .btn-primary:disabled {
@@ -1760,7 +1762,7 @@ a.logs-container {
     pointer-events: none;
 }
 
-/* Primary button (green) */
+/* Primary button (blue) */
 .s3-btn.btn-primary {
     background: var(--color-btn-primary);
     border-color: var(--color-btn-primary);
@@ -1770,6 +1772,18 @@ a.logs-container {
 .s3-btn.btn-primary:hover {
     background: var(--color-btn-primary-hover);
     border-color: var(--color-btn-primary-hover);
+}
+
+/* Success button (green) */
+.s3-btn.btn-success {
+    background: var(--color-btn-success);
+    border-color: var(--color-btn-success);
+    color: #fff;
+}
+
+.s3-btn.btn-success:hover {
+    background: var(--color-btn-success-hover);
+    border-color: var(--color-btn-success-hover);
 }
 
 /* Save button highlight when dirty */
@@ -2240,8 +2254,8 @@ a.logs-container {
     word-spacing: 0.08em;
     white-space: normal;
     overflow-wrap: break-word;
-    padding: 0.75rem 1rem 0.75rem 7rem;
-    background: linear-gradient(90deg, var(--color-bg-secondary) 6rem, var(--color-bg-primary) 6rem);
+    padding: 0.75rem 1rem;
+    background: var(--color-bg-primary);
     overflow: auto;
 }
 
@@ -2257,7 +2271,7 @@ a.logs-container {
 /* Preview mode margin watermark */
 .s3-preview-margin {
     display: none;
-    width: 3.5rem;
+    width: 5.25rem;
     border-right: 1px solid var(--color-border-primary);
     background: var(--color-bg-secondary);
     flex-shrink: 0;
@@ -2272,8 +2286,7 @@ a.logs-container {
     writing-mode: vertical-rl;
     text-orientation: mixed;
     transform: rotate(180deg);
-    letter-spacing: 0.25em;
-    font-size: 0.75rem;
+    font-size: 4.5rem;
     font-weight: 700;
     color: rgb(148 163 184 / 0.18);
 }

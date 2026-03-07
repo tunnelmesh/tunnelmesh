@@ -18,6 +18,7 @@
     const PAGE_SIZE = 7;
     const DATASHEET_PAGE_SIZE = 50; // Minimum rows per page in datasheet view (actual size adapts to viewport)
     const DEFAULT_COLUMN_WIDTH = 150; // Default column width in pixels
+    const EDITOR_MODE_CLASSES = ['wysiwyg-mode', 'datasheet-mode', 'treeview-mode'];
 
     // =========================================================================
     // State
@@ -1783,6 +1784,7 @@
         // Update UI
         updateEditorUI(state.editorMode);
         updateModeToggleButton();
+        if (state.editorMode === 'source') updateLineNumbers();
     }
 
     /* istanbul ignore next */
@@ -1798,8 +1800,9 @@
         if (!editor || !wysiwyg) return;
 
         // FSM reset: clear all mode classes before applying the active one
-        const EDITOR_MODE_CLASSES = ['wysiwyg-mode', 'datasheet-mode', 'treeview-mode'];
-        if (editorWrap) EDITOR_MODE_CLASSES.forEach(c => editorWrap.classList.remove(c));
+        if (editorWrap) {
+            for (const c of EDITOR_MODE_CLASSES) editorWrap.classList.remove(c);
+        }
 
         if (mode === 'datasheet') {
             editor.style.display = 'none';
