@@ -232,21 +232,14 @@ docker-up: docker-build
 	fi; \
 	echo ""; \
 	echo "=== Run s3bench against this environment ==="; \
-	echo "$(S3BENCH_BIN) run alien_invasion \\"; \
-	echo "    --coordinator http://localhost:8081 \\"; \
-	echo "    --auth-token \"$$TUNNELMESH_TOKEN\" \\"; \
-	echo "    --time-scale 500 \\"; \
-	echo "    --json results.json \\"; \
-	echo "    --accordion"; \
-	read -p "Run s3bench now? [Y/n] " s3answer </dev/tty; \
-	if [ "$$s3answer" != "n" ] && [ "$$s3answer" != "N" ]; then \
-		$(S3BENCH_BIN) run alien_invasion \
-			--coordinator http://localhost:8081 \
-			--auth-token "$$TUNNELMESH_TOKEN" \
-			--time-scale 500 \
-			--json results.json \
-			--accordion; \
-	fi
+	echo "Waiting 30 seconds for environment to stabilize..."; \
+	sleep 30; \
+	$(S3BENCH_BIN) run alien_invasion \
+		--coordinator http://localhost:8081 \
+		--auth-token "$$TUNNELMESH_TOKEN" \
+		--time-scale 500 \
+		--json results.json \
+		--accordion
 
 docker-logs:
 	$(DOCKER_COMPOSE) logs -f

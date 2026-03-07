@@ -61,6 +61,21 @@ describe('processInline', () => {
         expect(result).toContain('bold');
     });
 
+    test('bold does not produce spurious em tags', () => {
+        const result = processInline('**bold**');
+        expect(result).toContain('<strong');
+        expect(result).not.toContain('<em');
+    });
+
+    test('bold and italic coexist correctly', () => {
+        const result = processInline('**bold** and *italic*');
+        expect(result).toContain('<strong');
+        expect(result).toContain('<em');
+        // strong must wrap bold, em must wrap italic — not cross-contaminated
+        expect(result).toMatch(/<strong[^>]*>bold<\/strong>/);
+        expect(result).toMatch(/<em[^>]*>italic<\/em>/);
+    });
+
     test('formats bold text with __', () => {
         const result = processInline('This is __bold__ text');
         expect(result).toContain('<strong');

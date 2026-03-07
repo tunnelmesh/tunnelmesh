@@ -33,6 +33,17 @@
     }
 
     /**
+     * Escape text for use in data-md attributes — escapes HTML entities AND
+     * markdown delimiters (* _ ~) so subsequent inline regex passes don't
+     * corrupt already-processed spans stored in attribute values.
+     * @param {string} text - Raw markdown text
+     * @returns {string}
+     */
+    function escapeAttrMd(text) {
+        return escapeHtml(text).replace(/\*/g, '&#42;').replace(/_/g, '&#95;').replace(/~/g, '&#126;');
+    }
+
+    /**
      * Unescape HTML entities
      * @param {string} text - Text to unescape
      * @returns {string}
@@ -92,40 +103,40 @@
         // Inline code first (prevents formatting inside code)
         // After escaping, markdown backticks are still literal backticks
         result = result.replace(/`([^`]+)`/g, (match, code) => {
-            return `<code data-md="${escapeHtml(match)}">${code}</code>`;
+            return `<code data-md="${escapeAttrMd(match)}">${code}</code>`;
         });
 
         // Images: ![alt](url)
         result = result.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
             const safeUrl = sanitizeUrl(url);
-            return `<img src="${escapeHtml(safeUrl)}" alt="${alt}" data-md="${escapeHtml(match)}" />`;
+            return `<img src="${escapeHtml(safeUrl)}" alt="${alt}" data-md="${escapeAttrMd(match)}" />`;
         });
 
         // Links: [text](url)
         result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
             const safeUrl = sanitizeUrl(url);
-            return `<a href="${escapeHtml(safeUrl)}" data-md="${escapeHtml(match)}">${linkText}</a>`;
+            return `<a href="${escapeHtml(safeUrl)}" data-md="${escapeAttrMd(match)}">${linkText}</a>`;
         });
 
         // Bold: **text** or __text__
         result = result.replace(/\*\*(.+?)\*\*/g, (match, content) => {
-            return `<strong data-md="${escapeHtml(match)}">${content}</strong>`;
+            return `<strong data-md="${escapeAttrMd(match)}">${content}</strong>`;
         });
         result = result.replace(/__(.+?)__/g, (match, content) => {
-            return `<strong data-md="${escapeHtml(match)}">${content}</strong>`;
+            return `<strong data-md="${escapeAttrMd(match)}">${content}</strong>`;
         });
 
         // Italic: *text* or _text_
         result = result.replace(/\*(.+?)\*/g, (match, content) => {
-            return `<em data-md="${escapeHtml(match)}">${content}</em>`;
+            return `<em data-md="${escapeAttrMd(match)}">${content}</em>`;
         });
         result = result.replace(/_(.+?)_/g, (match, content) => {
-            return `<em data-md="${escapeHtml(match)}">${content}</em>`;
+            return `<em data-md="${escapeAttrMd(match)}">${content}</em>`;
         });
 
         // Strikethrough: ~~text~~
         result = result.replace(/~~(.+?)~~/g, (match, content) => {
-            return `<del data-md="${escapeHtml(match)}">${content}</del>`;
+            return `<del data-md="${escapeAttrMd(match)}">${content}</del>`;
         });
 
         return result;
@@ -669,6 +680,7 @@
     // Export for testing
     const _test = {
         escapeHtml,
+        escapeAttrMd,
         unescapeHtml,
         sanitizeUrl,
         processInline,
