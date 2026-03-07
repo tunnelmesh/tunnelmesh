@@ -959,19 +959,21 @@ func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer st
 		targetPeer := string(data[2 : 2+targetLen])
 		packetData := data[2+targetLen:]
 
-		// Rate limit per-source-peer to prevent relay abuse
-		if !pc.rateLimiter.Allow() {
-			log.Warn().Str("peer", sourcePeer).Msg("relay rate limit exceeded")
-			return
-		}
-
-		// Authorization check: target must be a registered peer
+		// Authorization check first (cheap map lookup): target must be a registered peer.
+		// Do this before consuming a rate-limit token to prevent unregistered targets
+		// from exhausting the sender's rate limit budget.
 		s.peersMu.RLock()
 		_, targetRegistered := s.peers[targetPeer]
 		s.peersMu.RUnlock()
 		if !targetRegistered {
 			log.Debug().Str("source", sourcePeer).Str("target", targetPeer).
 				Msg("relay target not registered, dropping packet")
+			return
+		}
+
+		// Rate limit per-source-peer to prevent relay abuse
+		if !pc.rateLimiter.Allow() {
+			log.Warn().Str("peer", sourcePeer).Msg("relay rate limit exceeded")
 			return
 		}
 

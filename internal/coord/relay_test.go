@@ -41,9 +41,10 @@ func connectRelay(t *testing.T, serverURL, peerName, jwtToken string) *websocket
 	// one message arrives. We read that one message to prevent tests from
 	// consuming it accidentally.
 	//
-	// NOTE: gorilla/websocket permanently poisons a connection on any deadline
-	// timeout, so we must not use a loop-drain (it would always timeout on the
-	// final iteration). Read the exact expected count instead.
+	// NOTE: gorilla/websocket permanently poisons a connection's internal readErr
+	// on any deadline timeout, making all subsequent reads fail. A loop-drain
+	// would always timeout on the final iteration and poison the connection.
+	// Reading the exact expected count avoids this.
 	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	_, _, _ = conn.ReadMessage()
 	_ = conn.SetReadDeadline(time.Time{})
