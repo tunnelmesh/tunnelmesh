@@ -10,6 +10,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/tunnelmesh/tunnelmesh)](https://goreportcard.com/report/github.com/tunnelmesh/tunnelmesh)
 [![License](https://img.shields.io/github/license/tunnelmesh/tunnelmesh)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.26.1-00ADD8?logo=go)](go.mod)
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/zombar/3800cae949c8ed0ccaba4df3d551a9b8/raw/tunnelmesh-tests.json)](https://github.com/tunnelmesh/tunnelmesh/actions)
 [![Dependabot](https://img.shields.io/badge/dependabot-enabled-blue?logo=dependabot)](https://github.com/tunnelmesh/tunnelmesh/network/updates)
 [![Dependencies](https://img.shields.io/badge/dependencies-up%20to%20date-brightgreen)](https://github.com/tunnelmesh/tunnelmesh/network/dependencies)
 

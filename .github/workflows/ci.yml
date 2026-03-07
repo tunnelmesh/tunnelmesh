@@ -92,6 +92,19 @@ jobs:
             echo "::error::Coverage $COVERAGE% is below threshold of 40%"
             exit 1
           fi
+      - name: Update test count badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          COUNT=$(go test -short -list '.*' $(go list ./... | grep -v s3bench) 2>/dev/null | grep -c '^Test' || echo 0)
+          echo "Test count: $COUNT"
+          curl -s -X PATCH \
+            -H "Authorization: token $GIST_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"files\":{\"tunnelmesh-tests.json\":{\"content\":\"{\\\"schemaVersion\\\":1,\\\"label\\\":\\\"tests\\\",\\\"message\\\":\\\"$COUNT\\\",\\\"color\\\":\\\"brightgreen\\\"}\"}}}" \
+            "https://api.github.com/gists/$GIST_ID"
 
   lint-frontend:
     name: Frontend Lint
