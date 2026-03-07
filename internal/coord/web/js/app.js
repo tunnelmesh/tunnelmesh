@@ -1,5 +1,5 @@
 // Import constants from TM.utils (loaded via lib/utils.js)
-const { POLL_INTERVAL_MS, SSE_RETRY_DELAY_MS, MAX_SSE_RETRIES, ROWS_PER_PAGE, TOAST_DURATION_MS, TOAST_FADE_MS } =
+const { POLL_INTERVAL_MS, SSE_RETRY_DELAY_MS, MAX_SSE_RETRIES, ROWS_PER_PAGE, TOAST_DURATION_MS, TOAST_FADE_MS, MAX_HISTORY_POINTS } =
     TM.utils.CONSTANTS;
 
 // Import utilities from TM modules
@@ -295,7 +295,7 @@ function updateDashboard(data) {
         history.packetsRx.push(peer.packets_received_rate || 0);
 
         // Trim to max history using slice (O(n) instead of O(n) shift per element)
-        const maxPoints = state.maxHistoryPoints;
+        const maxPoints = MAX_HISTORY_POINTS;
         if (history.throughputTx.length > maxPoints) {
             const excess = history.throughputTx.length - maxPoints;
             history.throughputTx = history.throughputTx.slice(excess);
@@ -2286,11 +2286,16 @@ function initTabs() {
         }
     });
 
-    // Snap visualizer when the browser tab/window returns from being hidden
+    // Snap visualizer and refresh map when the browser tab/window returns from being hidden
     // (browser may have throttled SSE while hidden, queuing heartbeats)
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && state.visualizer) {
-            state.visualizer.skipNextAnimation = true;
+        if (!document.hidden) {
+            if (state.visualizer) {
+                state.visualizer.skipNextAnimation = true;
+            }
+            if (state.nodeMap) {
+                state.nodeMap.refresh();
+            }
         }
     });
 }
@@ -2660,8 +2665,32 @@ async function deleteBinding(name) {
 }
 window.deleteBinding = deleteBinding;
 
-// Cleanup on page unload to prevent memory leaks
-window.addEventListener('beforeunload', cleanup);
+// Use pagehide instead of beforeunload so the page can enter bfcache.
+// Only fully clean up when not entering bfcache (e.persisted === false).
+window.addEventListener('pagehide', (e) => {
+    if (e.persisted) {
+        // Entering bfcache — only close the network connection;
+        // preserve JS objects so they survive restoration
+        if (state.eventSource) {
+            state.eventSource.close();
+            state.eventSource = null;
+        }
+    } else {
+        cleanup();
+    }
+});
+
+// Restore live connection and data when returning from bfcache
+window.addEventListener('pageshow', (e) => {
+    if (e.persisted) {
+        state.peerHistory = {};
+        if (state.visualizer) {
+            state.visualizer.skipNextAnimation = true;
+        }
+        setupSSE();
+        fetchData();
+    }
+});
 
 // =====================
 // S3 Explorer Integration
