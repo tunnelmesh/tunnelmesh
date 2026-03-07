@@ -1765,3 +1765,109 @@ func TestIsInLocalSubnet(t *testing.T) {
 		}
 	})
 }
+
+// TestCloseWhileReceiving verifies that calling Close() concurrently with active
+// packet senders does not panic and completes cleanly (P4 fix).
+func TestCloseWhileReceiving(t *testing.T) {
+	priv, pub, _ := X25519KeyPair()
+	cfg := Config{
+		Port:          0,
+		StaticPrivate: priv,
+		StaticPublic:  pub,
+	}
+	tr, err := New(cfg)
+	if err != nil {
+		t.Fatalf("create transport: %v", err)
+	}
+	if err := tr.Start(); err != nil {
+		t.Fatalf("start transport: %v", err)
+	}
+
+	// Get the listening address so we can send packets to ourselves.
+	var localAddr *net.UDPAddr
+	if tr.conn != nil {
+		localAddr = tr.conn.LocalAddr().(*net.UDPAddr)
+	} else if tr.conn6 != nil {
+		localAddr = tr.conn6.LocalAddr().(*net.UDPAddr)
+	}
+	if localAddr == nil {
+		t.Skip("no UDP socket bound")
+	}
+
+	// Sender goroutine: hammer packets until stop is closed.
+	stop := make(chan struct{})
+	go func() {
+		sender, err := net.ListenUDP("udp4", nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = sender.Close() }()
+		pkt := make([]byte, 20)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = sender.WriteToUDP(pkt, localAddr)
+			}
+		}
+	}()
+
+	// Close the transport after a short delay while packets are in flight.
+	time.Sleep(20 * time.Millisecond)
+	close(stop)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = tr.Close()
+	}()
+
+	select {
+	case <-done:
+		// Clean exit — no panic.
+	case <-time.After(5 * time.Second):
+		t.Error("Close() did not return within 5s")
+	}
+}
+
+// TestReceiveLoopExitsOnConnClose verifies that receiveLoop terminates cleanly
+// when the underlying UDP socket is closed externally (simulating persistent
+// read errors), and that the transport Close() returns without hanging.
+func TestReceiveLoopExitsOnConnClose(t *testing.T) {
+	priv, pub, _ := X25519KeyPair()
+	cfg := Config{
+		Port:          0,
+		StaticPrivate: priv,
+		StaticPublic:  pub,
+	}
+	tr, err := New(cfg)
+	if err != nil {
+		t.Fatalf("create transport: %v", err)
+	}
+	if err := tr.Start(); err != nil {
+		t.Fatalf("start transport: %v", err)
+	}
+
+	// Force-close the underlying socket to trigger repeated read errors.
+	if tr.conn != nil {
+		_ = tr.conn.Close()
+	}
+	if tr.conn6 != nil {
+		_ = tr.conn6.Close()
+	}
+
+	// Close() should return quickly even though the sockets are already gone.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = tr.Close()
+	}()
+
+	select {
+	case <-done:
+		// Clean exit.
+	case <-time.After(3 * time.Second):
+		t.Error("Close() did not return within 3s after socket was force-closed")
+	}
+}

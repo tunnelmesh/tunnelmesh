@@ -96,6 +96,7 @@ type Transport struct {
 
 	// Worker pool for packet processing (avoids per-packet goroutine spawning)
 	packetQueue chan packetWork
+	workerWg    sync.WaitGroup
 
 	// State
 	running atomic.Bool
@@ -107,6 +108,12 @@ type Transport struct {
 	// onDropQueueFull is called when a packet is dropped because the queue is full.
 	// Stored as atomic.Value to allow lock-free reads on the hot receive path.
 	onDropQueueFull atomic.Value // stores func()
+
+	// onHandshakeFailure is called when a UDP handshake fails, with the failure reason.
+	onHandshakeFailure atomic.Value // stores func(reason string)
+
+	// onSessionRejected is called when a new session is discarded because an active session exists.
+	onSessionRejected atomic.Value // stores func()
 }
 
 // Config holds UDP transport configuration.
@@ -173,6 +180,18 @@ type Config struct {
 // goroutine, including after Start(), without lock contention on the hot receive path.
 func (t *Transport) SetOnDropQueueFull(fn func()) {
 	t.onDropQueueFull.Store(fn)
+}
+
+// SetOnHandshakeFailure sets a callback invoked on each UDP handshake failure,
+// receiving the failure reason as a string (e.g., "initiation", "response", "unknown_peer").
+func (t *Transport) SetOnHandshakeFailure(fn func(reason string)) {
+	t.onHandshakeFailure.Store(fn)
+}
+
+// SetOnSessionRejected sets a callback invoked when a new session is discarded
+// because an existing active session for the same peer is still valid.
+func (t *Transport) SetOnSessionRejected(fn func()) {
+	t.onSessionRejected.Store(fn)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -424,8 +443,9 @@ func (t *Transport) Start() error {
 
 	// Initialize worker pool for packet processing
 	t.packetQueue = make(chan packetWork, PacketQueueSize)
-	numWorkers := runtime.NumCPU()
+	numWorkers := max(runtime.NumCPU(), 2)
 	for i := 0; i < numWorkers; i++ {
+		t.workerWg.Add(1)
 		go t.packetWorker()
 	}
 	log.Debug().Int("workers", numWorkers).Int("queue_size", PacketQueueSize).Msg("UDP packet worker pool started")
@@ -499,15 +519,23 @@ func (t *Transport) startPortMapper() error {
 // receiveLoop processes incoming UDP packets from the given connection.
 func (t *Transport) receiveLoop(conn *net.UDPConn) {
 	buf := make([]byte, 2000) // Larger than MTU
+	consecutiveErrors := 0
 
 	for t.running.Load() {
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if t.running.Load() {
-				log.Debug().Err(err).Msg("UDP read error")
+				consecutiveErrors++
+				if consecutiveErrors >= 5 {
+					log.Warn().Err(err).Int("consecutive", consecutiveErrors).Msg("persistent UDP read errors")
+					time.Sleep(100 * time.Millisecond)
+				} else {
+					log.Debug().Err(err).Msg("UDP read error")
+				}
 			}
 			continue
 		}
+		consecutiveErrors = 0
 
 		// Minimum 1 byte needed to check packet type
 		// Individual handlers validate their specific size requirements
@@ -537,6 +565,7 @@ func (t *Transport) receiveLoop(conn *net.UDPConn) {
 // Multiple workers run concurrently to handle packets.
 // Each iteration has panic recovery so a single malformed packet cannot crash the worker.
 func (t *Transport) packetWorker() {
+	defer t.workerWg.Done()
 	for work := range t.packetQueue {
 		func() {
 			defer func() {
@@ -850,6 +879,9 @@ func (t *Transport) handleHandshakeInit(data []byte, remoteAddr *net.UDPAddr, co
 
 	if err := hs.ConsumeInitiation(data); err != nil {
 		log.Debug().Err(err).Msg("failed to consume initiation")
+		if fn, ok := t.onHandshakeFailure.Load().(func(string)); ok {
+			fn("initiation")
+		}
 		return
 	}
 
@@ -866,6 +898,9 @@ func (t *Transport) handleHandshakeInit(data []byte, remoteAddr *net.UDPAddr, co
 			Hex("peer_pubkey", peerPubKey[:8]).
 			Str("remote", remoteAddr.String()).
 			Msg("unknown peer public key, rejecting connection")
+		if fn, ok := t.onHandshakeFailure.Load().(func(string)); ok {
+			fn("unknown_peer")
+		}
 		return
 	}
 
@@ -1516,7 +1551,9 @@ func (t *Transport) holePunch(ctx context.Context, peerName string, peerAddr *ne
 	// Send hole-punch packets
 	for i := 0; i < t.config.HolePunchRetries; i++ {
 		// Send a small packet to punch the hole
-		_, _ = conn.WriteToUDP([]byte{0}, peerAddr)
+		if _, err := conn.WriteToUDP([]byte{0}, peerAddr); err != nil {
+			log.Debug().Err(err).Str("peer", peerName).Msg("hole-punch packet failed")
+		}
 		time.Sleep(100 * time.Millisecond)
 
 		select {
@@ -1651,10 +1688,20 @@ func (t *Transport) Close() error {
 		_ = t.portMapper.Stop()
 	}
 
-	// Close packet queue to signal workers to exit
+	// Close UDP sockets first so receiveLoop returns an error and exits,
+	// preventing any new sends to packetQueue after it is closed (P0 fix).
+	if t.conn != nil {
+		_ = t.conn.Close()
+	}
+	if t.conn6 != nil {
+		_ = t.conn6.Close()
+	}
+
+	// Close packet queue to signal workers to exit, then wait for them.
 	if t.packetQueue != nil {
 		close(t.packetQueue)
 	}
+	t.workerWg.Wait()
 
 	t.mu.Lock()
 	for _, s := range t.sessions {
@@ -1663,13 +1710,6 @@ func (t *Transport) Close() error {
 	t.sessions = make(map[uint32]*Session)
 	t.peerSessions = make(map[string]*Session)
 	t.mu.Unlock()
-
-	if t.conn != nil {
-		_ = t.conn.Close()
-	}
-	if t.conn6 != nil {
-		_ = t.conn6.Close()
-	}
 
 	return nil
 }
@@ -1735,6 +1775,9 @@ func (t *Transport) registerSession(session *Session) bool {
 		t.mu.Unlock()
 		// Close the new session since we're keeping the old one
 		_ = session.Close()
+		if fn, ok := t.onSessionRejected.Load().(func()); ok {
+			fn()
+		}
 		return false
 	}
 

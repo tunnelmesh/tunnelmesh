@@ -359,6 +359,9 @@ func (c *PeerConfig) Validate() error {
 		if d <= 0 {
 			return fmt.Errorf("heartbeat_interval must be positive, got %q", c.HeartbeatInterval)
 		}
+		if d > 24*time.Hour {
+			return fmt.Errorf("heartbeat_interval too large (max 24h), got %q", c.HeartbeatInterval)
+		}
 	}
 	// Validate geolocation if any coordinate is set
 	if c.Geolocation.Latitude != 0 || c.Geolocation.Longitude != 0 {

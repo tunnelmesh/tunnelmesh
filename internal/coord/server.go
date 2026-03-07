@@ -3,6 +3,7 @@ package coord
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
@@ -1744,7 +1745,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		if parts[1] != s.cfg.AuthToken {
+		if !hmac.Equal([]byte(parts[1]), []byte(s.cfg.AuthToken)) {
 			s.jsonError(w, "invalid token", http.StatusUnauthorized)
 			return
 		}

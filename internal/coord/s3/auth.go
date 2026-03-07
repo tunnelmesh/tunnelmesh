@@ -245,18 +245,3 @@ func verifySimpleSignature(accessKey, secretKey, signature string) bool {
 	// Compare (note: real impl should use constant-time compare)
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
-
-// AllowAllAuthorizer is a test authorizer that allows all requests.
-type AllowAllAuthorizer struct {
-	UserID string
-}
-
-// AuthorizeRequest always allows the request.
-func (a *AllowAllAuthorizer) AuthorizeRequest(r *http.Request, verb, resource, bucket, objectKey string) (string, error) {
-	return a.UserID, nil
-}
-
-// GetAllowedPrefixes returns nil (unrestricted) since this authorizer allows everything.
-func (a *AllowAllAuthorizer) GetAllowedPrefixes(userID, bucket string) []string {
-	return nil
-}
