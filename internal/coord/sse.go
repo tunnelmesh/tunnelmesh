@@ -49,17 +49,24 @@ func (h *sseHub) unregister(client *sseClient) {
 }
 
 // broadcast sends an event to all connected clients.
+// If a client's buffer is full (slow consumer), it is disconnected.
 func (h *sseHub) broadcast(event string) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
+	var slowClients []*sseClient
 	for client := range h.clients {
 		select {
 		case client.events <- event:
 		default:
-			// Client buffer full, skip
-			log.Debug().Msg("SSE client buffer full, skipping event")
+			// Client buffer full — mark for disconnection.
+			slowClients = append(slowClients, client)
 		}
+	}
+	h.mu.RUnlock()
+
+	// Disconnect slow clients outside the read lock to avoid lock inversion.
+	for _, client := range slowClients {
+		log.Warn().Msg("SSE client too slow, disconnecting")
+		h.unregister(client)
 	}
 }
 

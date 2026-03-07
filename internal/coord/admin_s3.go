@@ -18,6 +18,10 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 )
 
+// maxJSONReqSize is the maximum allowed size for JSON request bodies (1 MiB).
+// Enforced via http.MaxBytesReader to prevent OOM from oversized bodies.
+const maxJSONReqSize = 1 << 20 // 1 MiB
+
 // S3ObjectInfo represents an S3 object for the explorer API.
 type S3ObjectInfo struct {
 	Key          string    `json:"key"`
@@ -123,7 +127,11 @@ func (s *Server) handleS3GC(w http.ResponseWriter, r *http.Request) {
 		BucketsOnly bool `json:"buckets_only,omitempty"`
 	}
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		r.Body = http.MaxBytesReader(w, r.Body, maxJSONReqSize)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			s.jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// BucketsOnly fast path: force-delete named fs+ buckets without acquiring gcMu.
@@ -501,6 +509,7 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 		QuotaBytes        int64  `json:"quota_bytes"`        // Optional per-bucket quota in bytes; 0 = unlimited
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONReqSize)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -633,6 +642,7 @@ func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, buck
 		QuotaBytes        *int64 `json:"quota_bytes,omitempty"` // nil = no change, 0 = remove limit
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONReqSize)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.jsonError(w, "invalid request body", http.StatusBadRequest)
 		return

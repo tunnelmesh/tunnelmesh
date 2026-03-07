@@ -2,6 +2,7 @@ package routing
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -862,4 +863,51 @@ func BenchmarkPacketFilter_ShouldDrop_NoMatch(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		f.ShouldDrop(packet)
 	}
+}
+
+// TestTemporaryRuleTTLExpiry_RaceFree verifies that an expired temporary rule is
+// no longer enforced, and that concurrent packet checks alongside concurrent rule
+// writes do not produce data races. Run with -race for full validation.
+func TestTemporaryRuleTTLExpiry_RaceFree(t *testing.T) {
+	f := NewPacketFilter(true) // default deny
+
+	// Add a rule that is already past its expiry (Expires is a Unix second timestamp;
+	// setting it 2 seconds in the past guarantees IsExpired() returns true immediately).
+	f.AddTemporaryRule(FilterRule{
+		Port:     9999,
+		Protocol: ProtoTCP,
+		Action:   ActionAllow,
+		Expires:  time.Now().Add(-2 * time.Second).Unix(), // already expired
+	})
+
+	src := net.ParseIP("10.0.0.1")
+	dst := net.ParseIP("10.0.0.2")
+	packet := buildTCPPacket(src, dst, 9999)
+
+	// The rule is expired — default-deny should drop the packet.
+	if !f.ShouldDrop(packet) {
+		t.Error("expired temporary rule should no longer allow packet; default deny should apply")
+	}
+
+	// Concurrent readers + concurrent writes to verify no data races.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				f.ShouldDrop(packet)
+			}
+		}()
+	}
+	// Concurrent writes (adding and removing rules) while readers are active
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 50; j++ {
+			f.AddTemporaryRule(FilterRule{Port: 8888, Protocol: ProtoTCP, Action: ActionAllow})
+			f.RemoveTemporaryRule(8888, ProtoTCP)
+		}
+	}()
+	wg.Wait()
 }

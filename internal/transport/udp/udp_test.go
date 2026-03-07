@@ -1871,3 +1871,71 @@ func TestReceiveLoopExitsOnConnClose(t *testing.T) {
 		t.Error("Close() did not return within 3s after socket was force-closed")
 	}
 }
+
+// =============================================================================
+// Nonce uniqueness and counter boundary tests
+// =============================================================================
+
+// TestCounterToNonce_MaxValue verifies that the maximum uint64 counter value
+// produces a distinct, valid nonce and does not overflow the nonce array.
+func TestCounterToNonce_MaxValue(t *testing.T) {
+	const maxCounter = ^uint64(0) // 2^64-1
+
+	nonce := counterToNonce(maxCounter)
+	expected := [NonceSize]byte{0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	if nonce != expected {
+		t.Errorf("max counter nonce: expected %x, got %x", expected, nonce)
+	}
+
+	// Max counter nonce must differ from counter 0 nonce
+	zero := counterToNonce(0)
+	if nonce == zero {
+		t.Error("max counter nonce must differ from zero nonce")
+	}
+}
+
+// TestNonceUniqueness verifies that every counter value in a range produces a
+// distinct nonce — a necessary condition for nonce non-repetition.
+func TestNonceUniqueness(t *testing.T) {
+	seen := make(map[[NonceSize]byte]uint64, 1000)
+	for i := uint64(0); i < 1000; i++ {
+		n := counterToNonce(i)
+		if prev, dup := seen[n]; dup {
+			t.Fatalf("nonce collision: counter %d and %d produced the same nonce %x", prev, i, n)
+		}
+		seen[n] = i
+	}
+}
+
+// TestReplayWindow_WindowBoundary tests the exact boundary conditions of the
+// replay window: the packet at the edge of the window, one inside, one outside.
+func TestReplayWindow_WindowBoundary(t *testing.T) {
+	const windowSize = 64
+	w := NewReplayWindow(windowSize)
+
+	// Advance the window to counter 100
+	for i := uint64(1); i <= 100; i++ {
+		if !w.Check(i) {
+			t.Fatalf("packet %d should be accepted during setup", i)
+		}
+	}
+
+	// Counter 100 - windowSize + 1 = 37 is the oldest valid in-window counter.
+	oldest := uint64(100 - windowSize + 1)
+
+	// The oldest in-window counter was already seen — replay must be rejected.
+	if w.Check(oldest) {
+		t.Errorf("replay of oldest in-window counter %d should be rejected", oldest)
+	}
+
+	// One step before the window (oldest - 1) must be rejected as too old.
+	if w.Check(oldest - 1) {
+		t.Errorf("counter before window edge (%d) should be rejected as too old", oldest-1)
+	}
+
+	// A future counter beyond the window advances it and must be accepted.
+	future := uint64(200)
+	if !w.Check(future) {
+		t.Errorf("future counter %d should be accepted", future)
+	}
+}

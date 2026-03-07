@@ -1,7 +1,6 @@
 package coord
 
 import (
-	"crypto/tls"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -97,9 +96,9 @@ func (s *Server) forwardToMonitoringCoordinator(w http.ResponseWriter, r *http.R
 			req.Host = targetIP
 			req.Header.Set("X-TunnelMesh-Forwarded", "true")
 		},
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // mesh-internal traffic
-		},
+		// Use shared transport to reuse connections and avoid goroutine leaks.
+		// Initialized in NewServer; falls back to default transport if nil (e.g. bare test structs).
+		Transport: s.monitoringTransport,
 	}
 	proxy.ServeHTTP(w, r)
 }
