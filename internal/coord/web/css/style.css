@@ -505,6 +505,25 @@ main {
     background: var(--color-btn-primary-hover);
 }
 
+.btn-success, .btn.btn-success {
+    background: #1a7f3c;
+    color: #fff;
+    border: 1px solid #1a7f3c;
+    border-radius: var(--btn-border-radius);
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    transition: background 0.2s;
+}
+
+.btn-success:hover:not(:disabled) {
+    background: #238f45;
+}
+
 .btn-primary:disabled {
     background: var(--color-bg-tertiary);
     border-color: var(--color-border-primary);
@@ -2233,6 +2252,34 @@ a.logs-container {
 /* Hide line numbers in WYSIWYG mode */
 .s3-editor-wrap.wysiwyg-mode .s3-line-numbers {
     display: none;
+}
+
+/* Preview mode margin watermark */
+.s3-preview-margin {
+    display: none;
+    width: 3.5rem;
+    border-right: 1px solid var(--color-border-primary);
+    background: var(--color-bg-secondary);
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    user-select: none;
+}
+
+.s3-preview-margin::after {
+    content: 'PREVIEW';
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
+    letter-spacing: 0.25em;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: rgb(148 163 184 / 0.18);
+}
+
+.s3-editor-wrap.wysiwyg-mode .s3-preview-margin {
+    display: flex;
 }
 
 /* Markdown headings - futuristic spacing */

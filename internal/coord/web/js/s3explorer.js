@@ -1797,13 +1797,16 @@
 
         if (!editor || !wysiwyg) return;
 
+        // FSM reset: clear all mode classes before applying the active one
+        const EDITOR_MODE_CLASSES = ['wysiwyg-mode', 'datasheet-mode', 'treeview-mode'];
+        if (editorWrap) EDITOR_MODE_CLASSES.forEach(c => editorWrap.classList.remove(c));
+
         if (mode === 'datasheet') {
             editor.style.display = 'none';
             wysiwyg.style.display = 'none';
             if (treeview) treeview.style.display = 'none';
             if (datasheet) datasheet.style.display = 'flex';
             if (editorWrap) editorWrap.classList.add('datasheet-mode');
-            if (editorWrap) editorWrap.classList.remove('treeview-mode');
             // Hide save and autosave in datasheet mode (view-only)
             if (saveBtn) saveBtn.style.display = 'none';
             if (autosaveLabel) autosaveLabel.style.display = 'none';
@@ -1813,7 +1816,6 @@
             if (datasheet) datasheet.style.display = 'none';
             if (treeview) treeview.style.display = 'block';
             if (editorWrap) editorWrap.classList.add('treeview-mode');
-            if (editorWrap) editorWrap.classList.remove('datasheet-mode');
             // Hide save and autosave in tree view mode (view-only)
             if (saveBtn) saveBtn.style.display = 'none';
             if (autosaveLabel) autosaveLabel.style.display = 'none';
@@ -1823,8 +1825,6 @@
             if (datasheet) datasheet.style.display = 'none';
             if (treeview) treeview.style.display = 'none';
             if (editorWrap) editorWrap.classList.add('wysiwyg-mode');
-            if (editorWrap) editorWrap.classList.remove('datasheet-mode');
-            if (editorWrap) editorWrap.classList.remove('treeview-mode');
             // Hide save and autosave in preview mode (read-only)
             if (saveBtn) saveBtn.style.display = 'none';
             if (autosaveLabel) autosaveLabel.style.display = 'none';
@@ -1833,9 +1833,7 @@
             wysiwyg.style.display = 'none';
             if (datasheet) datasheet.style.display = 'none';
             if (treeview) treeview.style.display = 'none';
-            if (editorWrap) editorWrap.classList.remove('wysiwyg-mode');
-            if (editorWrap) editorWrap.classList.remove('datasheet-mode');
-            if (editorWrap) editorWrap.classList.remove('treeview-mode');
+            // All mode classes already cleared by FSM reset above
             // Show save and autosave in source mode (unless read-only)
             if (saveBtn && !state.writable) {
                 saveBtn.style.display = 'none';
@@ -1893,13 +1891,17 @@
         else if (ext === 'md') {
             btn.style.display = 'inline-flex'; // Make sure button is visible
             if (state.editorMode === 'wysiwyg') {
-                // Currently in preview mode, show "Source" button with edit icon
+                // Currently in preview mode — show green "Edit" button
                 btn.title = 'Switch to source mode';
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-success');
                 btn.innerHTML =
-                    '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M14.06 9l.94.94L5.92 19H5v-.92L14.06 9m3.6-6c-.25 0-.51.1-.7.29l-1.83 1.83 3.75 3.75 1.83-1.83c.39-.39.39-1.04 0-1.41l-2.34-2.34c-.2-.2-.45-.29-.71-.29zm-3.6 3.19L3 17.25V21h3.75L17.81 9.94l-3.75-3.75z"/></svg><span id="s3-mode-label">Source</span>';
+                    '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M14.06 9l.94.94L5.92 19H5v-.92L14.06 9m3.6-6c-.25 0-.51.1-.7.29l-1.83 1.83 3.75 3.75 1.83-1.83c.39-.39.39-1.04 0-1.41l-2.34-2.34c-.2-.2-.45-.29-.71-.29zm-3.6 3.19L3 17.25V21h3.75L17.81 9.94l-3.75-3.75z"/></svg><span id="s3-mode-label">Edit</span>';
             } else {
-                // Currently in source mode, show "Preview" button with magnifying glass icon
+                // Currently in source mode — show blue "Preview" button
                 btn.title = 'Switch to preview mode';
+                btn.classList.remove('btn-success');
+                btn.classList.add('btn-primary');
                 btn.innerHTML =
                     '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg><span id="s3-mode-label">Preview</span>';
             }
