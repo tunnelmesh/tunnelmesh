@@ -34,14 +34,18 @@ func connectRelay(t *testing.T, serverURL, peerName, jwtToken string) *websocket
 	conn, _, err := dialer.Dial(wsURL, headers)
 	require.NoError(t, err, "failed to connect to relay")
 
-	// Drain the automatic service port notification message (sent because S3 is always enabled)
-	// This prevents tests from reading it when they expect other messages
+	// Drain exactly the startup messages sent immediately on connect.
+	// getServicePorts() unconditionally returns [443, 9000, ...], so one
+	// MsgTypeServicePortNotify is always sent. Filter rules are only sent when
+	// cfg.Filter.Rules is non-empty — newTestConfig leaves it empty, so exactly
+	// one message arrives. We read that one message to prevent tests from
+	// consuming it accidentally.
+	//
+	// NOTE: gorilla/websocket permanently poisons a connection on any deadline
+	// timeout, so we must not use a loop-drain (it would always timeout on the
+	// final iteration). Read the exact expected count instead.
 	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	_, data, err := conn.ReadMessage()
-	// Ignore read errors - the notification might not arrive immediately
-	_ = err
-	_ = data // May or may not receive service port notification (0x33)
-	// Reset deadline for test use
+	_, _, _ = conn.ReadMessage()
 	_ = conn.SetReadDeadline(time.Time{})
 
 	return conn
