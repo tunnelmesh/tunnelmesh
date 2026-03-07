@@ -231,22 +231,19 @@ docker-up: docker-build
 		fi; \
 	fi; \
 	echo ""; \
-	echo "Run 'make docker-s3bench' to run s3bench against this environment"
-
-docker-s3bench:
-	@if [ -z "$(TUNNELMESH_TOKEN)" ]; then \
-		echo "Error: TUNNELMESH_TOKEN not set. Run 'make docker-up' first or export TUNNELMESH_TOKEN."; \
-		exit 1; \
+	echo "=== Run s3bench against this environment ==="; \
+	if [ "$${S3BENCH:-1}" = "0" ]; then \
+		echo "Skipping s3bench (S3BENCH=0)"; \
+	else \
+		echo "Waiting 30 seconds for environment to stabilize... (skip with S3BENCH=0 make docker-up)"; \
+		sleep 30; \
+		$(S3BENCH_BIN) run alien_invasion \
+			--coordinator http://localhost:8081 \
+			--auth-token "$$TUNNELMESH_TOKEN" \
+			--time-scale 500 \
+			--json results.json \
+			--accordion || true; \
 	fi
-	@echo "=== Run s3bench against this environment ==="; \
-	echo "Waiting 30 seconds for environment to stabilize..."; \
-	sleep 30; \
-	$(S3BENCH_BIN) run alien_invasion \
-		--coordinator http://localhost:8081 \
-		--auth-token "$(TUNNELMESH_TOKEN)" \
-		--time-scale 500 \
-		--json results.json \
-		--accordion
 
 docker-logs:
 	$(DOCKER_COMPOSE) logs -f
