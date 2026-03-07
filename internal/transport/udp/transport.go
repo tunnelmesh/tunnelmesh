@@ -31,6 +31,9 @@ import (
 // When the queue is full, packets are dropped rather than spawning unbounded goroutines.
 const PacketQueueSize = 1024
 
+// maxPendingHandshakes limits the number of concurrent in-flight handshakes to prevent OOM.
+const maxPendingHandshakes = 512
+
 // packetWork represents a packet to be processed by a worker.
 type packetWork struct {
 	data       []byte
@@ -1324,6 +1327,10 @@ func (t *Transport) initiateHandshake(ctx context.Context, peerName string, peer
 	localIndex := hs.LocalIndex()
 
 	t.mu.Lock()
+	if len(t.pendingHandshakes) >= maxPendingHandshakes {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("too many pending handshakes")
+	}
 	t.pendingHandshakes[localIndex] = respChan
 	t.pendingOutboundPeers[peerName] = localIndex // Update with real index
 	t.mu.Unlock()

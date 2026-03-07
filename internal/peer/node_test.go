@@ -492,7 +492,7 @@ func TestSetupRelayHandlers_ErrUnauthorized_TriggersReregistration(t *testing.T)
 
 	// Create relay with an expired token pointing at the mock server
 	relay := tunnel.NewPersistentRelay(srv.URL, "expired-token")
-	node.setupRelayHandlers(relay)
+	node.setupRelayHandlers(context.Background(), relay)
 
 	// Connect: server accepts then closes → autoReconnect fires
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -35,7 +35,15 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/internal/tracing"
 	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
+	"golang.org/x/time/rate"
 )
+
+// regLimiterEntry tracks a per-IP registration rate limiter with its last-used time
+// for periodic cleanup to prevent unbounded memory growth.
+type regLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastUsed atomic.Int64 // unix nanoseconds, updated on each use
+}
 
 // peerInfo wraps a peer with stats and metadata for admin UI.
 type peerInfo struct {
@@ -131,6 +139,8 @@ type Server struct {
 	gcMeshTransport *http.Transport // underlying transport; TLS config set later by SetMeshTLS
 	gcForwardClient *http.Client    // shared TLS client for S3 GC forwarding (10 min timeout)
 	shareGCClient   *http.Client    // shared TLS client for share GC across coordinators (30 s timeout)
+	// Per-IP registration rate limiters (keyed by IP string, value *regLimiterEntry)
+	registrationLimiter sync.Map
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -759,6 +769,32 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// StartRegistrationLimiterSweep starts a background goroutine that prunes stale
+// per-IP rate limiter entries to prevent unbounded sync.Map growth.
+// Entries not used within the last 10 minutes are removed.
+func (s *Server) StartRegistrationLimiterSweep(ctx context.Context) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-10 * time.Minute).UnixNano()
+				s.registrationLimiter.Range(func(k, v any) bool {
+					if v.(*regLimiterEntry).lastUsed.Load() < cutoff {
+						s.registrationLimiter.Delete(k)
+					}
+					return true
+				})
+			}
+		}
+	}()
 }
 
 // StartPeriodicSave starts a goroutine that periodically saves stats history.
@@ -1780,6 +1816,26 @@ func isReservedPeerName(name string) bool {
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Per-IP registration rate limiting (10 reg/s sustained, burst 20)
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if clientIP == "" {
+		clientIP = r.RemoteAddr
+	}
+	var entry *regLimiterEntry
+	if v, ok := s.registrationLimiter.Load(clientIP); ok {
+		entry = v.(*regLimiterEntry)
+	} else {
+		newEntry := &regLimiterEntry{limiter: rate.NewLimiter(rate.Limit(10), 20)}
+		newEntry.lastUsed.Store(time.Now().UnixNano())
+		v, _ := s.registrationLimiter.LoadOrStore(clientIP, newEntry)
+		entry = v.(*regLimiterEntry)
+	}
+	entry.lastUsed.Store(time.Now().UnixNano())
+	if !entry.limiter.Allow() {
+		s.jsonError(w, "registration rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 

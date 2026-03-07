@@ -94,7 +94,7 @@ func TestMeshNode_HandleIPChange(t *testing.T) {
 	// Handle IP change - should close tunnels and trigger discovery
 	newPublic := []string{"5.6.7.8"}
 	newPrivate := []string{"10.0.0.1"}
-	node.HandleIPChange(newPublic, newPrivate, true)
+	node.HandleIPChange(context.Background(), newPublic, newPrivate, true)
 
 	// Tunnels should be closed
 	assert.Empty(t, node.TunnelMgr().List())

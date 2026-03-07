@@ -2,8 +2,10 @@ package udp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -1705,6 +1707,33 @@ func TestPingPongRoundtrip(t *testing.T) {
 	// Just verify it's a reasonable value (less than 1 second for a local test)
 	if rtt > time.Second {
 		t.Errorf("RTT too large: %v", rtt)
+	}
+}
+
+// TestInitiateHandshake_MaxPendingHandshakes verifies that initiateHandshake
+// returns an error when the pending handshakes map is at capacity.
+func TestInitiateHandshake_MaxPendingHandshakes(t *testing.T) {
+	tr, conn := newHandshakeTestTransport(t)
+
+	// Fill pendingHandshakes to the limit with dummy entries
+	tr.mu.Lock()
+	for i := uint32(0); i < maxPendingHandshakes; i++ {
+		tr.pendingHandshakes[i] = make(chan handshakeResponse, 1)
+	}
+	tr.mu.Unlock()
+
+	_, peerPub, err := X25519KeyPair()
+	if err != nil {
+		t.Fatalf("X25519KeyPair: %v", err)
+	}
+	peerAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59996}
+
+	_, err = tr.initiateHandshake(context.Background(), "test-peer", peerPub, peerAddr, conn)
+	if err == nil {
+		t.Fatal("expected error when pending handshakes are full, got nil")
+	}
+	if !strings.Contains(err.Error(), "too many pending handshakes") {
+		t.Errorf("expected 'too many pending handshakes' error, got: %v", err)
 	}
 }
 

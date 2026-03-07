@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/tunnelmesh/tunnelmesh/pkg/proto"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
+	"golang.org/x/time/rate"
 )
 
 // relayPacketPool pools relay packet buffers to reduce GC pressure.
@@ -43,12 +45,13 @@ type relayConn struct {
 
 // persistentConn represents a peer's persistent relay connection (DERP-like).
 type persistentConn struct {
-	peerName  string
-	conn      *websocket.Conn
-	writeChan chan []byte   // buffered channel for async writes
-	closeChan chan struct{} // signals writer goroutine to stop
-	closed    bool
-	closeMu   sync.Mutex
+	peerName    string
+	conn        *websocket.Conn
+	writeChan   chan []byte   // buffered channel for async writes
+	closeChan   chan struct{} // signals writer goroutine to stop
+	closed      bool
+	closeMu     sync.Mutex
+	rateLimiter *rate.Limiter // per-peer relay packet rate limiter
 }
 
 // relayManager handles relay connections between peers.
@@ -62,6 +65,9 @@ type relayManager struct {
 	apiRequestsMu sync.Mutex
 	nextReqID     uint32
 }
+
+// maxPendingAPIRequests limits the number of concurrent pending relay API requests to prevent OOM.
+const maxPendingAPIRequests = 256
 
 // Persistent relay message types
 const (
@@ -93,7 +99,13 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  16384,
 	WriteBufferSize: 16384,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for relay connections
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // Native peer clients don't send Origin
+		}
+		// Browser clients: allow same host only
+		u, err := url.Parse(origin)
+		return err == nil && u.Host == r.Host
 	},
 }
 
@@ -119,6 +131,10 @@ func (r *relayManager) QueryFilterRules(ctx context.Context, peerName string, ti
 
 	// Allocate request ID and response channel (reuse apiRequests map)
 	r.apiRequestsMu.Lock()
+	if len(r.apiRequests) >= maxPendingAPIRequests {
+		r.apiRequestsMu.Unlock()
+		return nil, fmt.Errorf("too many pending relay API requests")
+	}
 	reqID := r.nextReqID
 	r.nextReqID++
 	respChan := make(chan []byte, 1)
@@ -208,10 +224,11 @@ func (r *relayManager) RegisterPersistent(peerName string, conn *websocket.Conn)
 	}
 
 	pc := &persistentConn{
-		peerName:  peerName,
-		conn:      conn,
-		writeChan: make(chan []byte, 128), // Buffered channel to prevent blocking
-		closeChan: make(chan struct{}),
+		peerName:    peerName,
+		conn:        conn,
+		writeChan:   make(chan []byte, 128), // Buffered channel to prevent blocking
+		closeChan:   make(chan struct{}),
+		rateLimiter: rate.NewLimiter(rate.Limit(1000), 2000), // 1000 pkt/s, burst 2000
 	}
 	r.persistent[peerName] = pc
 
@@ -810,13 +827,13 @@ func (s *Server) handlePersistentRelay(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		s.handlePersistentRelayMessage(r.Context(), peerName, data)
+		s.handlePersistentRelayMessage(r.Context(), peerName, data, pc)
 	}
 }
 
 // handlePersistentRelayMessage processes a message from a persistent relay connection.
 // nolint:gocyclo // Relay message handler processes multiple message types
-func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer string, data []byte) {
+func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer string, data []byte, pc *persistentConn) {
 	if len(data) < 1 {
 		log.Debug().Str("peer", sourcePeer).Msg("persistent relay message too short")
 		return
@@ -941,6 +958,24 @@ func (s *Server) handlePersistentRelayMessage(ctx context.Context, sourcePeer st
 		}
 		targetPeer := string(data[2 : 2+targetLen])
 		packetData := data[2+targetLen:]
+
+		// Authorization check first (cheap map lookup): target must be a registered peer.
+		// Do this before consuming a rate-limit token to prevent unregistered targets
+		// from exhausting the sender's rate limit budget.
+		s.peersMu.RLock()
+		_, targetRegistered := s.peers[targetPeer]
+		s.peersMu.RUnlock()
+		if !targetRegistered {
+			log.Debug().Str("source", sourcePeer).Str("target", targetPeer).
+				Msg("relay target not registered, dropping packet")
+			return
+		}
+
+		// Rate limit per-source-peer to prevent relay abuse
+		if !pc.rateLimiter.Allow() {
+			log.Warn().Str("peer", sourcePeer).Msg("relay rate limit exceeded")
+			return
+		}
 
 		// Route to target peer
 		targetConn, ok := s.relay.GetPersistent(targetPeer)

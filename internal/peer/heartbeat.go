@@ -53,7 +53,7 @@ func (m *MeshNode) PerformHeartbeat(ctx context.Context) {
 				Strs("new_private", privateIPs).
 				Msg("IP addresses changed, re-registering...")
 
-			m.HandleIPChange(publicIPs, privateIPs, behindNAT)
+			m.HandleIPChange(ctx, publicIPs, privateIPs, behindNAT)
 
 			// Re-register with server (pass nil location to retain existing)
 			hasMonitoring := m.identity.Config.Coordinator.Enabled &&
@@ -90,7 +90,7 @@ func (m *MeshNode) PerformHeartbeat(ctx context.Context) {
 
 // HandleIPChange handles an IP address change by closing stale connections
 // and triggering discovery.
-func (m *MeshNode) HandleIPChange(publicIPs, privateIPs []string, behindNAT bool) {
+func (m *MeshNode) HandleIPChange(ctx context.Context, publicIPs, privateIPs []string, behindNAT bool) {
 	// Clear cached network state in transports (e.g., STUN-discovered addresses)
 	if m.TransportRegistry != nil {
 		m.TransportRegistry.ClearNetworkState()
@@ -115,12 +115,12 @@ func (m *MeshNode) HandleIPChange(publicIPs, privateIPs []string, behindNAT bool
 	// Re-register UDP endpoint with new external address (non-blocking)
 	// This ensures peers can reach us at our new address before discovery completes
 	if m.TransportRegistry != nil {
-		go m.TransportRegistry.RefreshEndpoints(context.Background(), m.identity.Name)
+		go m.TransportRegistry.RefreshEndpoints(ctx, m.identity.Name)
 	}
 
 	// Reconnect persistent relay (non-blocking)
 	if m.PersistentRelay != nil {
-		go m.ReconnectPersistentRelay(context.Background())
+		go m.ReconnectPersistentRelay(ctx)
 	}
 
 	// Trigger discovery
