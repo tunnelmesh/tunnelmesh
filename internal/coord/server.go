@@ -142,7 +142,9 @@ type Server struct {
 	shareGCClient       *http.Client    // shared TLS client for share GC across coordinators (30 s timeout)
 	monitoringTransport *http.Transport // shared transport for monitoring proxy forwarding (reuses connections)
 	// Per-IP registration rate limiters (keyed by IP string, value *regLimiterEntry)
-	registrationLimiter sync.Map
+	registrationLimiter      sync.Map
+	registrationLimiterCount atomic.Int64 // O(1) size estimate; decremented by sweep
+	sweepInFlight            atomic.Bool  // true while an emergency sweep goroutine is running
 }
 
 // coordIPSet holds both the original and sorted coordinator IP lists as a single
@@ -714,6 +716,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// Release idle keep-alive connections held by the monitoring proxy transport.
+	if s.monitoringTransport != nil {
+		s.monitoringTransport.CloseIdleConnections()
+	}
+
 	// Save DNS data (cache and aliases)
 	// This ensures final state is persisted even if async saves are in-flight
 	s.saveDNSData()
@@ -808,11 +815,14 @@ func (s *Server) StartRegistrationLimiterSweep(ctx context.Context) {
 
 // sweepRegistrationLimiter removes stale entries from the per-IP rate limiter map.
 // Called periodically and on-demand when the map exceeds registrationLimiterMaxSize.
+// Sets sweepInFlight=false on return so emergency sweeps can be triggered again.
 func (s *Server) sweepRegistrationLimiter() {
+	defer s.sweepInFlight.Store(false)
 	cutoff := time.Now().Add(-10 * time.Minute).UnixNano()
 	s.registrationLimiter.Range(func(k, v any) bool {
 		if v.(*regLimiterEntry).lastUsed.Load() < cutoff {
 			s.registrationLimiter.Delete(k)
+			s.registrationLimiterCount.Add(-1)
 		}
 		return true
 	})
@@ -1652,8 +1662,8 @@ func (s *Server) StartS3Server(addr string, tlsCert *tls.Certificate) error {
 		Handler:           s.s3Server.Handler(),
 		IdleTimeout:       90 * time.Second,
 		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		// No ReadTimeout or WriteTimeout: S3 uploads/downloads can be arbitrarily large.
+		// Individual handlers enforce their own limits via MaxBytesReader.
 	}
 
 	if tlsCert != nil {
@@ -1852,15 +1862,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		entry = v.(*regLimiterEntry)
 	} else {
 		// Guard against unbounded growth under sustained unique-IP attacks.
-		var mapSize int
-		s.registrationLimiter.Range(func(_, _ any) bool { mapSize++; return mapSize < registrationLimiterMaxSize+1 })
-		if mapSize >= registrationLimiterMaxSize {
-			go s.sweepRegistrationLimiter()
+		// O(1) check via atomic counter; only launch one emergency sweep at a time.
+		if s.registrationLimiterCount.Load() >= registrationLimiterMaxSize {
+			if s.sweepInFlight.CompareAndSwap(false, true) {
+				go s.sweepRegistrationLimiter()
+			}
 		}
 		newEntry := &regLimiterEntry{limiter: rate.NewLimiter(rate.Limit(10), 20)}
 		newEntry.lastUsed.Store(time.Now().UnixNano())
-		v, _ := s.registrationLimiter.LoadOrStore(clientIP, newEntry)
-		entry = v.(*regLimiterEntry)
+		actual, loaded := s.registrationLimiter.LoadOrStore(clientIP, newEntry)
+		if !loaded {
+			s.registrationLimiterCount.Add(1)
+		}
+		entry = actual.(*regLimiterEntry)
 	}
 	entry.lastUsed.Store(time.Now().UnixNano())
 	if !entry.limiter.Allow() {
