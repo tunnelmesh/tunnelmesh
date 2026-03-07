@@ -963,3 +963,92 @@ func TestRelayManager_SendPacket_RateLimit(t *testing.T) {
 	// With burst=1 rate limiter, only 1 packet should pass
 	assert.Equal(t, 1, received, "rate limiter should allow only 1 packet (burst=1)")
 }
+
+// =============================================================================
+// Relay Malformed Frame Tests (Test Gap 4)
+// =============================================================================
+
+// TestHandlePersistentRelayMessage_MalformedFrames verifies that the relay message
+// handler gracefully ignores malformed input without panicking or crashing.
+// These are purely defensive tests: the function must return cleanly for all inputs.
+func TestHandlePersistentRelayMessage_MalformedFrames(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Coordinator.Enabled = true
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	peerName := "frame-test-peer"
+	jwtToken := registerPeerAndGetToken(t, ts.URL, peerName, cfg.AuthToken)
+	conn := connectRelay(t, ts.URL, peerName, jwtToken)
+	defer func() { _ = conn.Close() }()
+
+	// Wait for the peer to be registered in the relay
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	err = waitFor(ctx, 10*time.Millisecond, func() bool {
+		srv.relay.mu.Lock()
+		defer srv.relay.mu.Unlock()
+		return srv.relay.persistent[peerName] != nil
+	})
+	require.NoError(t, err, "peer connection must be registered")
+
+	pc := func() *persistentConn {
+		srv.relay.mu.Lock()
+		defer srv.relay.mu.Unlock()
+		return srv.relay.persistent[peerName]
+	}()
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "empty message",
+			data: []byte{},
+		},
+		{
+			name: "unknown message type",
+			data: []byte{0xFF, 0x01, 0x02, 0x03},
+		},
+		{
+			name: "heartbeat too short (< 3 bytes)",
+			data: []byte{MsgTypeHeartbeat, 0x00},
+		},
+		{
+			name: "heartbeat stats_len claims more bytes than available",
+			data: func() []byte {
+				// statsLen = 0x0100 (256) but only 1 byte of stats follows
+				return []byte{MsgTypeHeartbeat, 0x01, 0x00, 0x42}
+			}(),
+		},
+		{
+			name: "send packet too short (< 3 bytes)",
+			data: []byte{MsgTypeSendPacket, 0x00},
+		},
+		{
+			name: "send packet target_len claims more bytes than available",
+			data: func() []byte {
+				// targetLen = 20 but only 3 bytes of name follow
+				return []byte{MsgTypeSendPacket, 20, 'a', 'b', 'c'}
+			}(),
+		},
+		{
+			name: "send packet zero-length target with no payload",
+			data: []byte{MsgTypeSendPacket, 0x00, 0x00},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// handlePersistentRelayMessage must not panic
+			assert.NotPanics(t, func() {
+				srv.handlePersistentRelayMessage(context.Background(), peerName, tt.data, pc)
+			})
+		})
+	}
+}

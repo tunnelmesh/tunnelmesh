@@ -1149,6 +1149,17 @@ func (t *Transport) sendKeepalives() {
 			cb(peerName)
 		}
 	}
+
+	// Prune stale rekeyRateLimit entries to prevent unbounded map growth.
+	// Peers that roam (IP changes) or disconnect leave behind entries that
+	// are never explicitly removed.
+	t.mu.Lock()
+	for addr, lastSent := range t.rekeyRateLimit {
+		if now.Sub(lastSent) > rekeyRateLimitInterval {
+			delete(t.rekeyRateLimit, addr)
+		}
+	}
+	t.mu.Unlock()
 }
 
 // isInLocalSubnet reports whether ip is covered by any locally-attached, up-and-running
@@ -1535,7 +1546,7 @@ func (t *Transport) holePunch(ctx context.Context, peerName string, peerAddr *ne
 		PeerLocalAddr string `json:"peer_local_addr"`
 		Message       string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&hpResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&hpResp); err != nil {
 		return fmt.Errorf("decode hole-punch response: %w", err)
 	}
 
@@ -1603,7 +1614,7 @@ func (t *Transport) getPeerEndpoint(ctx context.Context, peerName string) (strin
 		ExternalAddr6 string `json:"external_addr6"` // IPv6 address
 		LocalAddr     string `json:"local_addr"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&endpoint); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&endpoint); err != nil {
 		return "", err
 	}
 

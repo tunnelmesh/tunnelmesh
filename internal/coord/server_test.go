@@ -1460,6 +1460,30 @@ func TestServer_AdminPeers_GlobPatterns(t *testing.T) {
 			peerName:    "anynode",
 			expectAdmin: false,
 		},
+		{
+			name:        "character class matches first option",
+			adminPeers:  []string{"[ab]ice"},
+			peerName:    "aice",
+			expectAdmin: true,
+		},
+		{
+			name:        "character class matches second option",
+			adminPeers:  []string{"[ab]ice"},
+			peerName:    "bice",
+			expectAdmin: true,
+		},
+		{
+			name:        "character class no match outside set",
+			adminPeers:  []string{"[ab]ice"},
+			peerName:    "cice",
+			expectAdmin: false,
+		},
+		{
+			name:        "full wildcard grants all peers admin",
+			adminPeers:  []string{"*"},
+			peerName:    "any-peer-name",
+			expectAdmin: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1504,6 +1528,36 @@ func TestServer_AdminPeers_GlobPatterns(t *testing.T) {
 
 			assert.Equal(t, tt.expectAdmin, resp.IsAdmin,
 				"expected IsAdmin=%v for peer %q with admin_peers=%v", tt.expectAdmin, tt.peerName, tt.adminPeers)
+		})
+	}
+}
+
+// TestAdminPeers_ConfigValidation verifies that config.Validate() rejects invalid
+// glob patterns in admin_peers before the server even starts.
+func TestAdminPeers_ConfigValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		pattern   string
+		wantError bool
+	}{
+		{"valid exact name", "alice", false},
+		{"valid wildcard suffix", "alice-*", false},
+		{"valid character class", "[ab]ice", false},
+		{"valid full wildcard", "*", false},
+		{"invalid unclosed bracket", "[", true},
+		{"invalid bracket with *", "[*", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newTestConfig(t)
+			cfg.Coordinator.AdminPeers = []string{tt.pattern}
+			err := cfg.Coordinator.Validate()
+			if tt.wantError {
+				assert.Error(t, err, "pattern %q should fail validation", tt.pattern)
+			} else {
+				assert.NoError(t, err, "pattern %q should pass validation", tt.pattern)
+			}
 		})
 	}
 }

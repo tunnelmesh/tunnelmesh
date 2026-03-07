@@ -262,3 +262,118 @@ func BenchmarkZeroCopyBuffer(b *testing.B) {
 		_ = zcBuf.Frame(len(payload))
 	}
 }
+
+// =============================================================================
+// Router Concurrent Read/Write Tests (Test Gap 5)
+// =============================================================================
+
+// TestRouter_ConcurrentUpdateAndLookup verifies that concurrent UpdateRoutes and
+// Lookup calls do not race. Run with -race to detect data races.
+func TestRouter_ConcurrentUpdateAndLookup(t *testing.T) {
+	r := NewRouter()
+
+	// Pre-populate with some routes
+	initial := map[string]string{}
+	for i := 0; i < 10; i++ {
+		ip := net.IPv4(10, 0, 0, byte(i)).String()
+		initial[ip] = "peer" + string(rune('a'+i))
+	}
+	r.UpdateRoutes(initial)
+
+	const goroutines = 8
+	const iterations = 200
+	done := make(chan struct{}, goroutines*2)
+
+	// Writers: repeatedly bulk-update routes
+	for w := 0; w < goroutines; w++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			routes := map[string]string{}
+			for i := 0; i < 10; i++ {
+				ip := net.IPv4(10, byte(id), 0, byte(i)).String()
+				routes[ip] = "peer"
+			}
+			for i := 0; i < iterations; i++ {
+				r.UpdateRoutes(routes)
+			}
+		}(w)
+	}
+
+	// Readers: repeatedly look up IPs
+	for rd := 0; rd < goroutines; rd++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			ip := net.ParseIP("10.0.0.1")
+			for i := 0; i < iterations; i++ {
+				_, _ = r.Lookup(ip)
+			}
+		}()
+	}
+
+	for i := 0; i < goroutines*2; i++ {
+		<-done
+	}
+}
+
+// TestRouter_ConcurrentAddRemoveAndLookup exercises concurrent AddRoute / RemoveRoute / Lookup.
+func TestRouter_ConcurrentAddRemoveAndLookup(t *testing.T) {
+	r := NewRouter()
+
+	const goroutines = 6
+	const iterations = 100
+	done := make(chan struct{}, goroutines*3)
+
+	// Adders
+	for a := 0; a < goroutines; a++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			for i := 0; i < iterations; i++ {
+				ip := net.IPv4(10, byte(id), 0, byte(i%256)).String()
+				r.AddRoute(ip, "peer")
+			}
+		}(a)
+	}
+
+	// Removers
+	for rm := 0; rm < goroutines; rm++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			for i := 0; i < iterations; i++ {
+				ip := net.IPv4(10, byte(id), 0, byte(i%256)).String()
+				r.RemoveRoute(ip)
+			}
+		}(rm)
+	}
+
+	// Readers
+	for rd := 0; rd < goroutines; rd++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			ip := net.ParseIP("10.0.0.0")
+			for i := 0; i < iterations; i++ {
+				_, _ = r.Lookup(ip)
+			}
+		}()
+	}
+
+	for i := 0; i < goroutines*3; i++ {
+		<-done
+	}
+}
+
+// BenchmarkRouterConcurrentLookup benchmarks concurrent read access via Lookup.
+func BenchmarkRouterConcurrentLookup(b *testing.B) {
+	r := NewRouter()
+	for i := 0; i < 100; i++ {
+		ip := net.IPv4(10, 42, byte(i/256), byte(i%256)).String()
+		r.AddRoute(ip, "peer"+string(rune(i)))
+	}
+
+	lookupIP := net.ParseIP("10.42.0.50")
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _ = r.Lookup(lookupIP)
+		}
+	})
+}

@@ -151,15 +151,17 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 				// handle the retry-local fallback.
 				var bodyBuf []byte
 				if r.Body != nil {
+					r.Body = http.MaxBytesReader(w, r.Body, s.maxObjectSize)
 					var err error
-					bodyBuf, err = io.ReadAll(io.LimitReader(r.Body, s.maxObjectSize+1))
+					bodyBuf, err = io.ReadAll(r.Body)
 					_ = r.Body.Close()
 					if err != nil {
+						var maxBytesErr *http.MaxBytesError
+						if errors.As(err, &maxBytesErr) {
+							s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
+							return
+						}
 						s.jsonError(w, "failed to read request body", http.StatusInternalServerError)
-						return
-					}
-					if int64(len(bodyBuf)) > s.maxObjectSize {
-						s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 						return
 					}
 					r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
