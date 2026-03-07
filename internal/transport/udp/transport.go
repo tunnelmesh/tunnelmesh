@@ -1109,15 +1109,18 @@ func (t *Transport) sendKeepalives() {
 	}
 }
 
-// isInLocalSubnet reports whether ip is covered by any locally-attached interface subnet.
-// Used to guard against substituting private IPs (e.g. Docker bridge 172.28.x.x) that
-// are not directly reachable from the local host.
+// isInLocalSubnet reports whether ip is covered by any locally-attached, up-and-running
+// interface subnet. Used to guard against substituting private IPs (e.g. Docker bridge
+// 172.28.x.x) that are not directly reachable from the local host.
 func isInLocalSubnet(ip net.IP) bool {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false
 	}
 	for _, iface := range ifaces {
+		if iface.Flags&(net.FlagUp|net.FlagRunning) != net.FlagUp|net.FlagRunning {
+			continue
+		}
 		addrs, _ := iface.Addrs()
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.Contains(ip) {
@@ -1162,10 +1165,17 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 				if ourPublicIP == peerExternalHost {
 					// Same public IP means same LAN — but only substitute if the peer's
 					// private IP is actually reachable from our local interfaces.
-					// Docker bridge IPs (e.g. 172.28.x.x) share our public IP via CGNAT
+					// Docker bridge IPs (e.g. 172.28.x.x) share our public IP via standard NAT
 					// but are NOT routable from macOS — skip them to avoid silent drops.
 					privateIP := net.ParseIP(opts.PeerInfo.PrivateIPs[0])
-					if privateIP == nil || !isInLocalSubnet(privateIP) {
+					if privateIP == nil {
+						log.Warn().
+							Str("peer", opts.PeerName).
+							Str("peer_private_ip", opts.PeerInfo.PrivateIPs[0]).
+							Msg("failed to parse peer private IP")
+						break
+					}
+					if !isInLocalSubnet(privateIP) {
 						log.Debug().
 							Str("peer", opts.PeerName).
 							Str("our_public_ip", ourPublicIP).

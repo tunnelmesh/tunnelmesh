@@ -1707,3 +1707,24 @@ func TestPingPongRoundtrip(t *testing.T) {
 		t.Errorf("RTT too large: %v", rtt)
 	}
 }
+
+func TestIsInLocalSubnet(t *testing.T) {
+	t.Run("loopback is in local subnet", func(t *testing.T) {
+		if !isInLocalSubnet(net.ParseIP("127.0.0.1")) {
+			t.Error("127.0.0.1 should be in local subnet (loopback)")
+		}
+	})
+
+	t.Run("public routable IP not in local subnet", func(t *testing.T) {
+		// 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — never assigned to real interfaces
+		if isInLocalSubnet(net.ParseIP("192.0.2.1")) {
+			t.Error("192.0.2.1 should not be in local subnet")
+		}
+	})
+
+	t.Run("nil IP not in local subnet", func(t *testing.T) {
+		if isInLocalSubnet(nil) {
+			t.Error("nil IP should not be in local subnet")
+		}
+	})
+}
