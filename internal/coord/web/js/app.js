@@ -155,6 +155,7 @@ async function fetchData() {
 
 // Setup Server-Sent Events for real-time updates
 let sseRetryCount = 0;
+let _heartbeatDebounce = null;
 
 function setupSSE() {
     // Check if EventSource is supported
@@ -177,9 +178,10 @@ function setupSSE() {
         sseRetryCount = 0; // Reset retry count on successful connection
     });
 
-    state.eventSource.addEventListener('heartbeat', (e) => {
-        // Refresh dashboard when a heartbeat is received
-        fetchData();
+    state.eventSource.addEventListener('heartbeat', () => {
+        // Debounce: collapse any burst of queued heartbeats (e.g. after tab returns) into one fetch
+        clearTimeout(_heartbeatDebounce);
+        _heartbeatDebounce = setTimeout(fetchData, 150);
     });
 
     state.eventSource.onerror = (err) => {
@@ -2322,6 +2324,10 @@ function switchTab(tabName, options = {}) {
 
     // Handle tab-specific initialization
     if (tabName === 'mesh') {
+        // Snap visualizer to current positions on return — no animation replay
+        if (state.visualizer) {
+            state.visualizer.skipNextAnimation = true;
+        }
         // Refresh mesh-tab panels (peers/logs/alerts/filter) on tab switch.
         // 'logs' calls checkLokiAvailable which retries if Grafana wasn't ready on page load.
         if (TM.refresh) {
