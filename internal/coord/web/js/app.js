@@ -2278,7 +2278,19 @@ function initTabs() {
         const popParams = new URLSearchParams(popHash);
         const popTab = popParams.get('tab');
         if (popTab && ['app', 'data', 'mesh'].includes(popTab)) {
+            // Snap visualizer on back/forward navigation — avoids replaying layout animation
+            if (popTab === 'mesh' && state.visualizer) {
+                state.visualizer.skipNextAnimation = true;
+            }
             switchTab(popTab, { skipHistory: true });
+        }
+    });
+
+    // Snap visualizer when the browser tab/window returns from being hidden
+    // (browser may have throttled SSE while hidden, queuing heartbeats)
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && state.visualizer) {
+            state.visualizer.skipNextAnimation = true;
         }
     });
 }
@@ -2324,10 +2336,6 @@ function switchTab(tabName, options = {}) {
 
     // Handle tab-specific initialization
     if (tabName === 'mesh') {
-        // Snap visualizer to current positions on return — no animation replay
-        if (state.visualizer) {
-            state.visualizer.skipNextAnimation = true;
-        }
         // Refresh mesh-tab panels (peers/logs/alerts/filter) on tab switch.
         // 'logs' calls checkLokiAvailable which retries if Grafana wasn't ready on page load.
         if (TM.refresh) {
