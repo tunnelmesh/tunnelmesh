@@ -248,12 +248,24 @@ func (s *Server) handleS3GetObject(w http.ResponseWriter, r *http.Request, bucke
 	}
 	defer func() { _ = reader.Close() }()
 
+	// Omit Content-Length: chunked transfer encoding lets the client detect a
+	// mid-stream DistributedChunkReader failure as a connection reset rather
+	// than a silent truncation that looks identical to a successful short read.
 	w.Header().Set("Content-Type", meta.ContentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 
-	n, _ := io.Copy(w, reader)
+	n, copyErr := io.Copy(w, reader)
+	if copyErr != nil {
+		log.Error().Str("bucket", bucket).Str("key", key).
+			Int64("bytes_sent", n).Int64("expected", meta.Size).
+			Err(copyErr).Msg("handleS3GetObject: stream failed mid-response, aborting connection")
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, hjErr := hj.Hijack(); hjErr == nil {
+				_ = conn.Close()
+			}
+		}
+	}
 	if m := s3.GetS3Metrics(); m != nil && n > 0 {
 		m.RecordDownload(n)
 	}
@@ -269,12 +281,21 @@ func (s *Server) handleS3GetObjectVersion(w http.ResponseWriter, r *http.Request
 	defer func() { _ = reader.Close() }()
 
 	w.Header().Set("Content-Type", meta.ContentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 	w.Header().Set("X-Version-Id", meta.VersionID)
 
-	n, _ := io.Copy(w, reader)
+	n, copyErr := io.Copy(w, reader)
+	if copyErr != nil {
+		log.Error().Str("bucket", bucket).Str("key", key).Str("version", versionID).
+			Int64("bytes_sent", n).Int64("expected", meta.Size).
+			Err(copyErr).Msg("handleS3GetObjectVersion: stream failed mid-response, aborting connection")
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, hjErr := hj.Hijack(); hjErr == nil {
+				_ = conn.Close()
+			}
+		}
+	}
 	if m := s3.GetS3Metrics(); m != nil && n > 0 {
 		m.RecordDownload(n)
 	}
@@ -711,11 +732,20 @@ func (s *Server) handleS3GetRecycledObject(w http.ResponseWriter, r *http.Reques
 	defer func() { _ = reader.Close() }()
 
 	w.Header().Set("Content-Type", meta.ContentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
 
-	n, _ := io.Copy(w, reader)
+	n, copyErr := io.Copy(w, reader)
+	if copyErr != nil {
+		log.Error().Str("bucket", bucket).Str("key", key).
+			Int64("bytes_sent", n).Int64("expected", meta.Size).
+			Err(copyErr).Msg("handleS3GetRecycledObject: stream failed mid-response, aborting connection")
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, hjErr := hj.Hijack(); hjErr == nil {
+				_ = conn.Close()
+			}
+		}
+	}
 	if m := s3.GetS3Metrics(); m != nil && n > 0 {
 		m.RecordDownload(n)
 	}
