@@ -281,6 +281,7 @@ class NodeVisualizer {
         this.animating = false;
         this.animationStart = 0;
         this.animationDuration = 400; // ms
+        this.skipNextAnimation = false;
 
         // Pan state
         this.panX = 0;
@@ -385,7 +386,17 @@ class NodeVisualizer {
         } else {
             // Recalculate layout and animate to new positions
             this.recalculateLayout();
-            this.startAnimation();
+            if (this.skipNextAnimation) {
+                this.skipNextAnimation = false;
+                // Snap slots to final positions (no animation)
+                for (const slot of this.slots) {
+                    slot.x = slot.targetX;
+                    slot.y = slot.targetY;
+                }
+                this.render();
+            } else {
+                this.startAnimation();
+            }
         }
     }
 

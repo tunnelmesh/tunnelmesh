@@ -1,6 +1,13 @@
 // Import constants from TM.utils (loaded via lib/utils.js)
-const { POLL_INTERVAL_MS, SSE_RETRY_DELAY_MS, MAX_SSE_RETRIES, ROWS_PER_PAGE, TOAST_DURATION_MS, TOAST_FADE_MS } =
-    TM.utils.CONSTANTS;
+const {
+    POLL_INTERVAL_MS,
+    SSE_RETRY_DELAY_MS,
+    MAX_SSE_RETRIES,
+    ROWS_PER_PAGE,
+    TOAST_DURATION_MS,
+    TOAST_FADE_MS,
+    MAX_HISTORY_POINTS,
+} = TM.utils.CONSTANTS;
 
 // Import utilities from TM modules
 const { escapeHtml } = TM.utils;
@@ -155,8 +162,13 @@ async function fetchData() {
 
 // Setup Server-Sent Events for real-time updates
 let sseRetryCount = 0;
+let _heartbeatDebounce = null;
 
 function setupSSE() {
+    // Cancel any pending debounced fetch from the previous connection
+    clearTimeout(_heartbeatDebounce);
+    _heartbeatDebounce = null;
+
     // Check if EventSource is supported
     if (typeof EventSource === 'undefined') {
         console.log('SSE not supported, falling back to polling');
@@ -177,9 +189,10 @@ function setupSSE() {
         sseRetryCount = 0; // Reset retry count on successful connection
     });
 
-    state.eventSource.addEventListener('heartbeat', (e) => {
-        // Refresh dashboard when a heartbeat is received
-        fetchData();
+    state.eventSource.addEventListener('heartbeat', () => {
+        // Debounce: collapse any burst of queued heartbeats (e.g. after tab returns) into one fetch
+        clearTimeout(_heartbeatDebounce);
+        _heartbeatDebounce = setTimeout(fetchData, 150);
     });
 
     state.eventSource.onerror = (err) => {
@@ -208,6 +221,8 @@ function startPolling() {
 
 // Cleanup on page unload to prevent memory leaks
 function cleanup() {
+    clearTimeout(_heartbeatDebounce);
+    _heartbeatDebounce = null;
     if (state.eventSource) {
         state.eventSource.close();
         state.eventSource = null;
@@ -293,7 +308,7 @@ function updateDashboard(data) {
         history.packetsRx.push(peer.packets_received_rate || 0);
 
         // Trim to max history using slice (O(n) instead of O(n) shift per element)
-        const maxPoints = state.maxHistoryPoints;
+        const maxPoints = MAX_HISTORY_POINTS;
         if (history.throughputTx.length > maxPoints) {
             const excess = history.throughputTx.length - maxPoints;
             history.throughputTx = history.throughputTx.slice(excess);
@@ -2276,7 +2291,24 @@ function initTabs() {
         const popParams = new URLSearchParams(popHash);
         const popTab = popParams.get('tab');
         if (popTab && ['app', 'data', 'mesh'].includes(popTab)) {
+            // Snap visualizer on back/forward navigation — avoids replaying layout animation
+            if (popTab === 'mesh' && state.visualizer) {
+                state.visualizer.skipNextAnimation = true;
+            }
             switchTab(popTab, { skipHistory: true });
+        }
+    });
+
+    // Snap visualizer and refresh map when the browser tab/window returns from being hidden
+    // (browser may have throttled SSE while hidden, queuing heartbeats)
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            if (state.visualizer) {
+                state.visualizer.skipNextAnimation = true;
+            }
+            if (state.nodeMap) {
+                state.nodeMap.refresh();
+            }
         }
     });
 }
@@ -2646,8 +2678,35 @@ async function deleteBinding(name) {
 }
 window.deleteBinding = deleteBinding;
 
-// Cleanup on page unload to prevent memory leaks
-window.addEventListener('beforeunload', cleanup);
+// Use pagehide instead of beforeunload so the page can enter bfcache.
+// Only fully clean up when not entering bfcache (e.persisted === false).
+window.addEventListener('pagehide', (e) => {
+    if (e.persisted) {
+        // Entering bfcache — only close the network connection;
+        // preserve JS objects so they survive restoration
+        clearTimeout(_heartbeatDebounce);
+        _heartbeatDebounce = null;
+        if (state.eventSource) {
+            state.eventSource.close();
+            state.eventSource = null;
+        }
+    } else {
+        cleanup();
+    }
+});
+
+// Restore live connection and data when returning from bfcache
+window.addEventListener('pageshow', (e) => {
+    if (e.persisted) {
+        state.peerHistory = {};
+        sseRetryCount = 0;
+        if (state.visualizer) {
+            state.visualizer.skipNextAnimation = true;
+        }
+        setupSSE();
+        fetchData();
+    }
+});
 
 // =====================
 // S3 Explorer Integration
