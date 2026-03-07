@@ -72,7 +72,11 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		DebounceInterval: 500 * time.Millisecond,
-		IgnoreInterfaces: []string{"lo", "docker*", "veth*", "br-*", "tun-mesh*"},
+		// lo* matches lo (Linux) and lo0 (macOS)
+		// utun* matches macOS auto-assigned TUN interfaces (utun0, utun1, ...)
+		// The mesh TUN on macOS is always named utunN because macOS does not allow
+		// custom TUN interface names; on Linux it is named tun-mesh0 (matched by tun-mesh*).
+		IgnoreInterfaces: []string{"lo*", "docker*", "veth*", "br-*", "tun-mesh*", "utun*"},
 	}
 }
 

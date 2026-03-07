@@ -33,8 +33,10 @@ func TestDarwinShouldIgnoreKnownPatterns(t *testing.T) {
 		{"tun-mesh0", true},
 		{"en0", false},
 		{"en1", false},
-		{"utun3", false},
-		{"lo0", false}, // "lo0" does not match the "lo" pattern (no wildcard)
+		{"utun3", true}, // macOS auto-assigns utunN names for all TUN devices including mesh
+		{"utun0", true}, // all utunN variants ignored
+		{"lo0", true},   // lo* matches lo0 (macOS loopback)
+		{"lo", true},    // lo* also matches lo (Linux loopback)
 	}
 
 	for _, tt := range tests {
