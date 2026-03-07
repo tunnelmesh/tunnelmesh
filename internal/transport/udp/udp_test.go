@@ -1582,6 +1582,57 @@ func TestPendingOutboundPeersTracking(t *testing.T) {
 }
 
 // =============================================================================
+// Concurrent Handshake Race Tests (Test Gap 2)
+// =============================================================================
+
+// TestInitiateHandshake_ConcurrentSamePeer verifies that initiateHandshake is safe
+// when N goroutines call it for the same peer simultaneously (race-detector coverage).
+// The handshakes will time out quickly (short HandshakeTimeout) — we only care that
+// no data races occur, not that they succeed.
+func TestInitiateHandshake_ConcurrentSamePeer(t *testing.T) {
+	priv, pub, _ := X25519KeyPair()
+	tr, err := New(Config{
+		Port:              0,
+		StaticPrivate:     priv,
+		StaticPublic:      pub,
+		HandshakeTimeout:  50 * time.Millisecond,
+		KeepaliveInterval: 25 * time.Second,
+		SessionTimeout:    75 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("create transport: %v", err)
+	}
+	if err := tr.Start(); err != nil {
+		t.Fatalf("start transport: %v", err)
+	}
+	defer func() { _ = tr.Close() }()
+
+	// Use a closed UDP socket as the peer address — handshakes will fail/timeout,
+	// which is fine; we only need to exercise the concurrent map access paths.
+	blackhole, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	peerAddr := blackhole.LocalAddr().(*net.UDPAddr)
+	_ = blackhole.Close() // close immediately so writes fail fast
+
+	var peerPublic [32]byte // zero public key is invalid for crypto but exercises the race path
+
+	const N = 10
+	done := make(chan struct{}, N)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	for i := 0; i < N; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_, _ = tr.initiateHandshake(ctx, "concurrent-peer", peerPublic, peerAddr, tr.conn)
+		}()
+	}
+
+	for i := 0; i < N; i++ {
+		<-done
+	}
+}
+
+// =============================================================================
 // Ping/Pong Packet Tests (for latency measurement)
 // =============================================================================
 
@@ -1937,5 +1988,269 @@ func TestReplayWindow_WindowBoundary(t *testing.T) {
 	future := uint64(200)
 	if !w.Check(future) {
 		t.Errorf("future counter %d should be accepted", future)
+	}
+}
+
+// =============================================================================
+// Rekey-Required Tests (Test Gap 1 + Test Gap 6)
+// =============================================================================
+
+// newTestTransport creates a Transport suitable for unit tests (no listening sockets).
+func newTestTransport(t *testing.T) *Transport {
+	t.Helper()
+	priv, pub, err := X25519KeyPair()
+	if err != nil {
+		t.Fatalf("generate key pair: %v", err)
+	}
+	tr, err := New(Config{
+		Port:              0,
+		StaticPrivate:     priv,
+		StaticPublic:      pub,
+		SessionTimeout:    75 * time.Second,
+		KeepaliveInterval: 25 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("create transport: %v", err)
+	}
+	return tr
+}
+
+// newEstablishedSession creates a session with crypto set (RemoteIndex is set).
+func newEstablishedSession(t *testing.T, localIndex uint32, peerName string, remoteIndex uint32, conn *net.UDPConn, remoteAddr *net.UDPAddr) *Session {
+	t.Helper()
+	session := NewSession(SessionConfig{
+		LocalIndex: localIndex,
+		PeerName:   peerName,
+		RemoteAddr: remoteAddr,
+		Conn:       conn,
+	})
+	priv1, pub1, _ := X25519KeyPair()
+	_, pub2, _ := X25519KeyPair()
+	shared, _ := X25519SharedSecret(priv1, pub2)
+	sendKey, recvKey, _ := DeriveKeys(shared, pub1, pub2, true)
+	crypto, _ := NewCryptoState(sendKey, recvKey)
+	session.SetCrypto(crypto, remoteIndex)
+	return session
+}
+
+func TestHandleRekeyRequired_KnownSession(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("listen UDP: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	remoteAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:19000")
+	const localIdx = uint32(1001)
+	const remoteIdx = uint32(2001)
+	session := newEstablishedSession(t, localIdx, "peer-a", remoteIdx, conn, remoteAddr)
+
+	tr.mu.Lock()
+	tr.sessions[localIdx] = session
+	tr.peerSessions["peer-a"] = session
+	var invalidated string
+	tr.onSessionInvalid = func(peerName string) { invalidated = peerName }
+	tr.mu.Unlock()
+
+	// Build rekey-required message claiming remoteIdx is unknown
+	pkt := NewRekeyRequiredPacket(remoteIdx)
+	tr.handleRekeyRequired(pkt.Marshal(), remoteAddr)
+
+	tr.mu.RLock()
+	_, sessionExists := tr.sessions[localIdx]
+	_, peerSessionExists := tr.peerSessions["peer-a"]
+	tr.mu.RUnlock()
+
+	if sessionExists {
+		t.Error("session should have been removed from sessions map")
+	}
+	if peerSessionExists {
+		t.Error("session should have been removed from peerSessions map")
+	}
+	if invalidated != "peer-a" {
+		t.Errorf("expected callback for 'peer-a', got %q", invalidated)
+	}
+}
+
+func TestHandleRekeyRequired_UnknownIndex_Noop(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	callbackFired := false
+	tr.mu.Lock()
+	tr.onSessionInvalid = func(string) { callbackFired = true }
+	tr.mu.Unlock()
+
+	remoteAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:19001")
+	pkt := NewRekeyRequiredPacket(9999) // no session has this remote index
+	tr.handleRekeyRequired(pkt.Marshal(), remoteAddr)
+
+	if callbackFired {
+		t.Error("callback should not fire for unknown index")
+	}
+}
+
+func TestHandleRekeyRequired_ReplacedSession_PreservesNew(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	addr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	conn, _ := net.ListenUDP("udp", addr)
+	defer func() { _ = conn.Close() }()
+
+	remoteAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:19002")
+	const oldLocal = uint32(100)
+	const newLocal = uint32(200)
+	const oldRemote = uint32(300)
+	const newRemote = uint32(400)
+
+	oldSession := newEstablishedSession(t, oldLocal, "peer-b", oldRemote, conn, remoteAddr)
+	newSession := newEstablishedSession(t, newLocal, "peer-b", newRemote, conn, remoteAddr)
+
+	tr.mu.Lock()
+	tr.sessions[oldLocal] = oldSession
+	tr.sessions[newLocal] = newSession
+	// peerSessions points to the new session (replacement already happened)
+	tr.peerSessions["peer-b"] = newSession
+	tr.mu.Unlock()
+
+	// Old session's remote index becomes unknown
+	pkt := NewRekeyRequiredPacket(oldRemote)
+	tr.handleRekeyRequired(pkt.Marshal(), remoteAddr)
+
+	tr.mu.RLock()
+	_, oldExists := tr.sessions[oldLocal]
+	peerSession, newExists := tr.peerSessions["peer-b"]
+	tr.mu.RUnlock()
+
+	if oldExists {
+		t.Error("old session should be removed from sessions map")
+	}
+	if !newExists {
+		t.Error("new session should remain in peerSessions")
+	}
+	if peerSession.LocalIndex() != newLocal {
+		t.Errorf("peerSessions should point to new session (local %d), got %d", newLocal, peerSession.LocalIndex())
+	}
+}
+
+func TestSendRekeyRequired_FirstCallSends(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	// Start transport so conn is available
+	if err := tr.Start(); err != nil {
+		t.Fatalf("start transport: %v", err)
+	}
+
+	// Create a listener to receive the packet
+	receiver, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	defer func() { _ = receiver.Close() }()
+
+	remoteAddr := receiver.LocalAddr().(*net.UDPAddr)
+	_ = receiver.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+
+	tr.sendRekeyRequired(42, remoteAddr)
+
+	buf := make([]byte, 64)
+	n, _, err := receiver.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("expected to receive rekey-required packet: %v", err)
+	}
+	if n < 1 || buf[0] != PacketTypeRekeyRequired {
+		t.Errorf("expected PacketTypeRekeyRequired byte, got %v", buf[:n])
+	}
+}
+
+func TestSendRekeyRequired_RateLimited(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	if err := tr.Start(); err != nil {
+		t.Fatalf("start transport: %v", err)
+	}
+
+	receiver, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	defer func() { _ = receiver.Close() }()
+
+	remoteAddr := receiver.LocalAddr().(*net.UDPAddr)
+
+	// First send should go through
+	_ = receiver.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	tr.sendRekeyRequired(1, remoteAddr)
+	buf := make([]byte, 64)
+	if _, _, err := receiver.ReadFromUDP(buf); err != nil {
+		t.Fatalf("first send should succeed: %v", err)
+	}
+
+	// Second call within rate limit window should be suppressed
+	tr.sendRekeyRequired(1, remoteAddr)
+	_ = receiver.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, _, err := receiver.ReadFromUDP(buf); err == nil {
+		t.Error("second call within rate limit window should not send packet")
+	}
+}
+
+func TestSendRekeyRequired_DifferentAddressesIndependent(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	if err := tr.Start(); err != nil {
+		t.Fatalf("start transport: %v", err)
+	}
+
+	recv1, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	recv2, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	defer func() { _ = recv1.Close() }()
+	defer func() { _ = recv2.Close() }()
+
+	addr1 := recv1.LocalAddr().(*net.UDPAddr)
+	addr2 := recv2.LocalAddr().(*net.UDPAddr)
+
+	buf := make([]byte, 64)
+	_ = recv1.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_ = recv2.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+
+	tr.sendRekeyRequired(1, addr1)
+	tr.sendRekeyRequired(1, addr2)
+
+	if _, _, err := recv1.ReadFromUDP(buf); err != nil {
+		t.Errorf("addr1 should receive packet (independent rate limit): %v", err)
+	}
+	if _, _, err := recv2.ReadFromUDP(buf); err != nil {
+		t.Errorf("addr2 should receive packet (independent rate limit): %v", err)
+	}
+}
+
+func TestSendKeepalives_PrunesStaleRekeyRateLimit(t *testing.T) {
+	tr := newTestTransport(t)
+	defer func() { _ = tr.Close() }()
+
+	now := time.Now()
+	staleAddr := "1.2.3.4:1234"
+	freshAddr := "5.6.7.8:5678"
+
+	tr.mu.Lock()
+	tr.rekeyRateLimit[staleAddr] = now.Add(-(rekeyRateLimitInterval + time.Second)) // older than interval
+	tr.rekeyRateLimit[freshAddr] = now                                              // just set
+	tr.mu.Unlock()
+
+	// sendKeepalives with no sessions; will only run the pruning path
+	tr.sendKeepalives()
+
+	tr.mu.RLock()
+	_, staleExists := tr.rekeyRateLimit[staleAddr]
+	_, freshExists := tr.rekeyRateLimit[freshAddr]
+	tr.mu.RUnlock()
+
+	if staleExists {
+		t.Error("stale rekeyRateLimit entry should have been pruned")
+	}
+	if !freshExists {
+		t.Error("fresh rekeyRateLimit entry should be preserved")
 	}
 }
