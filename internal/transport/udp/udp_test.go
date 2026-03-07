@@ -1709,9 +1709,17 @@ func TestPingPongRoundtrip(t *testing.T) {
 }
 
 func TestIsInLocalSubnet(t *testing.T) {
-	t.Run("loopback is in local subnet", func(t *testing.T) {
+	// These tests assume the loopback interface (lo/lo0) is FlagUp|FlagRunning,
+	// which is guaranteed on Linux and macOS in any standard CI environment.
+	t.Run("IPv4 loopback is in local subnet", func(t *testing.T) {
 		if !isInLocalSubnet(net.ParseIP("127.0.0.1")) {
 			t.Error("127.0.0.1 should be in local subnet (loopback)")
+		}
+	})
+
+	t.Run("IPv6 loopback is in local subnet", func(t *testing.T) {
+		if !isInLocalSubnet(net.ParseIP("::1")) {
+			t.Error("::1 should be in local subnet (IPv6 loopback)")
 		}
 	})
 

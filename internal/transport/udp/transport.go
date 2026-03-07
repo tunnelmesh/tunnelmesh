@@ -1113,12 +1113,15 @@ func (t *Transport) sendKeepalives() {
 // interface subnet. Used to guard against substituting private IPs (e.g. Docker bridge
 // 172.28.x.x) that are not directly reachable from the local host.
 func isInLocalSubnet(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false
 	}
 	for _, iface := range ifaces {
-		if iface.Flags&(net.FlagUp|net.FlagRunning) != net.FlagUp|net.FlagRunning {
+		if iface.Flags&(net.FlagUp|net.FlagRunning) != (net.FlagUp | net.FlagRunning) {
 			continue
 		}
 		addrs, _ := iface.Addrs()
