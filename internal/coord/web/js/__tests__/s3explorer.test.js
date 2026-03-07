@@ -180,15 +180,15 @@ describe('shouldUseWysiwygMode', () => {
         expect(shouldUseWysiwygMode('md', '   \n\n Content with whitespace   ')).toBe(true);
     });
 
-    test('returns false for empty markdown files', () => {
-        expect(shouldUseWysiwygMode('md', '')).toBe(false);
-        expect(shouldUseWysiwygMode('md', '   ')).toBe(false);
-        expect(shouldUseWysiwygMode('md', '\n\n\t  \n')).toBe(false);
+    test('returns true for empty markdown files (WYSIWYG for new blank .md files)', () => {
+        expect(shouldUseWysiwygMode('md', '')).toBe(true);
+        expect(shouldUseWysiwygMode('md', '   ')).toBe(true);
+        expect(shouldUseWysiwygMode('md', '\n\n\t  \n')).toBe(true);
     });
 
-    test('returns false for null/undefined content', () => {
-        expect(shouldUseWysiwygMode('md', null)).toBe(false);
-        expect(shouldUseWysiwygMode('md', undefined)).toBe(false);
+    test('returns true for null/undefined content markdown files', () => {
+        expect(shouldUseWysiwygMode('md', null)).toBe(true);
+        expect(shouldUseWysiwygMode('md', undefined)).toBe(true);
     });
 
     test('returns false for non-markdown files', () => {

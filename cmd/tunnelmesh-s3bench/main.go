@@ -476,6 +476,13 @@ func runIteration(ctx context.Context, st story.Story, userMgr *simulator.UserMa
 	return sharePrefix, nil
 }
 
+// ecEnabledDepts lists the alien_invasion departments that should use erasure
+// coding (k=4, m=2). This exercises the EC write/read path in each accordion run.
+var ecEnabledDepts = map[string]bool{
+	"alien-command": true,
+	"alien-science": true,
+}
+
 // createMeshShares creates file shares on the coordinator for each story department.
 // Returns the share prefix derived from the coordinator's auto-prefixed name.
 func createMeshShares(ctx context.Context, client *mesh.CoordinatorClient, st story.Story, meshInfo *mesh.MeshInfo) (string, error) {
@@ -503,6 +510,24 @@ func createMeshShares(ctx context.Context, client *mesh.CoordinatorClient, st st
 				Str("share", actualName).
 				Int64("quota_mb", quotaMB).
 				Msg("Created share")
+		}
+
+		// Enable erasure coding (k=4, m=2) on selected departments so that
+		// s3bench exercises the EC write/read path in every accordion run.
+		if ecEnabledDepts[dept.FileShare] {
+			// The coordinator auto-prefixes share names; derive the fs+ bucket name
+			// using the computed prefix (or peer name if prefix not yet known).
+			prefix := sharePrefix
+			if prefix == "" {
+				prefix = meshInfo.PeerName
+			}
+			fsBucket := s3.FileShareBucketPrefix + prefix + "_" + dept.FileShare
+			if err := client.UpdateBucketEC(ctx, fsBucket, mesh.ECPolicy{DataShards: 4, ParityShards: 2}); err != nil {
+				// Non-fatal: EC is a nice-to-have for testing; don't abort the run.
+				log.Warn().Err(err).Str("bucket", fsBucket).Msg("failed to enable EC on bucket (continuing without EC)")
+			} else {
+				log.Info().Str("bucket", fsBucket).Msg("Erasure coding enabled (k=4, m=2)")
+			}
 		}
 	}
 

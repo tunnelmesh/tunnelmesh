@@ -254,6 +254,14 @@ func EncodeStream(r io.Reader, size int64, k, m int, dataWriters, parityWriters 
 		}
 	}
 
+	// Guard against a reader that claims a larger size than it provides.
+	// Without this check the trailing shard(s) are silently zero-padded,
+	// producing a decodable but corrupt object.
+	if remaining != 0 {
+		return fmt.Errorf("EncodeStream: short read — reader provided %d fewer bytes than declared size %d",
+			remaining, size)
+	}
+
 	// Step 2: RS-stream encode — reads from k temp files, writes parity to parityWriters.
 	enc, err := reedsolomon.NewStream(k, m)
 	if err != nil {

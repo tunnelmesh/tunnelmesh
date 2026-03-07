@@ -75,7 +75,7 @@ func TestCoordinatorClient_CreateBucket(t *testing.T) {
 				secretKey:  "test-secret",
 			}
 
-			err := client.CreateBucket(context.Background(), tt.bucketName, tt.ownerID, tt.quotaMB)
+			err := client.CreateBucket(context.Background(), tt.bucketName, tt.ownerID, tt.quotaMB, nil)
 
 			if tt.expectError {
 				if err == nil {

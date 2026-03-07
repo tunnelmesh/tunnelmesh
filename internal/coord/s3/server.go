@@ -530,10 +530,16 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 	rec := &statusRecorder{ResponseWriter: w}
 	var storeErr error // Capture error for metrics classification
 	var forwarded bool
+	var streamErr bool // Set if io.Copy fails mid-stream
 	defer func() {
 		if m != nil && !forwarded {
 			duration := time.Since(startTime).Seconds()
-			status := ClassifyS3StatusWithError(rec.getStatus(), storeErr)
+			var status string
+			if streamErr {
+				status = "stream_error"
+			} else {
+				status = ClassifyS3StatusWithError(rec.getStatus(), storeErr)
+			}
 			m.RecordRequest("GetObject", status, duration, traceIDFromContext(r.Context()))
 		}
 	}()
@@ -566,9 +572,10 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 	}
 	defer func() { _ = reader.Close() }()
 
-	// Set response headers
+	// Set response headers (no Content-Length: chunked transfer encoding allows
+	// the client to detect a mid-stream failure as a connection reset rather than
+	// a silent truncation that looks identical to a successful short response).
 	rec.Header().Set("Content-Type", meta.ContentType)
-	rec.Header().Set("Content-Length", fmt.Sprintf("%d", meta.Size))
 	rec.Header().Set("ETag", meta.ETag)
 	rec.Header().Set("Last-Modified", meta.LastModified.Format(http.TimeFormat))
 
@@ -579,7 +586,19 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 
 	n, err := io.Copy(rec, reader)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to stream object")
+		streamErr = true
+		log.Error().
+			Str("bucket", bucket).Str("key", key).
+			Int64("bytes_sent", n).Int64("expected", meta.Size).
+			Err(err).Msg("getObject: stream failed mid-response, aborting connection")
+		// Abort: hijack and close so the client gets a TCP RST instead of a
+		// graceful FIN (which would be indistinguishable from a normal end of
+		// a chunked response with the wrong content length).
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, hjErr := hj.Hijack(); hjErr == nil {
+				_ = conn.Close()
+			}
+		}
 	}
 	if m != nil && n > 0 {
 		m.RecordDownload(n)

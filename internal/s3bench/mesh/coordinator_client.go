@@ -52,8 +52,15 @@ func NewCoordinatorClient(adminURL string, creds *Credentials, insecureSkipVerif
 	}
 }
 
+// ECPolicy configures erasure coding for a bucket.
+type ECPolicy struct {
+	DataShards   int // k — number of data shards
+	ParityShards int // m — number of parity shards
+}
+
 // CreateBucket creates a new S3 bucket on the coordinator.
-func (c *CoordinatorClient) CreateBucket(ctx context.Context, bucketName, ownerID string, quotaMB int64) error {
+// If ecPolicy is non-nil, the bucket is configured with erasure coding.
+func (c *CoordinatorClient) CreateBucket(ctx context.Context, bucketName, ownerID string, quotaMB int64, ecPolicy *ECPolicy) error {
 	requestURL := fmt.Sprintf("%s/api/s3/buckets", c.baseURL)
 
 	// Build request payload
@@ -65,6 +72,13 @@ func (c *CoordinatorClient) CreateBucket(ctx context.Context, bucketName, ownerI
 	}
 	if quotaMB > 0 {
 		payload["quota_bytes"] = quotaMB * 1024 * 1024
+	}
+	if ecPolicy != nil {
+		payload["erasure_coding"] = map[string]interface{}{
+			"enabled":       true,
+			"data_shards":   ecPolicy.DataShards,
+			"parity_shards": ecPolicy.ParityShards,
+		}
 	}
 
 	body, err := json.Marshal(payload)
@@ -251,7 +265,46 @@ func (c *CoordinatorClient) DeleteObject(ctx context.Context, bucket, key string
 }
 
 // GetObject downloads an object from the coordinator S3 API.
+// Retries up to 3 times on unexpected EOF (transient chunk-fetch failures).
 func (c *CoordinatorClient) GetObject(ctx context.Context, bucket, key string) ([]byte, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
+		data, err := c.getObjectOnce(ctx, bucket, key)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		// Only retry on EOF-class errors (mid-stream failures from the server).
+		// Hard errors (404, auth failure, etc.) should not be retried.
+		if !isEOFError(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// isEOFError returns true for errors that indicate an unexpected connection close
+// mid-stream (e.g. "unexpected EOF", "connection reset by peer").
+func isEOFError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unexpected EOF") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "EOF")
+}
+
+// getObjectOnce performs a single attempt to download an object.
+func (c *CoordinatorClient) getObjectOnce(ctx context.Context, bucket, key string) ([]byte, error) {
 	requestURL := fmt.Sprintf("%s/api/s3/buckets/%s/objects/%s", c.baseURL, url.PathEscape(bucket), url.PathEscape(key))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
@@ -283,6 +336,44 @@ func (c *CoordinatorClient) GetObject(ctx context.Context, bucket, key string) (
 	}
 
 	return data, nil
+}
+
+// UpdateBucketEC configures erasure coding on an existing bucket via PATCH /api/s3/buckets/{name}.
+// This is idempotent — calling it on a bucket that already has EC enabled updates the policy.
+func (c *CoordinatorClient) UpdateBucketEC(ctx context.Context, bucketName string, policy ECPolicy) error {
+	requestURL := fmt.Sprintf("%s/api/s3/buckets/%s", c.baseURL, url.PathEscape(bucketName))
+
+	payload := map[string]interface{}{
+		"erasure_coding": map[string]interface{}{
+			"enabled":       true,
+			"data_shards":   policy.DataShards,
+			"parity_shards": policy.ParityShards,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setBasicAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP PATCH %s: %w", requestURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update bucket EC failed: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
 }
 
 // DeleteShare deletes a file share on the coordinator via DELETE /api/shares/{name}.

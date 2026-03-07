@@ -191,9 +191,8 @@
     function shouldUseWysiwygMode(ext, content) {
         // Only markdown files can use wysiwyg mode
         if (ext !== 'md') return false;
-        // Empty files should open in source mode (editable)
-        if (!content || content.trim().length === 0) return false;
-        // Non-empty markdown files open in preview mode
+        // All markdown files (including empty ones) open in WYSIWYG mode so that
+        // newly created blank .md files get the rich editor rather than a plain textarea.
         return true;
     }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -613,5 +614,30 @@ func TestEncodeStream_InvalidArgs(t *testing.T) {
 	// wrong number of writers
 	if err := EncodeStream(bytes.NewReader(data), int64(len(data)), 3, 2, writers1, writers2); err == nil {
 		t.Error("expected error for wrong dataWriters count")
+	}
+}
+
+func TestEncodeStream_ShortRead_ReturnsError(t *testing.T) {
+	// Declare size=100 but supply only 5 bytes — the encoder must return an error
+	// rather than silently zero-padding the trailing shards (which would produce a
+	// decodable but corrupt object containing 95 spurious zero bytes).
+	k, m := 4, 2
+	shortData := []byte("hello") // 5 bytes, but we'll tell EncodeStream to expect 100
+
+	dataWriters := make([]io.Writer, k)
+	parityWriters := make([]io.Writer, m)
+	for i := range dataWriters {
+		dataWriters[i] = &bytes.Buffer{}
+	}
+	for i := range parityWriters {
+		parityWriters[i] = &bytes.Buffer{}
+	}
+
+	err := EncodeStream(bytes.NewReader(shortData), 100, k, m, dataWriters, parityWriters)
+	if err == nil {
+		t.Fatal("expected error for short read, got nil")
+	}
+	if !strings.Contains(err.Error(), "short read") {
+		t.Errorf("expected error to contain 'short read', got: %v", err)
 	}
 }

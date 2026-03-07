@@ -638,8 +638,9 @@ func (s *Server) handleGetBucket(w http.ResponseWriter, r *http.Request, bucket 
 // handleUpdateBucket updates bucket metadata (admin-only)
 func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	var req struct {
-		ReplicationFactor *int   `json:"replication_factor,omitempty"`
-		QuotaBytes        *int64 `json:"quota_bytes,omitempty"` // nil = no change, 0 = remove limit
+		ReplicationFactor *int                    `json:"replication_factor,omitempty"`
+		QuotaBytes        *int64                  `json:"quota_bytes,omitempty"`    // nil = no change, 0 = remove limit
+		ErasureCoding     *s3.ErasureCodingPolicy `json:"erasure_coding,omitempty"` // nil = no change
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONReqSize)
@@ -676,6 +677,7 @@ func (s *Server) handleUpdateBucket(w http.ResponseWriter, r *http.Request, buck
 	updates := s3.BucketMetadataUpdate{
 		ReplicationFactor: req.ReplicationFactor,
 		QuotaBytes:        req.QuotaBytes,
+		ErasureCoding:     req.ErasureCoding,
 	}
 
 	if err := s.s3Store.UpdateBucketMetadata(r.Context(), bucket, updates); err != nil {
