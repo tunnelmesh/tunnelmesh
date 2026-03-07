@@ -1109,6 +1109,32 @@ func (t *Transport) sendKeepalives() {
 	}
 }
 
+// isInLocalSubnet reports whether ip is covered by any locally-attached, up-and-running
+// interface subnet. Used to guard against substituting private IPs (e.g. Docker bridge
+// 172.28.x.x) that are not directly reachable from the local host.
+func isInLocalSubnet(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	const wantFlags = net.FlagUp | net.FlagRunning
+	for _, iface := range ifaces {
+		if iface.Flags&wantFlags != wantFlags {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Dial creates an outbound connection to a peer.
 func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (transport.Connection, error) {
 	log.Debug().
@@ -1141,7 +1167,26 @@ func (t *Transport) Dial(ctx context.Context, opts transport.DialOptions) (trans
 			ourPublicIPs, _, _ := proto.GetLocalIPs()
 			for _, ourPublicIP := range ourPublicIPs {
 				if ourPublicIP == peerExternalHost {
-					// Same public IP means same LAN - use private IP to avoid hairpinning
+					// Same public IP means same LAN — but only substitute if the peer's
+					// private IP is actually reachable from our local interfaces.
+					// Docker bridge IPs (e.g. 172.28.x.x) share our public IP via standard NAT
+					// but are NOT routable from macOS — skip them to avoid silent drops.
+					privateIP := net.ParseIP(opts.PeerInfo.PrivateIPs[0])
+					if privateIP == nil {
+						log.Warn().
+							Str("peer", opts.PeerName).
+							Str("peer_private_ip", opts.PeerInfo.PrivateIPs[0]).
+							Msg("failed to parse peer private IP")
+						break
+					}
+					if !isInLocalSubnet(privateIP) {
+						log.Debug().
+							Str("peer", opts.PeerName).
+							Str("our_public_ip", ourPublicIP).
+							Str("peer_private_ip", opts.PeerInfo.PrivateIPs[0]).
+							Msg("same-network peer but private IP not in local subnet, skipping private IP substitution")
+						break
+					}
 					privateEndpoint := net.JoinHostPort(opts.PeerInfo.PrivateIPs[0], fmt.Sprint(opts.PeerInfo.UDPPort))
 					log.Debug().
 						Str("peer", opts.PeerName).
