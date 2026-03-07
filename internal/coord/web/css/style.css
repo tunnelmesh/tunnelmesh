@@ -26,6 +26,8 @@
     --color-btn-primary: #2563eb;
     --color-btn-primary-hover: #3b82f6;
     --color-btn-danger: #f85149;
+    --color-btn-success: #1a7f3c;
+    --color-btn-success-hover: #238f45;
 
     /* Focus ring — sky blue */
     --color-focus-ring: rgb(96 165 250 / 0.3);
@@ -505,10 +507,10 @@ main {
     background: var(--color-btn-primary-hover);
 }
 
-.btn-success, .btn.btn-success {
-    background: #1a7f3c;
+.btn-success {
+    background: var(--color-btn-success);
     color: #fff;
-    border: 1px solid #1a7f3c;
+    border: 1px solid var(--color-btn-success);
     border-radius: var(--btn-border-radius);
     padding: 0.5rem 1rem;
     font-size: 0.875rem;
@@ -521,7 +523,7 @@ main {
 }
 
 .btn-success:hover:not(:disabled) {
-    background: #238f45;
+    background: var(--color-btn-success-hover);
 }
 
 .btn-primary:disabled {

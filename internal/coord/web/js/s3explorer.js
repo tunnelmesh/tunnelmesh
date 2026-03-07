@@ -18,6 +18,7 @@
     const PAGE_SIZE = 7;
     const DATASHEET_PAGE_SIZE = 50; // Minimum rows per page in datasheet view (actual size adapts to viewport)
     const DEFAULT_COLUMN_WIDTH = 150; // Default column width in pixels
+    const EDITOR_MODE_CLASSES = ['wysiwyg-mode', 'datasheet-mode', 'treeview-mode'];
 
     // =========================================================================
     // State
@@ -1798,7 +1799,6 @@
         if (!editor || !wysiwyg) return;
 
         // FSM reset: clear all mode classes before applying the active one
-        const EDITOR_MODE_CLASSES = ['wysiwyg-mode', 'datasheet-mode', 'treeview-mode'];
         if (editorWrap) {
             for (const c of EDITOR_MODE_CLASSES) editorWrap.classList.remove(c);
         }
