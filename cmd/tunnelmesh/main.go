@@ -913,6 +913,7 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		// Start periodic background tasks
 		srv.StartPeriodicSave(ctx)
 		srv.StartPeriodicCleanup(ctx)
+		srv.StartRegistrationLimiterSweep(ctx)
 
 		// Start replicator if clustering is enabled
 		if err := srv.StartReplicator(); err != nil {

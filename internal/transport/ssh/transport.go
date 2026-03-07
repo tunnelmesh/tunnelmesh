@@ -306,6 +306,7 @@ func (l *Listener) Accept(ctx context.Context) (transport.Connection, error) {
 					remoteAddr: r.conn.RemoteAddr(),
 				}
 				conn.initActivity()
+				conn.startIdleWatchdog(ctx)
 				return conn, nil
 			}
 		}

@@ -1,6 +1,7 @@
 package coord
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -139,6 +140,7 @@ func (s *Server) notifyHeartbeat(peerName string) {
 		return
 	}
 
-	event := fmt.Sprintf("event: heartbeat\ndata: {\"peer\":\"%s\"}", peerName)
+	nameJSON, _ := json.Marshal(peerName)
+	event := fmt.Sprintf("event: heartbeat\ndata: {\"peer\":%s}", nameJSON)
 	s.sseHub.broadcast(event)
 }

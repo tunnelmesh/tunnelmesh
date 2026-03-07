@@ -38,6 +38,13 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// regLimiterEntry tracks a per-IP registration rate limiter with its last-used time
+// for periodic cleanup to prevent unbounded memory growth.
+type regLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastUsed atomic.Int64 // unix nanoseconds, updated on each use
+}
+
 // peerInfo wraps a peer with stats and metadata for admin UI.
 type peerInfo struct {
 	peer           *proto.Peer
@@ -132,7 +139,7 @@ type Server struct {
 	gcMeshTransport *http.Transport // underlying transport; TLS config set later by SetMeshTLS
 	gcForwardClient *http.Client    // shared TLS client for S3 GC forwarding (10 min timeout)
 	shareGCClient   *http.Client    // shared TLS client for share GC across coordinators (30 s timeout)
-	// Per-IP registration rate limiters (keyed by IP string, value *rate.Limiter)
+	// Per-IP registration rate limiters (keyed by IP string, value *regLimiterEntry)
 	registrationLimiter sync.Map
 }
 
@@ -762,6 +769,32 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// StartRegistrationLimiterSweep starts a background goroutine that prunes stale
+// per-IP rate limiter entries to prevent unbounded sync.Map growth.
+// Entries not used within the last 10 minutes are removed.
+func (s *Server) StartRegistrationLimiterSweep(ctx context.Context) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-10 * time.Minute).UnixNano()
+				s.registrationLimiter.Range(func(k, v any) bool {
+					if v.(*regLimiterEntry).lastUsed.Load() < cutoff {
+						s.registrationLimiter.Delete(k)
+					}
+					return true
+				})
+			}
+		}
+	}()
 }
 
 // StartPeriodicSave starts a goroutine that periodically saves stats history.
@@ -1791,8 +1824,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if clientIP == "" {
 		clientIP = r.RemoteAddr
 	}
-	limiterIface, _ := s.registrationLimiter.LoadOrStore(clientIP, rate.NewLimiter(rate.Limit(10), 20))
-	if !limiterIface.(*rate.Limiter).Allow() {
+	var entry *regLimiterEntry
+	if v, ok := s.registrationLimiter.Load(clientIP); ok {
+		entry = v.(*regLimiterEntry)
+	} else {
+		newEntry := &regLimiterEntry{limiter: rate.NewLimiter(rate.Limit(10), 20)}
+		newEntry.lastUsed.Store(time.Now().UnixNano())
+		v, _ := s.registrationLimiter.LoadOrStore(clientIP, newEntry)
+		entry = v.(*regLimiterEntry)
+	}
+	entry.lastUsed.Store(time.Now().UnixNano())
+	if !entry.limiter.Allow() {
 		s.jsonError(w, "registration rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
