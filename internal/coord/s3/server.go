@@ -572,9 +572,25 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 	}
 	defer func() { _ = reader.Close() }()
 
-	// Set response headers (no Content-Length: chunked transfer encoding allows
-	// the client to detect a mid-stream failure as a connection reset rather than
-	// a silent truncation that looks identical to a successful short response).
+	// Probe the first byte before committing to a 200 response.
+	// DistributedChunkReader is lazy — the first Read() triggers the actual
+	// chunk fetch. If that fails and we've already written headers, HTTP/2
+	// will send an empty DATA frame (Hijacker is not available on HTTP/2),
+	// and the client silently receives a 200 with no body. Reading one byte
+	// first lets us return a 503 before any headers are sent on failure.
+	probe := make([]byte, 1)
+	probeN, probeErr := reader.Read(probe)
+	if probeErr != nil && probeErr != io.EOF {
+		storeErr = probeErr
+		streamErr = true
+		log.Error().
+			Str("bucket", bucket).Str("key", key).
+			Err(probeErr).Msg("getObject: chunk unavailable before response started")
+		s.writeError(rec, http.StatusServiceUnavailable, "ChunkUnavailable", "object content temporarily unavailable")
+		return
+	}
+
+	// First chunk readable — safe to commit to 200 now.
 	rec.Header().Set("Content-Type", meta.ContentType)
 	rec.Header().Set("ETag", meta.ETag)
 	rec.Header().Set("Last-Modified", meta.LastModified.Format(http.TimeFormat))
@@ -584,24 +600,31 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 		rec.Header().Set(k, v)
 	}
 
-	n, err := io.Copy(rec, reader)
-	if err != nil {
-		streamErr = true
-		log.Error().
-			Str("bucket", bucket).Str("key", key).
-			Int64("bytes_sent", n).Int64("expected", meta.Size).
-			Err(err).Msg("getObject: stream failed mid-response, aborting connection")
-		// Abort: hijack and close so the client gets a TCP RST instead of a
-		// graceful FIN (which would be indistinguishable from a normal end of
-		// a chunked response with the wrong content length).
-		if hj, ok := w.(http.Hijacker); ok {
-			if conn, _, hjErr := hj.Hijack(); hjErr == nil {
-				_ = conn.Close()
+	if probeN > 0 {
+		_, _ = rec.Write(probe[:probeN])
+	}
+	var n int64
+	if probeErr != io.EOF {
+		var copyErr error
+		n, copyErr = io.Copy(rec, reader)
+		if copyErr != nil {
+			streamErr = true
+			log.Error().
+				Str("bucket", bucket).Str("key", key).
+				Int64("bytes_sent", int64(probeN)+n).Int64("expected", meta.Size).
+				Err(copyErr).Msg("getObject: stream failed mid-response, aborting connection")
+			// Abort: hijack and close so the client gets a TCP RST instead of a
+			// graceful FIN (which would be indistinguishable from a normal end of
+			// a chunked response with the wrong content length).
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, hjErr := hj.Hijack(); hjErr == nil {
+					_ = conn.Close()
+				}
 			}
 		}
 	}
-	if m != nil && n > 0 {
-		m.RecordDownload(n)
+	if m != nil {
+		m.RecordDownload(int64(probeN) + n)
 	}
 }
 
