@@ -1784,6 +1784,7 @@
         // Update UI
         updateEditorUI(state.editorMode);
         updateModeToggleButton();
+        if (state.editorMode === 'source') updateLineNumbers();
     }
 
     /* istanbul ignore next */
