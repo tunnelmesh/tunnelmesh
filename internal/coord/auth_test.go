@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,4 +85,55 @@ func TestServer_ValidateToken_InvalidToken(t *testing.T) {
 func TestTokenExpiry(t *testing.T) {
 	// Verify the token expiry constant is reasonable
 	assert.Equal(t, 24*time.Hour, TokenExpiry)
+}
+
+// makeExpiredToken crafts a JWT that expired ago seconds in the past,
+// signed with the given secret. Used to test expired-token rejection.
+func makeExpiredToken(t *testing.T, secret, peerName, meshIP string, ago time.Duration) string {
+	t.Helper()
+	claims := JWTClaims{
+		PeerName: peerName,
+		MeshIP:   meshIP,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(-ago)),
+			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-TokenExpiry - ago)),
+			Issuer:    "tunnelmesh",
+		},
+	}
+	raw := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := raw.SignedString([]byte(secret))
+	require.NoError(t, err)
+	return tokenStr
+}
+
+func TestServer_ValidateToken_Expired(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AuthToken = "test-secret-expired"
+	cfg.Coordinator.Enabled = true
+	cfg.Coordinator.Listen = ":8080"
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+
+	tokenStr := makeExpiredToken(t, cfg.AuthToken, "peer1", "10.42.0.1", time.Second)
+	_, err = srv.ValidateToken(tokenStr)
+	require.Error(t, err, "expired token must be rejected")
+}
+
+func TestServer_ValidateToken_WithRelay_Expired(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AuthToken = "test-secret-relay-expired"
+	cfg.Coordinator.Enabled = true
+	cfg.Coordinator.Listen = ":8080"
+
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupServer(t, srv) })
+
+	// The relay handler calls ValidateToken; verify it rejects expired tokens
+	// using the same code path as the relay authentication handler.
+	tokenStr := makeExpiredToken(t, cfg.AuthToken, "relay-peer", "10.42.0.5", time.Minute)
+	_, err = srv.ValidateToken(tokenStr)
+	require.Error(t, err, "relay path must reject expired token")
 }

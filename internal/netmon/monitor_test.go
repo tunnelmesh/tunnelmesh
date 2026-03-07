@@ -34,10 +34,11 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
 	assert.Equal(t, 500*time.Millisecond, cfg.DebounceInterval)
-	assert.Contains(t, cfg.IgnoreInterfaces, "lo")
+	assert.Contains(t, cfg.IgnoreInterfaces, "lo*")
 	assert.Contains(t, cfg.IgnoreInterfaces, "docker*")
 	assert.Contains(t, cfg.IgnoreInterfaces, "veth*")
 	assert.Contains(t, cfg.IgnoreInterfaces, "tun-mesh*")
+	assert.Contains(t, cfg.IgnoreInterfaces, "utun*")
 }
 
 func TestNewWithDefaults(t *testing.T) {

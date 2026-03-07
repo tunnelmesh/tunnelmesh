@@ -384,7 +384,7 @@ func TestEnsureCoordinatorConfig(t *testing.T) {
 				},
 			}
 
-			ensureCoordinatorConfig(cfg)
+			require.NoError(t, ensureCoordinatorConfig(cfg))
 
 			assert.Equal(t, tt.expectedEnabled, cfg.Coordinator.Enabled)
 			assert.Equal(t, tt.expectedListen, cfg.Coordinator.Listen)

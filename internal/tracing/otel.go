@@ -3,7 +3,9 @@ package tracing
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
+	mrand "math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -33,14 +35,37 @@ import (
 // trace IDs whose first nibble is 0 eliminates the problem class entirely.
 type noLeadingZeroIDGenerator struct{}
 
+func newNoLeadingZeroIDGenerator() *noLeadingZeroIDGenerator {
+	return &noLeadingZeroIDGenerator{}
+}
+
+// cryptoRandRead is the function used to read cryptographic random bytes.
+// It is a variable so tests can inject a failing reader to exercise the fallback path.
+var cryptoRandRead = cryptorand.Read
+
+// mathRandID fills b with math/rand bytes as a fallback when crypto/rand fails.
+// It writes 8 bytes per iteration; trailing bytes (len(b) % 8 != 0) are left zero.
+// All callers use 16-byte TraceIDs or 8-byte SpanIDs — both divisible by 8 — so
+// no bytes are silently skipped in practice.
+func mathRandID(b []byte) {
+	for i := 0; i+8 <= len(b); i += 8 {
+		binary.LittleEndian.PutUint64(b[i:], mrand.Uint64()) //nolint:gosec // intentional fallback for non-crypto use
+	}
+}
+
 func (g *noLeadingZeroIDGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
 	var tid trace.TraceID
 	var sid trace.SpanID
-	if _, err := cryptorand.Read(tid[:]); err != nil {
-		panic(fmt.Sprintf("tracing: trace ID generation failed: %v", err))
+	if _, err := cryptoRandRead(tid[:]); err != nil {
+		log.Warn().Err(err).Msg("tracing: crypto/rand failed, using math/rand fallback for IDs")
+		mathRandID(tid[:])
+		mathRandID(sid[:])
+		tid[0] |= 0x10
+		return tid, sid
 	}
-	if _, err := cryptorand.Read(sid[:]); err != nil {
-		panic(fmt.Sprintf("tracing: span ID generation failed: %v", err))
+	if _, err := cryptoRandRead(sid[:]); err != nil {
+		log.Warn().Err(err).Msg("tracing: crypto/rand failed, using math/rand fallback for span ID")
+		mathRandID(sid[:])
 	}
 	tid[0] |= 0x10 // force first hex digit to 1–f, never 0
 	return tid, sid
@@ -48,8 +73,10 @@ func (g *noLeadingZeroIDGenerator) NewIDs(ctx context.Context) (trace.TraceID, t
 
 func (g *noLeadingZeroIDGenerator) NewSpanID(_ context.Context, _ trace.TraceID) trace.SpanID {
 	var sid trace.SpanID
-	if _, err := cryptorand.Read(sid[:]); err != nil {
-		panic(fmt.Sprintf("tracing: span ID generation failed: %v", err))
+	if _, err := cryptoRandRead(sid[:]); err != nil {
+		log.Warn().Err(err).Msg("tracing: crypto/rand failed, using math/rand fallback for span ID")
+		mathRandID(sid[:])
+		return sid
 	}
 	return sid
 }
@@ -116,7 +143,7 @@ var (
 // Exposed so test helpers (testutil.InitTestTracer) can match production behaviour
 // and avoid leading-zero trace IDs that trip the Tempo search bug (#5395).
 func NewIDGenerator() sdktrace.IDGenerator {
-	return &noLeadingZeroIDGenerator{}
+	return newNoLeadingZeroIDGenerator()
 }
 
 // InitOTel initialises the OpenTelemetry TracerProvider with an OTLP HTTP exporter
@@ -154,7 +181,7 @@ func InitOTel(ctx context.Context, serviceName, serviceVersion, otlpEndpoint str
 		// Sample everything: connection-level events are low-frequency.
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 		// Use custom ID generator to avoid Tempo search bug with leading-zero trace IDs.
-		sdktrace.WithIDGenerator(&noLeadingZeroIDGenerator{}),
+		sdktrace.WithIDGenerator(newNoLeadingZeroIDGenerator()),
 		// Rewrite Docker daemon API span names to remove per-resource hex IDs.
 		sdktrace.WithSpanProcessor(dockerSpanNameProcessor{}),
 	)

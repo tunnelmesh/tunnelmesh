@@ -15,6 +15,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// relayHolder wraps RelayPacketSender for use with atomic.Value,
+// which requires all stored values to share the same concrete type.
+type relayHolder struct{ r RelayPacketSender }
+
 // Sentinel errors for routing failures.
 var (
 	// ErrNoRoute is returned when no route exists for the destination IP.
@@ -81,18 +85,15 @@ type Forwarder struct {
 	router             *Router
 	tunnels            TunnelProvider
 	tun                TUNDevice
-	relay              RelayPacketSender // Optional persistent relay for fallback
-	filter             *PacketFilter     // Optional packet filter for incoming traffic
+	relay              atomic.Value // stores relayHolder{r RelayPacketSender}
+	filter             atomic.Pointer[PacketFilter]
+	localIP            atomic.Pointer[net.IP]
 	bufPool            *PacketBufferPool
 	zeroCopyPool       *ZeroCopyBufferPool // Pool for zero-copy buffers
 	framePool          *sync.Pool          // Pool for frame buffers (header + MTU)
 	stats              ForwarderStats
 	statsEnabled       uint32 // Atomic: 1 = enabled (default), 0 = disabled for high-performance mode
 	tunMu              sync.RWMutex
-	relayMu            sync.RWMutex
-	filterMu           sync.RWMutex
-	localIP            net.IP
-	localIPMu          sync.RWMutex
 	onDeadTunnel       func(peerName string) // Callback when tunnel write fails
 	onFilterDrop       FilterDropCallback    // Callback when filter drops a packet
 	deadTunnelDebounce sync.Map              // peerName → time.Time for debouncing
@@ -161,42 +162,46 @@ func (f *Forwarder) SetTUN(tun TUNDevice) {
 
 // SetLocalIP sets the local mesh IP address.
 func (f *Forwarder) SetLocalIP(ip net.IP) {
-	f.localIPMu.Lock()
-	defer f.localIPMu.Unlock()
-	f.localIP = ip
+	f.localIP.Store(&ip)
 }
 
 // SetRelay sets the persistent relay for fallback routing.
+// Typed-nil values (e.g. (*T)(nil) satisfying the interface) are normalised to
+// a plain nil holder here at write time so that loadRelay() needs no reflection.
 func (f *Forwarder) SetRelay(relay RelayPacketSender) {
-	f.relayMu.Lock()
-	defer f.relayMu.Unlock()
-	oldRelay := f.relay
-	f.relay = relay
-	// Check for nil interface value (not just nil interface) using reflection
+	oldRelay := f.loadRelay()
 	isNil := relay == nil || reflect.ValueOf(relay).IsNil()
-	if !isNil {
+	if isNil {
+		f.relay.Store(relayHolder{r: nil})
+		log.Debug().Bool("old_was_nil", oldRelay == nil).Msg("forwarder relay reference cleared")
+	} else {
+		f.relay.Store(relayHolder{r: relay})
 		log.Debug().
 			Bool("old_was_nil", oldRelay == nil).
 			Bool("new_connected", relay.IsConnected()).
 			Msg("forwarder relay reference updated")
-	} else {
-		log.Debug().Bool("old_was_nil", oldRelay == nil).Msg("forwarder relay reference cleared")
 	}
+}
+
+// loadRelay returns the current relay, or nil if none is set.
+// Typed-nil inputs are normalised in SetRelay, so a plain nil check suffices here.
+func (f *Forwarder) loadRelay() RelayPacketSender {
+	h, ok := f.relay.Load().(relayHolder)
+	if !ok || h.r == nil {
+		return nil
+	}
+	return h.r
 }
 
 // SetFilter sets the packet filter for incoming traffic.
 func (f *Forwarder) SetFilter(filter *PacketFilter) {
-	f.filterMu.Lock()
-	defer f.filterMu.Unlock()
-	f.filter = filter
+	f.filter.Store(filter)
 	log.Debug().Bool("filter_set", filter != nil).Msg("forwarder packet filter updated")
 }
 
 // Filter returns the current packet filter.
 func (f *Forwarder) Filter() *PacketFilter {
-	f.filterMu.RLock()
-	defer f.filterMu.RUnlock()
-	return f.filter
+	return f.filter.Load()
 }
 
 // SetOnDeadTunnel sets a callback that is called when a tunnel write fails.
@@ -334,9 +339,11 @@ func (f *Forwarder) ForwardPacket(packet []byte) error {
 	}
 
 	// Handle packets destined for our own IP (local traffic)
-	f.localIPMu.RLock()
-	localIP := f.localIP
-	f.localIPMu.RUnlock()
+	localIPPtr := f.localIP.Load()
+	var localIP net.IP
+	if localIPPtr != nil {
+		localIP = *localIPPtr
+	}
 	if localIP != nil && info.DstIP.Equal(localIP) {
 		// Write back to TUN so kernel delivers it locally
 		return f.ReceivePacket(packet)
@@ -401,9 +408,7 @@ func (f *Forwarder) ForwardPacket(packet []byte) error {
 	}
 
 	// No direct tunnel or tunnel write failed - try persistent relay
-	f.relayMu.RLock()
-	relay := f.relay
-	f.relayMu.RUnlock()
+	relay := f.loadRelay()
 
 	if relay != nil && relay.IsConnected() {
 		// Build framed packet for relay
@@ -474,9 +479,7 @@ func (f *Forwarder) forwardToExitPeer(packet []byte, info *PacketInfo, exitNodeN
 	}
 
 	// No direct tunnel or tunnel failed - try relay
-	f.relayMu.RLock()
-	relay := f.relay
-	f.relayMu.RUnlock()
+	relay := f.loadRelay()
 
 	if relay != nil && relay.IsConnected() {
 		// Build framed packet for relay
@@ -526,9 +529,7 @@ func (f *Forwarder) ReceivePacketFromPeer(packet []byte, sourcePeer string) erro
 	collectStats := atomic.LoadUint32(&f.statsEnabled) == 1
 
 	// Apply packet filter to incoming traffic with peer context
-	f.filterMu.RLock()
-	filter := f.filter
-	f.filterMu.RUnlock()
+	filter := f.filter.Load()
 
 	if filter != nil {
 		result := filter.CheckPacketFromPeer(packet, sourcePeer)
@@ -619,9 +620,11 @@ func (f *Forwarder) ForwardPacketZeroCopy(zcBuf *ZeroCopyBuffer, packetLen int) 
 	}
 
 	// Handle packets destined for our own IP
-	f.localIPMu.RLock()
-	localIP := f.localIP
-	f.localIPMu.RUnlock()
+	localIPPtr := f.localIP.Load()
+	var localIP net.IP
+	if localIPPtr != nil {
+		localIP = *localIPPtr
+	}
 	if localIP != nil && info.DstIP.Equal(localIP) {
 		return f.ReceivePacket(packet)
 	}
@@ -684,9 +687,7 @@ func (f *Forwarder) ForwardPacketZeroCopy(zcBuf *ZeroCopyBuffer, packetLen int) 
 	}
 
 	// No direct tunnel or tunnel write failed - try persistent relay
-	f.relayMu.RLock()
-	relay := f.relay
-	f.relayMu.RUnlock()
+	relay := f.loadRelay()
 
 	if relay != nil && relay.IsConnected() {
 		// Get the framed data from zero-copy buffer

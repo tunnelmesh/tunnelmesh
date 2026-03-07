@@ -2,6 +2,7 @@ package udp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -113,4 +114,57 @@ func TestInitiateHandshake_TimeoutRecordsError(t *testing.T) {
 		}
 	}
 	t.Error("udp.handshake.initiate span not found")
+}
+
+// TestHandshake_ContextCancelled verifies that initiateHandshake returns
+// immediately with context.Canceled when the context is already cancelled,
+// well before the HandshakeTimeout fires.
+func TestHandshake_ContextCancelled(t *testing.T) {
+	tr, conn := newHandshakeTestTransport(t)
+
+	_, peerPub, _ := X25519KeyPair()
+	peerAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59996}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel before calling
+
+	start := time.Now()
+	_, err := tr.initiateHandshake(ctx, "cancelled-peer", peerPub, peerAddr, conn)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	// Should return well before the 30 ms HandshakeTimeout.
+	if elapsed >= 20*time.Millisecond {
+		t.Errorf("context cancel took %v, expected < 20ms", elapsed)
+	}
+}
+
+// TestHandshake_Timeout verifies that initiateHandshake returns an error
+// when the context deadline is shorter than HandshakeTimeout and no response
+// arrives.
+func TestHandshake_Timeout(t *testing.T) {
+	tr, conn := newHandshakeTestTransport(t)
+
+	_, peerPub, _ := X25519KeyPair()
+	peerAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59995}
+
+	// 10 ms deadline is shorter than the 30 ms HandshakeTimeout configured
+	// in newHandshakeTestTransport, so timeout logic uses the context deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := tr.initiateHandshake(ctx, "timeout-peer", peerPub, peerAddr, conn)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	// The select may fire on ctx.Done() (DeadlineExceeded) or time.After
+	// (handshake timeout) depending on scheduling; both are acceptable.
+	if !errors.Is(err, context.DeadlineExceeded) && err.Error() != "handshake timeout" {
+		t.Errorf("unexpected error: %v", err)
+	}
 }

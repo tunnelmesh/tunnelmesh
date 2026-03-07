@@ -17,8 +17,9 @@ import (
 )
 
 // casEncoderConcurrency caps the zstd encoder's internal sub-encoder pool.
-// Each sub-encoder holds ~12.7 MB of hash tables, so 4 × 12.7 MB ≈ 51 MB
-// memory budget. Increase for higher throughput at the cost of more memory.
+// At SpeedDefault with lowMem, each sub-encoder uses ~12–13 MB, so
+// 4 × 13 MB ≈ 52 MB memory budget. Increase for higher throughput at the
+// cost of more memory.
 const casEncoderConcurrency = 4
 
 // CAS (Content-Addressable Storage) manages encrypted, compressed chunks.
@@ -71,9 +72,13 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 
 	// Initialize single shared encoder with bounded concurrency.
 	// See casEncoderConcurrency for the memory/throughput tradeoff rationale.
+	// WithLowerEncoderMem reduces the per-sub-encoder history buffer from
+	// ~32 MB (SpeedDefault without lowMem) to ~12–13 MB, cutting total zstd
+	// memory from ~160 MB to ~52 MB with no change in compression ratio.
 	enc, err := zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.SpeedDefault),
 		zstd.WithEncoderConcurrency(casEncoderConcurrency),
+		zstd.WithLowerEncoderMem(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create zstd encoder: %w", err)

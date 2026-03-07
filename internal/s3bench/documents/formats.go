@@ -19,20 +19,20 @@ func GenerateMarkdownDocument(docType string, ctx story.Context) ([]byte, error)
 
 	// Classification banner for clearance levels
 	if ctx.Author.Clearance >= 3 {
-		doc.WriteString(fmt.Sprintf("**%s**\n\n", FormatClassification(ctx.Author.Clearance)))
+		fmt.Fprintf(&doc, "**%s**\n\n", FormatClassification(ctx.Author.Clearance))
 	}
 
 	// Document header with markdown formatting
-	doc.WriteString(fmt.Sprintf("# %s\n\n", generateTitle(docType, phase, docNum)))
+	fmt.Fprintf(&doc, "# %s\n\n", generateTitle(docType, phase, docNum))
 
 	// Metadata table
 	doc.WriteString("| Field | Value |\n")
 	doc.WriteString("|-------|-------|\n")
-	doc.WriteString(fmt.Sprintf("| **Document ID** | `%s` |\n", docID))
-	doc.WriteString(fmt.Sprintf("| **Timestamp** | %s |\n", FormatTimestamp(ctx.Timestamp)))
-	doc.WriteString(fmt.Sprintf("| **Author** | %s |\n", ctx.Author.Name))
-	doc.WriteString(fmt.Sprintf("| **Phase** | %s (H+%d) |\n", PhaseName(phase), int(ctx.StoryElapsed.Hours())))
-	doc.WriteString(fmt.Sprintf("| **Clearance** | Level %d |\n", ctx.Author.Clearance))
+	fmt.Fprintf(&doc, "| **Document ID** | `%s` |\n", docID)
+	fmt.Fprintf(&doc, "| **Timestamp** | %s |\n", FormatTimestamp(ctx.Timestamp))
+	fmt.Fprintf(&doc, "| **Author** | %s |\n", ctx.Author.Name)
+	fmt.Fprintf(&doc, "| **Phase** | %s (H+%d) |\n", PhaseName(phase), int(ctx.StoryElapsed.Hours()))
+	fmt.Fprintf(&doc, "| **Clearance** | Level %d |\n", ctx.Author.Clearance)
 	doc.WriteString("\n")
 
 	// Executive Summary section
@@ -61,10 +61,10 @@ func GenerateMarkdownDocument(docType string, ctx story.Context) ([]byte, error)
 
 	// Footer
 	doc.WriteString("---\n\n")
-	doc.WriteString(fmt.Sprintf("*Document generated: %s*\n", time.Now().Format(time.RFC3339)))
+	fmt.Fprintf(&doc, "*Document generated: %s*\n", time.Now().Format(time.RFC3339))
 
 	if ctx.Author.Clearance >= 3 {
-		doc.WriteString(fmt.Sprintf("\n\n**%s**\n", FormatClassification(ctx.Author.Clearance)))
+		fmt.Fprintf(&doc, "\n\n**%s**\n", FormatClassification(ctx.Author.Clearance))
 	}
 
 	return []byte(doc.String()), nil

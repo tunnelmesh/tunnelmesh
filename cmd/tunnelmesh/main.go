@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -99,6 +100,7 @@ func safeGo(ctx context.Context, name string, fn func(), restart bool) {
 				log.Error().
 					Str("goroutine", name).
 					Interface("panic", r).
+					Str("stack", string(debug.Stack())).
 					Msg("goroutine panicked - unexpected crash")
 				if restart {
 					select {
@@ -303,9 +305,9 @@ Examples:
 	}
 }
 
-// ensureCoordinatorConfig enables coordinator mode when no server URL is provided (bootstrap).
-// This allows the first node in a mesh to automatically become a coordinator.
-func ensureCoordinatorConfig(cfg *config.PeerConfig) {
+// ensureCoordinatorConfig enables coordinator mode when no server URL is provided
+// (bootstrap), then validates the coordinator config if enabled.
+func ensureCoordinatorConfig(cfg *config.PeerConfig) error {
 	if len(cfg.Servers) == 0 && !cfg.Coordinator.Enabled {
 		log.Warn().Msg("no server URL provided - automatically enabling coordinator mode for bootstrap (set TUNNELMESH_SERVER to join existing mesh)")
 		cfg.Coordinator.Enabled = true
@@ -314,6 +316,12 @@ func ensureCoordinatorConfig(cfg *config.PeerConfig) {
 			cfg.Coordinator.Listen = ":8443"
 		}
 	}
+	if cfg.Coordinator.Enabled {
+		if err := cfg.Coordinator.Validate(); err != nil {
+			return fmt.Errorf("coordinator config: %w", err)
+		}
+	}
+	return nil
 }
 
 // runAsService runs the application as a system service.
@@ -493,8 +501,10 @@ func runJoinFromService(ctx context.Context, configPath string) error {
 		Int("ssh_port", cfg.SSHPort).
 		Msg("config loaded")
 
-	// Enable coordinator mode for bootstrap if no server URL
-	ensureCoordinatorConfig(cfg)
+	// Enable coordinator mode for bootstrap if no server URL, then validate.
+	if err := ensureCoordinatorConfig(cfg); err != nil {
+		return err
+	}
 
 	if cfg.AuthToken == "" {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable")
@@ -600,7 +610,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 func generateAuthToken() string {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatal().Err(err).Msg("failed to generate cryptographic random token")
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -754,8 +766,10 @@ func runJoin(cmd *cobra.Command, args []string) error {
 		cfg.AllowExitTraffic = true
 	}
 
-	// Enable coordinator mode for bootstrap if no server URL
-	ensureCoordinatorConfig(cfg)
+	// Enable coordinator mode for bootstrap if no server URL, then validate.
+	if err := ensureCoordinatorConfig(cfg); err != nil {
+		return err
+	}
 
 	if cfg.AuthToken == "" {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable\nExample: export TUNNELMESH_TOKEN=\"your-token\" && tunnelmesh join coord.example.com:8443")
@@ -862,8 +876,10 @@ func runJoinWithConfigAndCallback(ctx context.Context, cfg *config.PeerConfig, o
 		cfg.Name, _ = os.Hostname()
 	}
 
-	// Enable coordinator mode for bootstrap if no server URL
-	ensureCoordinatorConfig(cfg)
+	// Enable coordinator mode for bootstrap if no server URL, then validate.
+	if err := ensureCoordinatorConfig(cfg); err != nil {
+		return err
+	}
 
 	if cfg.AuthToken == "" {
 		return fmt.Errorf("auth token required: set TUNNELMESH_TOKEN environment variable")

@@ -77,71 +77,6 @@ func TestNewAckMessage_WithError(t *testing.T) {
 	assert.Equal(t, "conflict detected", decoded.ErrorMessage)
 }
 
-func TestNewSyncRequestMessage(t *testing.T) {
-	payload := SyncRequestPayload{
-		RequestedBuckets: []string{"system", "user"},
-	}
-
-	msg, err := NewSyncRequestMessage("sync-001", "coord3.tunnelmesh:8443", payload)
-	require.NoError(t, err)
-
-	assert.Equal(t, MessageTypeSyncRequest, msg.Type)
-	assert.Equal(t, "sync-001", msg.ID)
-
-	// Verify we can decode it back
-	decoded, err := msg.DecodeSyncRequestPayload()
-	require.NoError(t, err)
-	assert.Equal(t, payload.RequestedBuckets, decoded.RequestedBuckets)
-}
-
-func TestNewSyncRequestMessage_AllBuckets(t *testing.T) {
-	payload := SyncRequestPayload{
-		RequestedBuckets: nil, // Empty means all buckets
-	}
-
-	msg, err := NewSyncRequestMessage("sync-002", "coord3.tunnelmesh:8443", payload)
-	require.NoError(t, err)
-
-	decoded, err := msg.DecodeSyncRequestPayload()
-	require.NoError(t, err)
-	assert.Nil(t, decoded.RequestedBuckets)
-}
-
-func TestNewSyncResponseMessage(t *testing.T) {
-	payload := SyncResponsePayload{
-		StateSnapshot: []byte(`{"node_id":"coord1","vectors":{}}`),
-		Objects: []SyncObjectEntry{
-			{
-				Bucket:        "system",
-				Key:           "config.json",
-				Data:          []byte(`{"setting":"value"}`),
-				VersionVector: VersionVector{"coord1": 2},
-				ContentType:   "application/json",
-			},
-			{
-				Bucket:        "user",
-				Key:           "data.json",
-				Data:          []byte(`{"user":"test"}`),
-				VersionVector: VersionVector{"coord1": 1, "coord2": 1},
-			},
-		},
-	}
-
-	msg, err := NewSyncResponseMessage("sync-resp-001", "coord1.tunnelmesh:8443", payload)
-	require.NoError(t, err)
-
-	assert.Equal(t, MessageTypeSyncResponse, msg.Type)
-
-	// Verify we can decode it back
-	decoded, err := msg.DecodeSyncResponsePayload()
-	require.NoError(t, err)
-	assert.Equal(t, payload.StateSnapshot, decoded.StateSnapshot)
-	assert.Len(t, decoded.Objects, 2)
-	assert.Equal(t, "system", decoded.Objects[0].Bucket)
-	assert.Equal(t, "config.json", decoded.Objects[0].Key)
-	assert.Equal(t, "user", decoded.Objects[1].Bucket)
-}
-
 func TestMessage_Marshal_Unmarshal(t *testing.T) {
 	original := &Message{
 		Version: ProtocolVersion,
@@ -182,14 +117,6 @@ func TestMessage_DecodeWrongType(t *testing.T) {
 	_, err := msg.DecodeAckPayload()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not ack")
-
-	_, err = msg.DecodeSyncRequestPayload()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not sync_request")
-
-	_, err = msg.DecodeSyncResponsePayload()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not sync_response")
 }
 
 func TestMessage_DecodeInvalidJSON(t *testing.T) {
@@ -235,69 +162,19 @@ func TestReplicatePayload_WithMetadata(t *testing.T) {
 	assert.Equal(t, "abc123", decoded.Metadata["checksum"])
 }
 
-func TestSyncObjectEntry_CompleteRoundTrip(t *testing.T) {
-	entries := []SyncObjectEntry{
-		{
-			Bucket:        "system",
-			Key:           "peer_registry.json",
-			Data:          []byte(`{"peers": []}`),
-			VersionVector: VersionVector{"coord1": 5, "coord2": 3},
-			ContentType:   "application/json",
-			Metadata: map[string]string{
-				"last_modified": "2024-01-01",
-			},
-		},
-		{
-			Bucket:        "user",
-			Key:           "uploads/file.bin",
-			Data:          []byte{0x00, 0x01, 0x02, 0xFF}, // Binary data
-			VersionVector: VersionVector{"coord2": 1},
-			ContentType:   "application/octet-stream",
-		},
-	}
-
-	payload := SyncResponsePayload{
-		StateSnapshot: []byte(`{"test": "snapshot"}`),
-		Objects:       entries,
-	}
-
-	msg, err := NewSyncResponseMessage("sync-123", "coord1", payload)
-	require.NoError(t, err)
-
-	decoded, err := msg.DecodeSyncResponsePayload()
-	require.NoError(t, err)
-
-	require.Len(t, decoded.Objects, 2)
-
-	// Verify first entry
-	assert.Equal(t, entries[0].Bucket, decoded.Objects[0].Bucket)
-	assert.Equal(t, entries[0].Key, decoded.Objects[0].Key)
-	assert.Equal(t, entries[0].Data, decoded.Objects[0].Data)
-	assert.Equal(t, entries[0].ContentType, decoded.Objects[0].ContentType)
-	assert.True(t, entries[0].VersionVector.Equal(decoded.Objects[0].VersionVector))
-	assert.Equal(t, entries[0].Metadata, decoded.Objects[0].Metadata)
-
-	// Verify second entry (binary data)
-	assert.Equal(t, entries[1].Data, decoded.Objects[1].Data)
-}
-
 func TestMessageType_Constants(t *testing.T) {
 	// Verify message type constants are distinct
 	types := map[MessageType]bool{
 		MessageTypeReplicate:           true,
 		MessageTypeAck:                 true,
-		MessageTypeSyncRequest:         true,
-		MessageTypeSyncResponse:        true,
 		MessageTypeReplicateObjectMeta: true,
 	}
 
-	assert.Len(t, types, 5, "All message types should be distinct")
+	assert.Len(t, types, 3, "All message types should be distinct")
 
 	// Verify string values
 	assert.Equal(t, MessageType("replicate"), MessageTypeReplicate)
 	assert.Equal(t, MessageType("ack"), MessageTypeAck)
-	assert.Equal(t, MessageType("sync_request"), MessageTypeSyncRequest)
-	assert.Equal(t, MessageType("sync_response"), MessageTypeSyncResponse)
 	assert.Equal(t, MessageType("replicate_object_meta"), MessageTypeReplicateObjectMeta)
 }
 

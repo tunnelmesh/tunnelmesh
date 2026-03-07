@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tunnelmesh/tunnelmesh/pkg/bytesize"
 	"github.com/tunnelmesh/tunnelmesh/testutil"
 )
 
@@ -1115,4 +1116,102 @@ ssh_port: 2222
 	// Regular fields should load normally
 	assert.Equal(t, "testnode", cfg.Name)
 	assert.Equal(t, 2222, cfg.SSHPort)
+}
+
+func TestCoordinatorConfig_Validate(t *testing.T) {
+	validConfig := CoordinatorConfig{
+		Listen: ":8443",
+		S3: S3Config{
+			MaxSize:       bytesize.Size(1024 * 1024 * 1024),
+			MaxObjectSize: bytesize.Size(512 * 1024 * 1024),
+		},
+		MemberlistSeeds: []string{"coord1.example.com:7946", "coord2.example.com"},
+		AdminPeers:      []string{"alice", "bob-*", "abc123def456789a"},
+		Monitoring:      MonitoringConfig{OTLPEndpoint: "http://localhost:4318"},
+	}
+
+	tests := []struct {
+		name    string
+		cfg     CoordinatorConfig
+		wantErr string
+	}{
+		{
+			name:    "valid full config",
+			cfg:     validConfig,
+			wantErr: "",
+		},
+		{
+			name:    "listen empty",
+			cfg:     CoordinatorConfig{},
+			wantErr: "coordinator.listen is required",
+		},
+		{
+			name:    "listen invalid format",
+			cfg:     CoordinatorConfig{Listen: "not-a-port"},
+			wantErr: "not a valid host:port",
+		},
+		{
+			name: "max_object_size exceeds max_size",
+			cfg: CoordinatorConfig{
+				Listen: ":8443",
+				S3: S3Config{
+					MaxSize:       bytesize.Size(100),
+					MaxObjectSize: bytesize.Size(200),
+				},
+			},
+			wantErr: "must not exceed max_size",
+		},
+		{
+			name: "memberlist seed invalid",
+			cfg: CoordinatorConfig{
+				Listen:          ":8443",
+				MemberlistSeeds: []string{"coord1.example.com:7946", "bad::seed::format"},
+			},
+			wantErr: "memberlist_seeds",
+		},
+		{
+			name: "admin_peers invalid glob",
+			cfg: CoordinatorConfig{
+				Listen:     ":8443",
+				AdminPeers: []string{"valid-*", "[invalid"},
+			},
+			wantErr: "admin_peers",
+		},
+		{
+			name: "otlp_endpoint invalid URL",
+			cfg: CoordinatorConfig{
+				Listen:     ":8443",
+				Monitoring: MonitoringConfig{OTLPEndpoint: "not a url"},
+			},
+			wantErr: "otlp_endpoint",
+		},
+		{
+			name: "otlp_endpoint invalid scheme",
+			cfg: CoordinatorConfig{
+				Listen:     ":8443",
+				Monitoring: MonitoringConfig{OTLPEndpoint: "ftp://collector:4318"},
+			},
+			wantErr: "scheme must be http or https",
+		},
+		{
+			name: "memberlist empty host",
+			cfg: CoordinatorConfig{
+				Listen:          ":8443",
+				MemberlistSeeds: []string{""},
+			},
+			wantErr: "empty host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
 }

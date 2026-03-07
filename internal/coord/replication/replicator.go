@@ -161,12 +161,10 @@ type Replicator struct {
 	maxPendingOperations int // Maximum pending ACKs (0 = unlimited)
 
 	// Timeouts
-	ackTimeout          time.Duration
-	applyTimeout        time.Duration
-	ackSendTimeout      time.Duration
-	syncRequestTimeout  time.Duration
-	syncResponseTimeout time.Duration
-	chunkAckTimeout     time.Duration // Timeout for chunk-level ACKs (Phase 4)
+	ackTimeout      time.Duration
+	applyTimeout    time.Duration
+	ackSendTimeout  time.Duration
+	chunkAckTimeout time.Duration // Timeout for chunk-level ACKs (Phase 4)
 
 	// Peer coordinators
 	mu        sync.RWMutex
@@ -277,8 +275,6 @@ type Config struct {
 	RateBurst                    int             // Maximum burst size for rate limiter (default: 500)
 	ApplyTimeout                 time.Duration   // Timeout for applying replication to S3 (default: 30s)
 	AckSendTimeout               time.Duration   // Timeout for sending ACK messages (default: 5s)
-	SyncRequestTimeout           time.Duration   // Timeout for handling sync requests (default: 5min)
-	SyncResponseTimeout          time.Duration   // Timeout for handling sync responses (default: 10min)
 	ChunkAckTimeout              time.Duration   // Timeout for chunk-level ACKs (default: 30s, Phase 4)
 	MaxConcurrentSends           int             // Maximum concurrent outbound replication sends (default: 20)
 	ChunkPipelineWindow          int             // Maximum concurrent chunk sends per ReplicateObject (default: 5)
@@ -311,12 +307,6 @@ func NewReplicator(config Config) *Replicator {
 	}
 	if config.AckSendTimeout == 0 {
 		config.AckSendTimeout = 5 * time.Second
-	}
-	if config.SyncRequestTimeout == 0 {
-		config.SyncRequestTimeout = 5 * time.Minute
-	}
-	if config.SyncResponseTimeout == 0 {
-		config.SyncResponseTimeout = 10 * time.Minute
 	}
 	if config.ChunkAckTimeout == 0 {
 		config.ChunkAckTimeout = 30 * time.Second // Default: 30s for chunk ACKs
@@ -360,8 +350,6 @@ func NewReplicator(config Config) *Replicator {
 		ackTimeout:           config.AckTimeout,
 		applyTimeout:         config.ApplyTimeout,
 		ackSendTimeout:       config.AckSendTimeout,
-		syncRequestTimeout:   config.SyncRequestTimeout,
-		syncResponseTimeout:  config.SyncResponseTimeout,
 		chunkAckTimeout:      config.ChunkAckTimeout,
 		// Semaphore to bound concurrent async ACK sends. Cap of 100 allows
 		// high parallelism for typical replication bursts while limiting
@@ -582,67 +570,6 @@ func (r *Replicator) getPeerName(meshIP string) string {
 	return r.peerNames[meshIP]
 }
 
-// RequestSync sends a sync request to a specific coordinator peer.
-// The peer will respond with a full state snapshot that will be applied locally.
-// If buckets is empty, all buckets will be requested.
-func (r *Replicator) RequestSync(ctx context.Context, coordMeshIP string, buckets []string) error {
-	r.logger.Info().
-		Str("peer", coordMeshIP).
-		Strs("buckets", buckets).
-		Msg("Requesting full state sync from peer")
-
-	// Create sync request
-	payload := SyncRequestPayload{
-		RequestedBuckets: buckets,
-	}
-
-	msg, err := NewSyncRequestMessage(uuid.New().String(), r.nodeID, payload)
-	if err != nil {
-		return fmt.Errorf("create sync request: %w", err)
-	}
-
-	data, err := msg.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshal sync request: %w", err)
-	}
-
-	// Send request
-	if err := r.transport.SendToCoordinator(ctx, coordMeshIP, data); err != nil {
-		r.logger.Error().Err(err).Str("peer", coordMeshIP).Msg("Failed to send sync request")
-		return fmt.Errorf("send sync request: %w", err)
-	}
-
-	r.logger.Info().Str("peer", coordMeshIP).Msg("Sync request sent, waiting for response")
-	return nil
-}
-
-// RequestSyncFromAll sends a sync request to all known coordinator peers.
-// This is useful when a coordinator starts up and wants to catch up with the cluster.
-// The first peer to respond will provide the state.
-func (r *Replicator) RequestSyncFromAll(ctx context.Context, buckets []string) error {
-	peers := r.GetPeers()
-	if len(peers) == 0 {
-		r.logger.Warn().Msg("No peers available for sync request")
-		return nil
-	}
-
-	r.logger.Info().
-		Int("peer_count", len(peers)).
-		Strs("buckets", buckets).
-		Msg("Requesting sync from all peers")
-
-	// Send sync request to all peers
-	// We don't wait for responses here - handleSyncResponse will process them asynchronously
-	var lastErr error
-	for _, peer := range peers {
-		if err := r.RequestSync(ctx, peer, buckets); err != nil {
-			lastErr = err
-		}
-	}
-
-	return lastErr
-}
-
 // ReplicateDelete replicates a delete operation to all coordinator peers.
 // Deletes are represented as tombstones (empty data with delete marker).
 func (r *Replicator) ReplicateDelete(ctx context.Context, bucket, key string) error {
@@ -797,10 +724,6 @@ func (r *Replicator) handleIncomingMessage(ctx context.Context, from string, dat
 		return r.handleReplicate(msg)
 	case MessageTypeAck:
 		return r.handleAck(msg)
-	case MessageTypeSyncRequest:
-		return r.handleSyncRequest(msg)
-	case MessageTypeSyncResponse:
-		return r.handleSyncResponse(msg)
 	case MessageTypeReplicateChunk:
 		return r.handleReplicateChunk(msg)
 	case MessageTypeChunkAck:
@@ -1060,241 +983,6 @@ func (r *Replicator) handleAck(msg *Message) error {
 			r.removePendingACK(payload.ReplicateID)
 		}
 	}
-
-	return nil
-}
-
-// handleSyncRequest processes a sync request by sending the full state to the requestor.
-func (r *Replicator) handleSyncRequest(msg *Message) error {
-	r.logger.Info().Str("from", msg.From).Msg("Received sync request - preparing full state snapshot")
-
-	payload, err := msg.DecodeSyncRequestPayload()
-	if err != nil {
-		return fmt.Errorf("decode sync request: %w", err)
-	}
-
-	// SECURITY FIX #3: Use replicator's context for proper cancellation
-	ctx, cancel := context.WithTimeout(r.ctx, r.syncRequestTimeout)
-	defer cancel()
-
-	// Get state snapshot
-	stateSnapshot, err := r.state.Snapshot()
-	if err != nil {
-		r.logger.Error().Err(err).Msg("Failed to create state snapshot")
-		return fmt.Errorf("create state snapshot: %w", err)
-	}
-
-	// Determine which buckets to sync
-	var bucketsToSync []string
-	if len(payload.RequestedBuckets) > 0 {
-		bucketsToSync = payload.RequestedBuckets
-	} else {
-		// Get all buckets
-		allBuckets, err := r.s3.ListBuckets(ctx)
-		if err != nil {
-			r.logger.Error().Err(err).Msg("Failed to list buckets")
-			return fmt.Errorf("list buckets: %w", err)
-		}
-		bucketsToSync = allBuckets
-	}
-
-	// Collect all objects
-	var objects []SyncObjectEntry
-	for _, bucket := range bucketsToSync {
-		keys, err := r.s3.List(ctx, bucket)
-		if err != nil {
-			r.logger.Warn().Err(err).Str("bucket", bucket).Msg("Failed to list bucket, skipping")
-			continue
-		}
-
-		for _, key := range keys {
-			// Get object data
-			data, metadata, err := r.s3.Get(ctx, bucket, key)
-			if err != nil {
-				r.logger.Warn().Err(err).
-					Str("bucket", bucket).
-					Str("key", key).
-					Msg("Failed to get object, skipping")
-				continue
-			}
-
-			// Get version vector for this object
-			vv := r.state.Get(bucket, key)
-
-			// Extract content type from metadata
-			contentType := ""
-			if metadata != nil {
-				contentType = metadata["content-type"]
-			}
-
-			entry := SyncObjectEntry{
-				Bucket:        bucket,
-				Key:           key,
-				Data:          data,
-				VersionVector: vv,
-				ContentType:   contentType,
-				Metadata:      metadata,
-			}
-
-			// Include version history in sync
-			versions, vErr := r.s3.GetVersionHistory(ctx, bucket, key)
-			if vErr != nil {
-				r.logger.Warn().Err(vErr).
-					Str("bucket", bucket).Str("key", key).
-					Msg("Failed to get version history for sync, sending without versions")
-			} else if len(versions) > 0 {
-				entry.Versions = versions
-			}
-
-			objects = append(objects, entry)
-		}
-	}
-
-	// Create sync response
-	responsePayload := SyncResponsePayload{
-		StateSnapshot: stateSnapshot,
-		Objects:       objects,
-	}
-
-	response, err := NewSyncResponseMessage(uuid.New().String(), r.nodeID, responsePayload)
-	if err != nil {
-		r.logger.Error().Err(err).Msg("Failed to create sync response")
-		return fmt.Errorf("create sync response: %w", err)
-	}
-
-	data, err := response.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshal sync response: %w", err)
-	}
-
-	// Send response to requestor
-	if err := r.transport.SendToCoordinator(ctx, msg.From, data); err != nil {
-		r.logger.Error().Err(err).Str("to", msg.From).Msg("Failed to send sync response")
-		return fmt.Errorf("send sync response: %w", err)
-	}
-
-	r.logger.Info().
-		Str("to", msg.From).
-		Int("buckets", len(bucketsToSync)).
-		Int("objects", len(objects)).
-		Msg("Sent full state snapshot")
-
-	return nil
-}
-
-// handleSyncResponse processes a sync response by applying the received state.
-func (r *Replicator) handleSyncResponse(msg *Message) error {
-	r.logger.Info().Str("from", msg.From).Msg("Received sync response - applying state")
-
-	payload, err := msg.DecodeSyncResponsePayload()
-	if err != nil {
-		return fmt.Errorf("decode sync response: %w", err)
-	}
-
-	// SECURITY FIX #3: Use replicator's context for proper cancellation
-	ctx, cancel := context.WithTimeout(r.ctx, r.syncResponseTimeout)
-	defer cancel()
-
-	// Decode state snapshot to get version vectors, but don't overwrite our nodeID
-	var snapshot struct {
-		NodeID   string                   `json:"node_id"`
-		Vectors  map[string]VersionVector `json:"vectors"`
-		Checksum string                   `json:"checksum"`
-	}
-	if err := json.Unmarshal(payload.StateSnapshot, &snapshot); err != nil {
-		r.logger.Error().Err(err).Msg("Failed to decode state snapshot")
-		return fmt.Errorf("decode state snapshot: %w", err)
-	}
-
-	// SECURITY FIX #9: Validate checksum before applying state
-	vectorsJSON, err := json.Marshal(snapshot.Vectors)
-	if err != nil {
-		return fmt.Errorf("marshal vectors for checksum verification: %w", err)
-	}
-	hash := sha256.Sum256(vectorsJSON)
-	expectedChecksum := hex.EncodeToString(hash[:])
-	if expectedChecksum != snapshot.Checksum {
-		r.logger.Error().
-			Str("expected", expectedChecksum).
-			Str("received", snapshot.Checksum).
-			Msg("Checksum mismatch in sync response")
-		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, snapshot.Checksum)
-	}
-
-	r.logger.Info().
-		Int("objects", len(payload.Objects)).
-		Int("tracked_keys", len(snapshot.Vectors)).
-		Str("remote_node", snapshot.NodeID).
-		Msg("Received state snapshot, applying objects")
-
-	// Apply each object
-	applied := 0
-	skipped := 0
-	errors := 0
-
-	for _, obj := range payload.Objects {
-		// Check if we should apply this object
-		localVV := r.state.Get(obj.Bucket, obj.Key)
-		relationship := localVV.Compare(obj.VersionVector)
-
-		// Only apply if remote is newer or concurrent
-		if relationship == VectorBefore || relationship == VectorConcurrent {
-			// Put object in S3
-			if err := r.s3.Put(ctx, obj.Bucket, obj.Key, obj.Data, obj.ContentType, obj.Metadata); err != nil {
-				r.logger.Warn().Err(err).
-					Str("bucket", obj.Bucket).
-					Str("key", obj.Key).
-					Msg("Failed to put object during sync")
-				errors++
-				continue
-			}
-
-			// Merge version vectors
-			r.state.Merge(obj.Bucket, obj.Key, obj.VersionVector)
-			applied++
-
-			r.logger.Debug().
-				Str("bucket", obj.Bucket).
-				Str("key", obj.Key).
-				Str("relationship", relationship.String()).
-				Msg("Applied synced object")
-		} else {
-			// Local is newer or equal, skip
-			skipped++
-			r.logger.Debug().
-				Str("bucket", obj.Bucket).
-				Str("key", obj.Key).
-				Str("relationship", relationship.String()).
-				Msg("Skipped synced object (local is newer or equal)")
-		}
-
-		// Always import version history regardless of object relationship —
-		// versions are additive and any coordinator should have complete history
-		if len(obj.Versions) > 0 {
-			imported, vChunks, vErr := r.s3.ImportVersionHistory(ctx, obj.Bucket, obj.Key, obj.Versions)
-			if vErr != nil {
-				r.logger.Warn().Err(vErr).
-					Str("bucket", obj.Bucket).Str("key", obj.Key).
-					Msg("Failed to import version history during sync")
-			} else if imported > 0 {
-				r.logger.Debug().
-					Str("bucket", obj.Bucket).Str("key", obj.Key).
-					Int("imported", imported).
-					Msg("Imported version history during sync")
-				if len(vChunks) > 0 {
-					r.enqueueDeferredChunkCleanup(vChunks)
-				}
-			}
-		}
-	}
-
-	r.logger.Info().
-		Str("from", msg.From).
-		Int("total", len(payload.Objects)).
-		Int("applied", applied).
-		Int("skipped", skipped).
-		Int("errors", errors).
-		Msg("Completed state sync")
 
 	return nil
 }

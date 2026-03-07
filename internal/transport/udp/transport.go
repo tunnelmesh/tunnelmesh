@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,6 +100,10 @@ type Transport struct {
 
 	// HTTP client for coordination server requests
 	httpClient *http.Client
+
+	// onDropQueueFull is called when a packet is dropped because the queue is full.
+	// Stored as atomic.Value to allow lock-free reads on the hot receive path.
+	onDropQueueFull atomic.Value // stores func()
 }
 
 // Config holds UDP transport configuration.
@@ -158,18 +163,13 @@ type Config struct {
 	// If nil, a new client with sensible defaults will be created.
 	// Providing a managed client allows proper cleanup during network changes.
 	HTTPClient *http.Client
-
-	// OnDropQueueFull is called each time a packet is dropped because the processing
-	// queue is full. Wire this to a Prometheus counter for operational visibility.
-	OnDropQueueFull func()
 }
 
 // SetOnDropQueueFull sets a callback invoked each time a packet is dropped because
-// the processing queue is full. Safe to call after Start().
+// the processing queue is full. Uses atomic storage so it is safe to call from any
+// goroutine, including after Start(), without lock contention on the hot receive path.
 func (t *Transport) SetOnDropQueueFull(fn func()) {
-	t.mu.Lock()
-	t.config.OnDropQueueFull = fn
-	t.mu.Unlock()
+	t.onDropQueueFull.Store(fn)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -523,8 +523,8 @@ func (t *Transport) receiveLoop(conn *net.UDPConn) {
 		default:
 			// Queue full - drop packet (better than unbounded goroutines)
 			log.Debug().Msg("packet queue full, dropping packet")
-			if t.config.OnDropQueueFull != nil {
-				t.config.OnDropQueueFull()
+			if fn, ok := t.onDropQueueFull.Load().(func()); ok {
+				fn()
 			}
 		}
 	}
@@ -541,6 +541,7 @@ func (t *Transport) packetWorker() {
 					log.Error().
 						Interface("panic", r).
 						Str("from", work.remoteAddr.String()).
+						Str("stack", string(debug.Stack())).
 						Msg("packet worker panicked - skipping packet")
 				}
 			}()

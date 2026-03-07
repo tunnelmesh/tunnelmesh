@@ -24,10 +24,10 @@ func GenerateDocument(docType string, ctx story.Context) ([]byte, error) {
 
 	// Document header with convincing title
 	doc.WriteString(generateTitle(docType, phase, docNum))
-	doc.WriteString(fmt.Sprintf("\nDocument ID: %s\n", docID))
-	doc.WriteString(fmt.Sprintf("Timestamp: %s\n", FormatTimestamp(ctx.Timestamp)))
-	doc.WriteString(fmt.Sprintf("Author: %s\n", ctx.Author.Name))
-	doc.WriteString(fmt.Sprintf("Phase: %s (H+%d)\n", PhaseName(phase), int(ctx.StoryElapsed.Hours())))
+	fmt.Fprintf(&doc, "\nDocument ID: %s\n", docID)
+	fmt.Fprintf(&doc, "Timestamp: %s\n", FormatTimestamp(ctx.Timestamp))
+	fmt.Fprintf(&doc, "Author: %s\n", ctx.Author.Name)
+	fmt.Fprintf(&doc, "Phase: %s (H+%d)\n", PhaseName(phase), int(ctx.StoryElapsed.Hours()))
 	doc.WriteString("\n")
 	doc.WriteString(strings.Repeat("=", 60))
 	doc.WriteString("\n\n")

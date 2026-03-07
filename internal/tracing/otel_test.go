@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -18,7 +19,7 @@ func initTestTracer(t *testing.T) (*tracetest.InMemoryExporter, func()) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSyncer(exp),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithIDGenerator(&noLeadingZeroIDGenerator{}),
+		sdktrace.WithIDGenerator(newNoLeadingZeroIDGenerator()),
 	)
 	prev := otel.GetTracerProvider()
 	otel.SetTracerProvider(tp)
@@ -213,5 +214,37 @@ func TestTracer_EmitsSpanWithProvider(t *testing.T) {
 	}
 	if spans[0].Name != "my.operation" {
 		t.Errorf("span name = %q, want %q", spans[0].Name, "my.operation")
+	}
+}
+
+// TestNoLeadingZeroIDGenerator_FallbackOnCryptoRandFailure verifies that when
+// crypto/rand.Read fails, NewIDs and NewSpanID fall back to math/rand instead
+// of panicking, and still return non-zero IDs with the leading-nibble invariant.
+func TestNoLeadingZeroIDGenerator_FallbackOnCryptoRandFailure(t *testing.T) {
+	// Inject a failing rand reader for the duration of this test.
+	orig := cryptoRandRead
+	t.Cleanup(func() { cryptoRandRead = orig })
+	cryptoRandRead = func(b []byte) (int, error) {
+		return 0, errors.New("simulated crypto/rand failure")
+	}
+
+	g := newNoLeadingZeroIDGenerator()
+	ctx := context.Background()
+
+	// Must not panic; must return non-zero IDs with the first-nibble invariant.
+	for i := 0; i < 10; i++ {
+		tid, sid := g.NewIDs(ctx)
+		if tid[0]&0xF0 == 0 {
+			t.Errorf("iteration %d: trace ID has leading-zero first nibble (byte[0]=%02x)", i, tid[0])
+		}
+		var zeroSID [8]byte
+		if sid == zeroSID {
+			t.Errorf("iteration %d: fallback returned zero span ID", i)
+		}
+
+		sid2 := g.NewSpanID(ctx, tid)
+		if sid2 == zeroSID {
+			t.Errorf("iteration %d: NewSpanID fallback returned zero span ID", i)
+		}
 	}
 }
