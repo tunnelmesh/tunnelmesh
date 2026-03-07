@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -9,7 +9,7 @@ COPY internal/promsd/ ./internal/promsd/
 
 RUN go build -o sd-generator ./cmd/tunnelmesh-prometheus-sd-generator
 
-FROM alpine:latest
+FROM alpine:3.23
 
 RUN apk --no-cache add ca-certificates
 WORKDIR /app

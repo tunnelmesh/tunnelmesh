@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git make
 
@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false \
 # Stage 2: Runtime
 FROM alpine:3.23
 
-# Install runtime dependencies
+# Install runtime dependencies and create required directories
 RUN apk add --no-cache \
     iproute2 \
     iputils \
@@ -31,10 +31,8 @@ RUN apk add --no-cache \
     curl \
     jq \
     gettext \
-    ca-certificates
-
-# Create tunnelmesh directory
-RUN mkdir -p /root/.tunnelmesh /etc/tunnelmesh
+    ca-certificates && \
+    mkdir -p /root/.tunnelmesh /etc/tunnelmesh
 
 # Copy binary from builder
 COPY --from=builder /tunnelmesh /usr/local/bin/tunnelmesh
