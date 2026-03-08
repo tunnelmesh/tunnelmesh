@@ -245,6 +245,102 @@ func TestStreamingChunkerMemoryUsage(t *testing.T) {
 		totalSize, chunkCount, float64(totalSize)/float64(chunkCount)/1024)
 }
 
+// TestChunkConfigForSize verifies tier selection for boundary inputs.
+func TestChunkConfigForSize(t *testing.T) {
+	tests := []struct {
+		size     int64
+		wantMask uint32
+	}{
+		{0, 0xFFF},
+		{512 * 1024, 0xFFF},
+		{1 * 1024 * 1024, 0xFFF},
+		{1*1024*1024 + 1, 0xFFFF},
+		{32 * 1024 * 1024, 0xFFFF},
+		{64 * 1024 * 1024, 0xFFFF},
+		{64*1024*1024 + 1, 0x7FFFF},
+		{1 * 1024 * 1024 * 1024, 0x7FFFF},
+	}
+	for _, tt := range tests {
+		cfg := ChunkConfigForSize(tt.size)
+		if cfg.Mask != tt.wantMask {
+			t.Errorf("ChunkConfigForSize(%d): mask=%#x, want %#x", tt.size, cfg.Mask, tt.wantMask)
+		}
+		if cfg.MinSize <= 0 {
+			t.Errorf("ChunkConfigForSize(%d): MinSize=%d must be positive", tt.size, cfg.MinSize)
+		}
+		if cfg.MaxSize <= cfg.MinSize {
+			t.Errorf("ChunkConfigForSize(%d): MaxSize=%d must exceed MinSize=%d", tt.size, cfg.MaxSize, cfg.MinSize)
+		}
+	}
+}
+
+// TestStreamingChunkerWithConfig_ReducesChunkCount verifies that large config produces
+// far fewer chunks than small config for the same data, and both reconstruct correctly.
+func TestStreamingChunkerWithConfig_ReducesChunkCount(t *testing.T) {
+	data := make([]byte, 10*1024*1024) // 10 MB
+	if _, err := rand.Read(data); err != nil {
+		t.Fatalf("generate test data: %v", err)
+	}
+
+	countChunks := func(cfg ChunkerConfig) (int, []byte) {
+		sc := NewStreamingChunkerWithConfig(bytes.NewReader(data), cfg)
+		var reconstructed []byte
+		var count int
+		for {
+			chunk, _, err := sc.NextChunk()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("NextChunk: %v", err)
+			}
+			reconstructed = append(reconstructed, chunk...)
+			count++
+		}
+		return count, reconstructed
+	}
+
+	smallCfg := ChunkConfigForSize(512 * 1024)        // small tier
+	largeCfg := ChunkConfigForSize(200 * 1024 * 1024) // large tier
+
+	smallCount, smallData := countChunks(smallCfg)
+	largeCount, largeData := countChunks(largeCfg)
+
+	if !bytes.Equal(smallData, data) {
+		t.Error("small config: reconstructed data mismatch")
+	}
+	if !bytes.Equal(largeData, data) {
+		t.Error("large config: reconstructed data mismatch")
+	}
+	if largeCount*10 >= smallCount {
+		t.Errorf("expected large config to produce ≥10× fewer chunks: small=%d large=%d", smallCount, largeCount)
+	}
+}
+
+// TestStreamingChunkerWithConfig_SizeConstraints verifies all chunks respect MaxSize.
+func TestStreamingChunkerWithConfig_SizeConstraints(t *testing.T) {
+	data := make([]byte, 5*1024*1024) // 5 MB
+	if _, err := rand.Read(data); err != nil {
+		t.Fatalf("generate test data: %v", err)
+	}
+
+	cfg := ChunkConfigForSize(32 * 1024 * 1024) // medium tier: MaxSize=256KB
+	sc := NewStreamingChunkerWithConfig(bytes.NewReader(data), cfg)
+
+	for {
+		chunk, _, err := sc.NextChunk()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextChunk: %v", err)
+		}
+		if len(chunk) > cfg.MaxSize {
+			t.Errorf("chunk size %d exceeds MaxSize %d", len(chunk), cfg.MaxSize)
+		}
+	}
+}
+
 // cancelableReader is a test reader that can be cancelled via a flag.
 type cancelableReader struct {
 	data      []byte

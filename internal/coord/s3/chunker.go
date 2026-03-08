@@ -30,6 +30,37 @@ func init() {
 	}
 }
 
+// ChunkerConfig holds size and boundary-detection parameters for the chunker.
+// Use ChunkConfigForSize to get an appropriate config based on file size.
+type ChunkerConfig struct {
+	MinSize int    // Minimum chunk size in bytes
+	MaxSize int    // Maximum chunk size in bytes
+	Mask    uint32 // Boundary detection mask: hash & Mask == 0 triggers boundary
+}
+
+// ChunkConfigForSize returns a ChunkerConfig tuned for the given file size.
+// Larger files use coarser chunking to reduce chunk count, metadata size, and
+// replication overhead. Dedup quality is acceptable to trade off for large files
+// since they are typically unique binaries or archives.
+//
+//   - <= 1 MB:  ~4 KB avg chunks (mask=0xFFF)
+//   - <= 64 MB: ~64 KB avg chunks (mask=0xFFFF)
+//   - > 64 MB:  ~512 KB avg chunks (mask=0x7FFFF)
+func ChunkConfigForSize(fileSize int64) ChunkerConfig {
+	const (
+		mb1  = 1 * 1024 * 1024
+		mb64 = 64 * 1024 * 1024
+	)
+	switch {
+	case fileSize <= mb1:
+		return ChunkerConfig{MinSize: 1024, MaxSize: 65536, Mask: 0xFFF}
+	case fileSize <= mb64:
+		return ChunkerConfig{MinSize: 16384, MaxSize: 262144, Mask: 0xFFFF}
+	default:
+		return ChunkerConfig{MinSize: 131072, MaxSize: 2097152, Mask: 0x7FFFF}
+	}
+}
+
 // Chunker splits data into variable-size chunks using content-defined chunking (CDC).
 // It uses the Buzhash rolling hash algorithm to find chunk boundaries based on content,
 // which provides stable boundaries even when data is inserted or deleted.
@@ -41,14 +72,29 @@ type Chunker struct {
 	windowSize int
 	hash       uint32
 	done       bool
+	minSize    int
+	maxSize    int
+	mask       uint32
 }
 
-// NewChunker creates a new CDC chunker for the given reader.
+// NewChunker creates a new CDC chunker for the given reader using default chunk sizes.
 func NewChunker(r io.Reader) *Chunker {
+	return NewChunkerWithConfig(r, ChunkerConfig{
+		MinSize: MinChunkSize,
+		MaxSize: MaxChunkSize,
+		Mask:    ChunkMask,
+	})
+}
+
+// NewChunkerWithConfig creates a new CDC chunker using the provided configuration.
+func NewChunkerWithConfig(r io.Reader, cfg ChunkerConfig) *Chunker {
 	return &Chunker{
 		reader:     r,
-		buf:        make([]byte, MaxChunkSize*2), // Double buffer for efficiency
-		windowSize: 64,                           // Rolling hash window size
+		buf:        make([]byte, cfg.MaxSize*2), // Double buffer for efficiency
+		windowSize: 64,                          // Rolling hash window size
+		minSize:    cfg.MinSize,
+		maxSize:    cfg.MaxSize,
+		mask:       cfg.Mask,
 	}
 }
 
@@ -87,8 +133,8 @@ func (c *Chunker) Next() ([]byte, error) {
 
 // fillBuffer reads more data into the buffer if needed.
 func (c *Chunker) fillBuffer() error {
-	// If we have less than MaxChunkSize, try to read more
-	if c.bufLen < MaxChunkSize {
+	// If we have less than maxSize, try to read more
+	if c.bufLen < c.maxSize {
 		n, err := c.reader.Read(c.buf[c.bufLen:])
 		c.bufLen += n
 		if err == io.EOF {
@@ -115,7 +161,7 @@ func (c *Chunker) findBoundary() int {
 	}
 
 	// Scan for boundary starting after minimum chunk size
-	start := MinChunkSize
+	start := c.minSize
 	if start < windowStart {
 		start = windowStart
 	}
@@ -133,23 +179,23 @@ func (c *Chunker) findBoundary() int {
 		}
 
 		// Check for boundary (after minimum size)
-		if i >= MinChunkSize && (c.hash&ChunkMask) == 0 {
+		if i >= c.minSize && (c.hash&c.mask) == 0 {
 			return i + 1
 		}
 
 		// Force boundary at maximum size
-		if i+1 >= MaxChunkSize {
-			return MaxChunkSize
+		if i+1 >= c.maxSize {
+			return c.maxSize
 		}
 	}
 
 	// If we haven't found a boundary and have all the data (EOF), return what we have
-	if c.bufLen < MaxChunkSize {
+	if c.bufLen < c.maxSize {
 		return c.bufLen
 	}
 
 	// Shouldn't reach here, but force boundary at max size
-	return MaxChunkSize
+	return c.maxSize
 }
 
 // rol32 performs a 32-bit left rotation.
@@ -207,6 +253,13 @@ type StreamingChunker struct {
 func NewStreamingChunker(r io.Reader) *StreamingChunker {
 	return &StreamingChunker{
 		chunker: NewChunker(r),
+	}
+}
+
+// NewStreamingChunkerWithConfig creates a streaming chunker using the provided configuration.
+func NewStreamingChunkerWithConfig(r io.Reader, cfg ChunkerConfig) *StreamingChunker {
+	return &StreamingChunker{
+		chunker: NewChunkerWithConfig(r, cfg),
 	}
 }
 

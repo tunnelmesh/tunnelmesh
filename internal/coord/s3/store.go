@@ -1745,7 +1745,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	// Phase 2: Stream data through CDC chunker without holding the global lock.
 	// CAS writes are safe for concurrent access (content-addressed, atomic rename).
 	metaPath := s.objectMetaPath(bucket, key)
-	streamChunker := NewStreamingChunker(reader)
+	streamChunker := NewStreamingChunkerWithConfig(reader, ChunkConfigForSize(size))
 
 	var chunks []string
 	chunkMetadata := make(map[string]*ChunkMetadata)

@@ -273,6 +273,47 @@ func TestStorePutObjectWithMetadata(t *testing.T) {
 	assert.Equal(t, userMeta, objMeta.Metadata)
 }
 
+func TestPutObject_AdaptiveChunking(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	require.NoError(t, store.CreateBucket(context.Background(), "test-bucket", "alice", 2, nil))
+
+	// Small object (300 KB) — should use small chunk config (~4 KB avg)
+	smallData := make([]byte, 300*1024)
+	for i := range smallData {
+		smallData[i] = byte(i)
+	}
+	smallMeta, err := store.PutObject(context.Background(), "test-bucket", "small.bin",
+		bytes.NewReader(smallData), int64(len(smallData)), "application/octet-stream", nil)
+	require.NoError(t, err)
+
+	// Large object (10 MB) — should use large chunk config (~512 KB avg)
+	largeData := make([]byte, 10*1024*1024)
+	for i := range largeData {
+		largeData[i] = byte(i * 7)
+	}
+	largeMeta, err := store.PutObject(context.Background(), "test-bucket", "large.bin",
+		bytes.NewReader(largeData), int64(len(largeData)), "application/octet-stream", nil)
+	require.NoError(t, err)
+
+	// Adaptive chunking: small object should have more chunks per MB than large object.
+	smallChunksPerMB := float64(len(smallMeta.Chunks)) / (float64(len(smallData)) / (1024 * 1024))
+	largeChunksPerMB := float64(len(largeMeta.Chunks)) / (float64(len(largeData)) / (1024 * 1024))
+	assert.Greater(t, smallChunksPerMB, largeChunksPerMB,
+		"small object should have more chunks/MB (finer chunking) than large object")
+
+	// Both objects must read back correctly.
+	checkReadback := func(key string, want []byte) {
+		r, _, err := store.GetObject(context.Background(), "test-bucket", key)
+		require.NoError(t, err)
+		defer func() { _ = r.Close() }()
+		got, err := io.ReadAll(r)
+		require.NoError(t, err)
+		assert.Equal(t, want, got, "readback mismatch for %s", key)
+	}
+	checkReadback("small.bin", smallData)
+	checkReadback("large.bin", largeData)
+}
+
 func TestStoreGetObject(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	require.NoError(t, store.CreateBucket(context.Background(), "test-bucket", "alice", 2, nil))
