@@ -6,6 +6,8 @@ import (
 )
 
 // Chunker configuration constants.
+// These are the defaults for the backward-compatible NewChunker constructor (small-file tier).
+// Runtime chunking now uses ChunkConfigForSize; these constants are not the only values used.
 const (
 	MinChunkSize    = 1024       // 1KB minimum chunk size
 	TargetChunkSize = 4096       // 4KB target (average) chunk size

@@ -312,6 +312,33 @@ func TestPutObject_AdaptiveChunking(t *testing.T) {
 	}
 	checkReadback("small.bin", smallData)
 	checkReadback("large.bin", largeData)
+
+	// Verify exact tier boundary values round-trip correctly.
+	// 1 MB is the small→medium boundary; 64 MB is the medium→large boundary.
+	type boundary struct {
+		name string
+		size int
+	}
+	boundaries := []boundary{
+		{"boundary-1mb.bin", 1 * 1024 * 1024},
+		{"boundary-1mb-plus1.bin", 1*1024*1024 + 1},
+	}
+	if !testing.Short() {
+		boundaries = append(boundaries,
+			boundary{"boundary-64mb.bin", 64 * 1024 * 1024},
+			boundary{"boundary-64mb-plus1.bin", 64*1024*1024 + 1},
+		)
+	}
+	for _, b := range boundaries {
+		data := make([]byte, b.size)
+		for i := range data {
+			data[i] = byte(i * 3)
+		}
+		_, err := store.PutObject(context.Background(), "test-bucket", b.name,
+			bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
+		require.NoError(t, err, "PutObject at boundary %s", b.name)
+		checkReadback(b.name, data)
+	}
 }
 
 func TestStoreGetObject(t *testing.T) {
