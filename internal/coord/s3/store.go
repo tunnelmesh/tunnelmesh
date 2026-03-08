@@ -122,7 +122,6 @@ type ErasureCodingInfo struct {
 	DataShards      int      `json:"data_shards"`             // k: number of data shards
 	ParityShards    int      `json:"parity_shards"`           // m: number of parity shards
 	StreamBlockSize int64    `json:"stream_block_size"`       // RS stripe size in bytes (DataShards * piece_size)
-	ShardSize       int64    `json:"shard_size,omitempty"`    // Size of each RS piece (StreamBlockSize / DataShards)
 	DataHashes      []string `json:"data_hashes,omitempty"`   // Piece hashes for data shards, shard-major order
 	ParityHashes    []string `json:"parity_hashes,omitempty"` // Piece hashes for parity shards, shard-major order
 }
@@ -1459,25 +1458,10 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		fileVersionVector[coordID] = 1
 	}
 
-	// Cleanup on failure: remove all chunks written to CAS.
-	var success bool
-	defer func() {
-		if !success && len(chunks) > 0 {
-			for _, hash := range chunks {
-				if freed, cleanErr := s.cas.DeleteChunk(context.Background(), hash); cleanErr != nil {
-					s.logger.Warn().Str("hash", hash[:8]).Err(cleanErr).Msg("failed to cleanup EC chunk during rollback")
-				} else if freed > 0 {
-					s.statsChunkCount.Add(-1)
-					s.statsChunkBytes.Add(-freed)
-				}
-				if s.chunkRegistry != nil {
-					if unregErr := s.chunkRegistry.UnregisterChunk(hash); unregErr != nil {
-						s.logger.Warn().Str("hash", hash[:8]).Err(unregErr).Msg("failed to unregister EC chunk during rollback")
-					}
-				}
-			}
-		}
-	}()
+	// No rollback on failure: EC chunks are content-addressed. Multiple concurrent
+	// uploads of similar-content files produce identical CAS hashes (deduplication),
+	// so deleting a chunk on rollback could corrupt another upload that shares it.
+	// Orphaned chunks from failed uploads are cleaned by the next GC run.
 
 	md5Hasher := md5.New()
 
@@ -1600,7 +1584,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		parityHashes = append(parityHashes, hashes[i]...)
 	}
 
-	etag := fmt.Sprintf("%q", hex.EncodeToString(md5Hasher.Sum(nil)))
+	etag := fmt.Sprintf("\"%s\"", hex.EncodeToString(md5Hasher.Sum(nil)))
 
 	// Pre-create directories outside the lock (MkdirAll is idempotent).
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0755); err != nil {
@@ -1677,7 +1661,6 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			DataShards:      ecDataShards,
 			ParityShards:    ecParityShards,
 			StreamBlockSize: ecStreamBlock,
-			ShardSize:       ecPieceSize,
 			DataHashes:      dataHashes,
 			ParityHashes:    parityHashes,
 		},
@@ -1733,7 +1716,6 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		}
 	}
 
-	success = true
 	s.mu.Unlock()
 
 	// Phase 3: After lock — pruning (filesystem walk, safe without lock).

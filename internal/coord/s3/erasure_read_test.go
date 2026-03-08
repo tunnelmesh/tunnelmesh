@@ -155,7 +155,6 @@ func TestErasureCodingReadPath_InsufficientShards(t *testing.T) {
 		_, _ = store.cas.DeleteChunk(ctx, chunkHash)
 	}
 	// Delete one parity shard too so we have fewer than k shards available.
-	k := meta.ErasureCoding.DataShards
 	m := meta.ErasureCoding.ParityShards
 	numParBlocks := len(meta.ErasureCoding.ParityHashes) / m
 	if numParBlocks == 0 {
@@ -164,8 +163,6 @@ func TestErasureCodingReadPath_InsufficientShards(t *testing.T) {
 	for i := 0; i < numParBlocks && i < len(meta.ErasureCoding.ParityHashes); i++ {
 		_, _ = store.cas.DeleteChunk(ctx, meta.ErasureCoding.ParityHashes[i])
 	}
-	_ = k
-
 	_, _, err = store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "insufficient shards")
@@ -302,8 +299,7 @@ func TestErasureCodingReadPath_MetadataIntegrity(t *testing.T) {
 	// 1 block: k data hashes + m parity hashes.
 	assert.Equal(t, k, len(ec.DataHashes), "1-block file should have k=%d data hashes", k)
 	assert.Equal(t, m, len(ec.ParityHashes), "1-block file should have m=%d parity hashes", m)
-	assert.Greater(t, ec.ShardSize, int64(0), "shard size should be positive")
-	assert.Equal(t, int64(ecPieceSize), ec.ShardSize)
+	assert.Equal(t, int64(ecStreamBlock), ec.StreamBlockSize)
 }
 
 // TestErasureCodingReadPath_MultipleObjects tests reading multiple erasure-coded
