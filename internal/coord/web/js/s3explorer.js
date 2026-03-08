@@ -2456,9 +2456,8 @@
         document.getElementById('s3-file-input')?.click();
     }
 
-    async function handleFileSelect(event) {
-        const files = event.target.files;
-        await uploadFiles(files);
+    function handleFileSelect(event) {
+        enqueueFiles(event.target.files);
         event.target.value = '';
     }
 
@@ -2495,12 +2494,14 @@
         return { bar, label, fill, cancelBtn };
     }
 
-    function uploadFileWithProgress(file, key, onProgress, signal) {
+    // bucket is passed explicitly so a file queued in bucket A uploads to A
+    // even if the user navigates to bucket B before the upload starts.
+    function uploadFileWithProgress(file, key, bucket, onProgress, signal) {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open(
                 'PUT',
-                `/api/s3/buckets/${encodeURIComponent(state.currentBucket)}/objects/${encodeURIComponent(key)}`,
+                `/api/s3/buckets/${encodeURIComponent(bucket)}/objects/${encodeURIComponent(key)}`,
             );
             xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
             xhr.upload.addEventListener('progress', (e) => {
@@ -2522,15 +2523,18 @@
             });
             xhr.addEventListener('error', () => reject(new Error('Network error')));
             xhr.addEventListener('abort', () => reject(new DOMException('Upload cancelled', 'AbortError')));
-            // Listener is never explicitly removed, but the signal (and its listeners)
-            // is GC'd when the AbortController goes out of scope after uploadFiles()
-            // returns, so accumulation across files in the same batch is not a concern.
             signal?.addEventListener('abort', () => xhr.abort());
             xhr.send(file);
         });
     }
 
-    async function uploadFiles(files) {
+    // Module-level upload queue. Each entry captures file, bucket, and key at
+    // the time of drop/select so later navigation doesn't change the destination.
+    const uploadQueue = [];
+    let uploadDraining = false;
+    let uploadAbortController = null;
+
+    function enqueueFiles(files) {
         if (!state.currentBucket) {
             showToast('Navigate into a bucket first', 'warning');
             return;
@@ -2539,24 +2543,39 @@
             showToast('Bucket is read-only', 'warning');
             return;
         }
-
-        const controller = new AbortController();
-        const { bar, label, fill, cancelBtn } = createProgressBar();
-        cancelBtn.addEventListener('click', () => controller.abort());
-
+        const bucket = state.currentBucket;
+        const pathPrefix = state.currentPath;
         for (const file of files) {
-            if (controller.signal.aborted) break;
-            const key = state.currentPath + file.name;
+            uploadQueue.push({ file, bucket, key: pathPrefix + file.name });
+        }
+        drainUploadQueue();
+    }
 
+    async function drainUploadQueue() {
+        if (uploadDraining) return; // already running — new items will be picked up naturally
+        uploadDraining = true;
+
+        uploadAbortController = new AbortController();
+        const { bar, label, fill, cancelBtn } = createProgressBar();
+        cancelBtn.addEventListener('click', () => {
+            uploadAbortController.abort();
+            uploadQueue.length = 0; // discard remaining queued files
+        });
+
+        while (uploadQueue.length > 0 && !uploadAbortController.signal.aborted) {
+            const { file, bucket, key } = uploadQueue.shift();
             try {
                 await uploadFileWithProgress(
                     file,
                     key,
+                    bucket,
                     (pct) => {
-                        label.textContent = `Uploading ${file.name}... ${Math.round(pct * 100)}%`;
+                        const pending = uploadQueue.length;
+                        const queued = pending > 0 ? ` (+${pending} queued)` : '';
+                        label.textContent = `Uploading ${file.name}... ${Math.round(pct * 100)}%${queued}`;
                         fill.style.width = `${pct * 100}%`;
                     },
-                    controller.signal,
+                    uploadAbortController.signal,
                 );
                 showToast(`Uploaded ${file.name}`, 'success');
             } catch (err) {
@@ -2569,6 +2588,8 @@
         }
 
         bar.remove();
+        uploadDraining = false;
+        uploadAbortController = null;
         await renderFileListing();
     }
 
@@ -2613,27 +2634,17 @@
             if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
         });
 
-        document.addEventListener('drop', async (e) => {
+        document.addEventListener('drop', (e) => {
             e.preventDefault();
             dragCounter = 0;
             dropZone.classList.remove('active');
 
-            // Only upload if s3 section is active and user is in a writable bucket
+            // Only upload if s3 section is active and files were dropped
             if (section.style.display === 'none') return;
-            if (e.dataTransfer?.files?.length > 0) {
-                if (!state.currentBucket) {
-                    showToast('Navigate into a bucket first', 'warning');
-                    return;
-                }
-                if (!state.writable) {
-                    showToast('Bucket is read-only', 'warning');
-                    return;
-                }
-            } else {
-                return;
-            }
+            if (!e.dataTransfer?.files?.length) return;
 
-            await uploadFiles(e.dataTransfer.files);
+            // enqueueFiles validates bucket / writable and shows toasts on failure
+            enqueueFiles(e.dataTransfer.files);
         });
     }
 

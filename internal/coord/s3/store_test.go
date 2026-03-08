@@ -273,6 +273,74 @@ func TestStorePutObjectWithMetadata(t *testing.T) {
 	assert.Equal(t, userMeta, objMeta.Metadata)
 }
 
+func TestPutObject_AdaptiveChunking(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	require.NoError(t, store.CreateBucket(context.Background(), "test-bucket", "alice", 2, nil))
+
+	// Small object (300 KB) — should use small chunk config (~4 KB avg)
+	smallData := make([]byte, 300*1024)
+	for i := range smallData {
+		smallData[i] = byte(i)
+	}
+	smallMeta, err := store.PutObject(context.Background(), "test-bucket", "small.bin",
+		bytes.NewReader(smallData), int64(len(smallData)), "application/octet-stream", nil)
+	require.NoError(t, err)
+
+	// Large object (10 MB) — should use large chunk config (~512 KB avg)
+	largeData := make([]byte, 10*1024*1024)
+	for i := range largeData {
+		largeData[i] = byte(i * 7)
+	}
+	largeMeta, err := store.PutObject(context.Background(), "test-bucket", "large.bin",
+		bytes.NewReader(largeData), int64(len(largeData)), "application/octet-stream", nil)
+	require.NoError(t, err)
+
+	// Adaptive chunking: small object should have more chunks per MB than large object.
+	smallChunksPerMB := float64(len(smallMeta.Chunks)) / (float64(len(smallData)) / (1024 * 1024))
+	largeChunksPerMB := float64(len(largeMeta.Chunks)) / (float64(len(largeData)) / (1024 * 1024))
+	assert.Greater(t, smallChunksPerMB, largeChunksPerMB,
+		"small object should have more chunks/MB (finer chunking) than large object")
+
+	// Both objects must read back correctly.
+	checkReadback := func(key string, want []byte) {
+		r, _, err := store.GetObject(context.Background(), "test-bucket", key)
+		require.NoError(t, err)
+		defer func() { _ = r.Close() }()
+		got, err := io.ReadAll(r)
+		require.NoError(t, err)
+		assert.Equal(t, want, got, "readback mismatch for %s", key)
+	}
+	checkReadback("small.bin", smallData)
+	checkReadback("large.bin", largeData)
+
+	// Verify exact tier boundary values round-trip correctly.
+	// 1 MB is the small→medium boundary; 64 MB is the medium→large boundary.
+	type boundary struct {
+		name string
+		size int
+	}
+	boundaries := []boundary{
+		{"boundary-1mb.bin", 1 * 1024 * 1024},
+		{"boundary-1mb-plus1.bin", 1*1024*1024 + 1},
+	}
+	if !testing.Short() {
+		boundaries = append(boundaries,
+			boundary{"boundary-64mb.bin", 64 * 1024 * 1024},
+			boundary{"boundary-64mb-plus1.bin", 64*1024*1024 + 1},
+		)
+	}
+	for _, b := range boundaries {
+		data := make([]byte, b.size)
+		for i := range data {
+			data[i] = byte(i * 3)
+		}
+		_, err := store.PutObject(context.Background(), "test-bucket", b.name,
+			bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
+		require.NoError(t, err, "PutObject at boundary %s", b.name)
+		checkReadback(b.name, data)
+	}
+}
+
 func TestStoreGetObject(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	require.NoError(t, store.CreateBucket(context.Background(), "test-bucket", "alice", 2, nil))
@@ -3189,6 +3257,46 @@ func TestBucketQuota_ZeroMeansUnlimited(t *testing.T) {
 	content := bytes.Repeat([]byte("z"), 1024)
 	_, err = store.PutObject(ctx, "default", "big.bin", bytes.NewReader(content), int64(len(content)), "application/octet-stream", nil)
 	require.NoError(t, err, "bucket with no quota set should accept any upload")
+}
+
+// TestBucketQuota_EnforcedAfterRestart verifies that per-bucket quota is still
+// enforced after the store is reopened (simulating a coordinator restart).
+// Before the fix, the in-memory BucketUsedBytes counter reset to 0 on restart,
+// allowing uploads that exceeded the bucket quota to succeed.
+func TestBucketQuota_EnforcedAfterRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterKey := [32]byte{1, 2, 3, 4}
+	ctx := context.Background()
+
+	// --- First run: fill bucket to 80 bytes, quota = 100 bytes ---
+	{
+		quota := NewQuotaManager(100 * 1024 * 1024)
+		store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+		require.NoError(t, err)
+		require.NoError(t, store.CreateBucket(ctx, "limited", "alice", 1, nil))
+
+		bucketQuota := int64(100)
+		require.NoError(t, store.UpdateBucketMetadata(ctx, "limited", BucketMetadataUpdate{
+			QuotaBytes: &bucketQuota,
+		}))
+
+		content80 := bytes.Repeat([]byte("x"), 80)
+		_, err = store.PutObject(ctx, "limited", "obj1.bin", bytes.NewReader(content80), int64(len(content80)), "application/octet-stream", nil)
+		require.NoError(t, err)
+	}
+
+	// --- Second run (restart): in-memory counter is 0, but SizeBytes = 80 on disk ---
+	{
+		quota := NewQuotaManager(100 * 1024 * 1024)
+		store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+		require.NoError(t, err)
+
+		// 30 bytes would bring total to 110, exceeding the 100-byte bucket quota.
+		content30 := bytes.Repeat([]byte("y"), 30)
+		_, err = store.PutObject(ctx, "limited", "obj2.bin", bytes.NewReader(content30), int64(len(content30)), "application/octet-stream", nil)
+		require.Error(t, err, "upload exceeding per-bucket quota should fail even after restart")
+		assert.ErrorIs(t, err, ErrBucketQuotaExceeded)
+	}
 }
 
 func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {

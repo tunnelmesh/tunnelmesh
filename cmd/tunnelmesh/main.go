@@ -2195,12 +2195,12 @@ func configureSystemResolver(_, dnsAddr, tunName string) error {
 		return configureLinuxResolvers(dnsAddr, tunName, mesh.AllSuffixes())
 	}
 
-	// Extract port from address (used by darwin/windows per-domain calls)
+	// Extract host and port from address (used by darwin/windows per-domain calls)
 	parts := strings.Split(dnsAddr, ":")
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid DNS address: %s", dnsAddr)
 	}
-	port := parts[1]
+	host, port := parts[0], parts[1]
 
 	for _, suffix := range mesh.AllSuffixes() {
 		domain := strings.TrimPrefix(suffix, ".")
@@ -2208,7 +2208,7 @@ func configureSystemResolver(_, dnsAddr, tunName string) error {
 		var err error
 		switch runtime.GOOS {
 		case "darwin":
-			err = configureDarwinResolver(domain, port)
+			err = configureDarwinResolver(domain, host, port)
 		case "windows":
 			err = configureWindowsResolver(domain, dnsAddr)
 		default:
@@ -2247,12 +2247,12 @@ func removeSystemResolver(_, tunName string) {
 	}
 }
 
-func configureDarwinResolver(domain, port string) error {
+func configureDarwinResolver(domain, host, port string) error {
 	resolverDir := "/etc/resolver"
 	resolverFile := filepath.Join(resolverDir, domain)
 
 	// Check if we can write directly (running as root)
-	content := fmt.Sprintf("nameserver 127.0.0.1\nport %s\n", port)
+	content := fmt.Sprintf("nameserver %s\nport %s\n", host, port)
 
 	// Try to create directory and file
 	if err := os.MkdirAll(resolverDir, 0755); err != nil {

@@ -223,9 +223,18 @@ type Store struct {
 	versionRetentionDays     int                      // Days to retain object versions (0 = forever)
 	maxVersionsPerObject     int                      // Max versions to keep per object (0 = unlimited)
 	versionRetentionPolicy   VersionRetentionPolicy
-	erasureCodingSemaphore   chan struct{}  // Limits concurrent erasure coding operations (memory safety)
-	bgWg                     sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu                       sync.RWMutex
+	// uploadSem caps concurrent non-EC PutObject calls. Under the 400 MiB
+	// GOMEMLIMIT, a single large CDC upload binds ~4–8 MB of transient heap
+	// (one chunk at ~2–4 MB + zstd/crypto overhead). 3 slots fit comfortably.
+	uploadSem chan struct{}
+	// erasureCodingSemaphore serializes EC uploads. Each EC operation reads the
+	// entire file into memory (io.ReadAll, store.go:1379) then builds k+m shards
+	// via EncodeFile, peaking at ~(1 + m/k + 1) × fileSize ≈ 280 MB for a 100 MB
+	// file with RS(4,2). Capacity=1 keeps peak heap under ~400 MB combined with
+	// uploadSem. EC is I/O-bound; serialization doesn't hurt real throughput.
+	erasureCodingSemaphore chan struct{}
+	bgWg                   sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	mu                     sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -249,8 +258,9 @@ func NewStore(dataDir string, quota *QuotaManager) (*Store, error) {
 	store := &Store{
 		dataDir:                dataDir,
 		quota:                  quota,
-		logger:                 zerolog.Nop(),           // Default to no-op logger
-		erasureCodingSemaphore: make(chan struct{}, 10), // Allow 10 concurrent EC operations
+		logger:                 zerolog.Nop(),          // Default to no-op logger
+		erasureCodingSemaphore: make(chan struct{}, 1), // Serialize EC: each op peaks ~280 MB (see comment above)
+		uploadSem:              make(chan struct{}, 3), // Allow 3 concurrent CDC uploads
 	}
 
 	// Calculate initial quota usage from existing objects
@@ -1069,8 +1079,9 @@ func (s *Store) fetchChunkDistributed(ctx context.Context, chunkHash string) ([]
 			continue
 		}
 
-		// 6. Cache locally and register ownership (best-effort)
-		if _, onDiskBytes, werr := s.cas.WriteChunk(ctx, data); werr != nil {
+		// 6. Cache locally and register ownership (best-effort).
+		// chunkHash is validated above; pass it to avoid a redundant SHA-256.
+		if onDiskBytes, werr := s.cas.writeChunkKnown(ctx, data, chunkHash); werr != nil {
 			s.logger.Warn().Err(werr).Str("hash", truncHash(chunkHash)).Msg("failed to cache remote chunk locally")
 		} else {
 			if onDiskBytes > 0 {
@@ -1320,8 +1331,8 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 					break
 				}
 
-				// Write chunk to local CAS (best-effort)
-				if _, _, err := s.cas.WriteChunk(bgCtx, chunk); err != nil {
+				// Write chunk to local CAS (best-effort); pass chunkHash to skip redundant SHA-256.
+				if _, err := s.cas.writeChunkKnown(bgCtx, chunk, chunkHash); err != nil {
 					if len(chunkHash) >= 8 {
 						s.logger.Warn().Err(err).Int("shard", i).Str("hash", chunkHash[:8]).Msg("failed to cache reconstructed chunk")
 					} else {
@@ -1353,7 +1364,28 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		return nil, fmt.Errorf("invalid erasure coding config: k=%d, m=%d (max 32 each, 64 total)", k, m)
 	}
 
-	// Acquire semaphore to limit concurrent erasure coding operations (memory safety)
+	// Spool the body to a temp file before acquiring the semaphore so the client's
+	// network upload finishes at full speed regardless of EC queue depth. Files are
+	// bounded by MaxErasureCodingFileSize (100 MB) so temp disk usage is capped.
+	spoolFile, err := os.CreateTemp("", "tunnelmesh-ec-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("create ec spool: %w", err)
+	}
+	defer func() {
+		_ = spoolFile.Close()
+		_ = os.Remove(spoolFile.Name())
+	}()
+	if n, cpErr := io.Copy(spoolFile, io.LimitReader(reader, size)); cpErr != nil {
+		return nil, fmt.Errorf("spool upload: %w", cpErr)
+	} else if n != size {
+		return nil, fmt.Errorf("spool size mismatch: expected %d bytes, got %d", size, n)
+	}
+	if _, err = spoolFile.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek spool: %w", err)
+	}
+
+	// Acquire semaphore to limit concurrent erasure coding operations (memory safety).
+	// Body is already spooled above, so waiting here does not stall the client upload.
 	select {
 	case s.erasureCodingSemaphore <- struct{}{}:
 		defer func() { <-s.erasureCodingSemaphore }()
@@ -1366,7 +1398,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 	// Phase 1: Read + encode + write chunks to CAS without holding the global lock.
 	// CAS writes are content-addressed and use atomic rename, safe for concurrent access.
 
-	data, err := io.ReadAll(io.LimitReader(reader, size))
+	data, err := io.ReadAll(spoolFile)
 	if err != nil {
 		return nil, fmt.Errorf("read file data: %w", err)
 	}
@@ -1441,7 +1473,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 				return nil, fmt.Errorf("chunk data shard %d/%d (versionID=%s): %w", i, k, versionID, err)
 			}
 
-			_, onDiskBytes, err := s.cas.WriteChunk(ctx, chunk)
+			onDiskBytes, err := s.cas.writeChunkKnown(ctx, chunk, chunkHash)
 			if err != nil {
 				return nil, fmt.Errorf("write data shard %d/%d chunk %s (versionID=%s): %w", i, k, chunkHash[:8], versionID, err)
 			}
@@ -1581,12 +1613,14 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
-		// Per-bucket quota enforcement
+		// Per-bucket quota enforcement. Use the persistent ecBucketMeta.SizeBytes
+		// (live object total, written to disk on every put/delete) rather than
+		// s.quota.BucketUsedBytes which resets to 0 on restart.
 		if ecBucketMeta.QuotaBytes > 0 {
-			bucketUsed := s.quota.BucketUsedBytes(bucket)
-			if bucketUsed+delta > ecBucketMeta.QuotaBytes {
+			projected := ecBucketMeta.SizeBytes + delta
+			if projected > ecBucketMeta.QuotaBytes {
 				s.mu.Unlock()
-				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, ecBucketMeta.QuotaBytes)
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, projected, ecBucketMeta.QuotaBytes)
 			}
 		}
 	}
@@ -1742,10 +1776,19 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 		return s.putObjectWithErasureCoding(ctx, bucket, key, reader, size, contentType, metadata, bucketMeta)
 	}
 
+	// Bound concurrent CDC uploads to cap peak heap under burst load.
+	// See Store.uploadSem for the memory budget rationale.
+	select {
+	case s.uploadSem <- struct{}{}:
+		defer func() { <-s.uploadSem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	// Phase 2: Stream data through CDC chunker without holding the global lock.
 	// CAS writes are safe for concurrent access (content-addressed, atomic rename).
 	metaPath := s.objectMetaPath(bucket, key)
-	streamChunker := NewStreamingChunker(reader)
+	streamChunker := NewStreamingChunkerWithConfig(reader, ChunkConfigForSize(size))
 
 	var chunks []string
 	chunkMetadata := make(map[string]*ChunkMetadata)
@@ -1794,8 +1837,9 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			return nil, fmt.Errorf("read chunk: %w", err)
 		}
 
-		// Write chunk to CAS immediately (don't accumulate in memory)
-		hash, onDiskBytes, err := s.cas.WriteChunk(ctx, chunk)
+		// Write chunk to CAS immediately (don't accumulate in memory).
+		// Pass chunkHash to skip the redundant SHA-256 (NextChunk already computed it).
+		onDiskBytes, err := s.cas.writeChunkKnown(ctx, chunk, chunkHash)
 		if err != nil {
 			return nil, fmt.Errorf("write chunk %s: %w", chunkHash, err)
 		}
@@ -1807,7 +1851,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			s.statsChunkBytes.Add(onDiskBytes)
 			chunkOnDiskSize = onDiskBytes
 		} else {
-			if sz, szErr := s.cas.ChunkSize(ctx, hash); szErr == nil {
+			if sz, szErr := s.cas.ChunkSize(ctx, chunkHash); szErr == nil {
 				chunkOnDiskSize = sz
 			}
 		}
@@ -1888,12 +1932,14 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
-		// Per-bucket quota enforcement
+		// Per-bucket quota enforcement. Use the persistent bucketMeta.SizeBytes
+		// (live object total, written to disk on every put/delete) rather than
+		// s.quota.BucketUsedBytes which resets to 0 on restart.
 		if bucketMeta.QuotaBytes > 0 {
-			bucketUsed := s.quota.BucketUsedBytes(bucket)
-			if bucketUsed+delta > bucketMeta.QuotaBytes {
+			projected := bucketMeta.SizeBytes + delta
+			if projected > bucketMeta.QuotaBytes {
 				s.mu.Unlock()
-				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, bucketMeta.QuotaBytes)
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, projected, bucketMeta.QuotaBytes)
 			}
 		}
 	}
@@ -2738,8 +2784,9 @@ func (s *Store) WriteChunkDirect(ctx context.Context, hash string, data []byte) 
 		return fmt.Errorf("hash mismatch: expected %s, got %s", hash, computedHash)
 	}
 
-	// CAS WriteChunk is idempotent - if chunk exists, it returns immediately
-	_, onDiskBytes, err := s.cas.WriteChunk(ctx, data)
+	// CAS writeChunkKnown is idempotent - if chunk exists, it returns immediately.
+	// hash is already validated above, so pass it to skip the redundant SHA-256.
+	onDiskBytes, err := s.cas.writeChunkKnown(ctx, data, hash)
 	if err != nil {
 		return fmt.Errorf("write chunk to CAS: %w", err)
 	}

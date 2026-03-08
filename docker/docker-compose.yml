@@ -50,7 +50,7 @@ services:
     environment:
       - TUNNELMESH_TOKEN=${TUNNELMESH_TOKEN}
       - OTLP_ENDPOINT=http://127.0.0.1:4318
-      - GOMEMLIMIT=1GiB
+      - GOMEMLIMIT=400MiB
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 5s
@@ -84,7 +84,7 @@ services:
     environment:
       - TUNNELMESH_TOKEN=${TUNNELMESH_TOKEN}
       - OTLP_ENDPOINT=http://coordinator-1:4318
-      - GOMEMLIMIT=1GiB
+      - GOMEMLIMIT=400MiB
     depends_on:
       coord-1:
         condition: service_healthy
@@ -123,7 +123,7 @@ services:
     environment:
       - TUNNELMESH_TOKEN=${TUNNELMESH_TOKEN}
       - OTLP_ENDPOINT=http://coordinator-1:4318
-      - GOMEMLIMIT=1GiB
+      - GOMEMLIMIT=400MiB
     depends_on:
       coord-1:
         condition: service_healthy

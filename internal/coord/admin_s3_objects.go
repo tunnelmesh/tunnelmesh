@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -142,29 +143,45 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 		if (r.Method == http.MethodPut || r.Method == http.MethodDelete) &&
 			r.Header.Get("X-TunnelMesh-Forwarded") == "" {
 			if target := s.objectPrimaryCoordinator(bucket, key); target != "" {
-				// Buffer body so we can retry locally if forward fails.
-				// Limit the read to maxObjectSize to prevent OOM on oversized uploads.
-				// NOTE: unlike the direct-upload path (which streams through PutObject with
-				// ~64 KB peak memory), this path buffers the entire body. With the default
-				// 1 GiB limit each concurrent forwarded upload can hold up to 1 GiB of RAM.
-				// Streaming forwarding would avoid this but requires a two-phase approach to
-				// handle the retry-local fallback.
-				var bodyBuf []byte
+				// Spool body to a temp file so we can stream the forward without
+				// buffering up to maxObjectSize (1 GiB) in heap. If the forward
+				// fails we seek back to the start and handle locally instead.
+				var (
+					tmpFile     *os.File
+					bodySize    int64
+					hasTempBody bool
+				)
 				if r.Body != nil {
 					r.Body = http.MaxBytesReader(w, r.Body, s.maxObjectSize)
-					var err error
-					bodyBuf, err = io.ReadAll(r.Body)
+					var spoolErr error
+					tmpFile, spoolErr = os.CreateTemp("", "tunnelmesh-s3-fwd-*.tmp")
+					if spoolErr != nil {
+						s.jsonError(w, "failed to buffer upload", http.StatusInternalServerError)
+						return
+					}
+					defer func() {
+						_ = tmpFile.Close()
+						_ = os.Remove(tmpFile.Name())
+					}()
+					n, spoolErr := io.Copy(tmpFile, r.Body)
 					_ = r.Body.Close()
-					if err != nil {
+					if spoolErr != nil {
 						var maxBytesErr *http.MaxBytesError
-						if errors.As(err, &maxBytesErr) {
+						if errors.As(spoolErr, &maxBytesErr) {
 							s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 							return
 						}
 						s.jsonError(w, "failed to read request body", http.StatusInternalServerError)
 						return
 					}
-					r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
+					bodySize = n
+					hasTempBody = true
+					if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+						s.jsonError(w, "failed to seek temp file", http.StatusInternalServerError)
+						return
+					}
+					r.Body = tmpFile
+					r.ContentLength = bodySize
 				}
 
 				rec := &discardResponseWriter{header: make(http.Header)}
@@ -177,14 +194,19 @@ func (s *Server) handleS3Object(w http.ResponseWriter, r *http.Request, bucket, 
 					s.updatePeerListingsAfterForward(bucket, key, target, r)
 					return
 				}
-				// Forward failed — fall through to handle locally.
+				// Forward failed — seek temp file back to start and handle locally.
 				if firstFailure := s.forwardBreaker.RecordFailure(target); firstFailure {
 					log.Warn().Str("target", target).Int("status", rec.status).
 						Str("bucket", bucket).Str("key", key).
 						Msg("S3 forward failed, handling locally (circuit opening)")
 				}
-				if bodyBuf != nil {
-					r.Body = io.NopCloser(bytes.NewReader(bodyBuf))
+				if hasTempBody {
+					if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+						s.jsonError(w, "failed to seek temp file for retry", http.StatusInternalServerError)
+						return
+					}
+					r.Body = tmpFile
+					r.ContentLength = bodySize
 				}
 			}
 		}
@@ -326,8 +348,9 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 	}
 
 	// Stream body directly to PutObject — avoids buffering the entire object in memory.
-	// PutObject uses StreamingChunker internally (~64KB peak memory per upload).
-	// r.ContentLength is used for early quota checks; -1 if chunked (quota still enforced post-write).
+	// PutObject uses an adaptive StreamingChunker: ~128 KB buffer for small files, up to ~4 MB for
+	// large files (>64 MB). r.ContentLength is used for chunk-tier selection and early quota checks;
+	// -1 (chunked transfer encoding) selects the smallest tier (safe default).
 	meta, err := s.s3Store.PutObject(r.Context(), bucket, key, r.Body, r.ContentLength, contentType, nil)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
@@ -336,6 +359,8 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 			s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 		case errors.Is(err, s3.ErrBucketNotFound):
 			s.jsonError(w, "bucket not found", http.StatusNotFound)
+		case errors.Is(err, s3.ErrQuotaExceeded), errors.Is(err, s3.ErrBucketQuotaExceeded):
+			s.jsonError(w, err.Error(), http.StatusInsufficientStorage)
 		default:
 			s.jsonError(w, "failed to store object: "+err.Error(), http.StatusInternalServerError)
 		}
