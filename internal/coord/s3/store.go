@@ -51,6 +51,9 @@ const ecStreamBlock = 4 * 1024 * 1024 // 4 MB
 // A piece is stored as a single fixed-size CAS chunk (no CDC).
 const ecPieceSize = ecStreamBlock / ecDataShards // 1 MB
 
+// Compile-time assertion: ecStreamBlock must equal ecDataShards * ecPieceSize.
+var _ [1]struct{} = [ecStreamBlock / (ecDataShards * ecPieceSize)]struct{}{}
+
 // contextCheckInterval is how often to check for context cancellation during
 // chunk fetching loops (~400KB at average chunk size of 4KB).
 const contextCheckInterval = 100
@@ -1181,15 +1184,21 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 		var fileData []byte
 		if pieceSize > 0 && numDataBlocks > 1 {
 			// Multi-block: interleave pieces from each shard.
+			// All data shards must have exactly numDataBlocks*pieceSize bytes;
+			// CAS hash validation guards against corruption, but a length mismatch
+			// would cause silent truncation without this explicit check.
+			for i := 0; i < k; i++ {
+				expected := int64(numDataBlocks) * pieceSize
+				if int64(len(dataShards[i])) != expected {
+					return nil, nil, fmt.Errorf("data shard %d length %d, expected %d (versionID=%s)",
+						i, len(dataShards[i]), expected, meta.VersionID)
+				}
+			}
 			fileData = make([]byte, 0, meta.Size)
 			for b := 0; b < numDataBlocks; b++ {
 				for i := 0; i < k; i++ {
 					start := int64(b) * pieceSize
-					end := start + pieceSize
-					if end > int64(len(dataShards[i])) {
-						end = int64(len(dataShards[i]))
-					}
-					fileData = append(fileData, dataShards[i][start:end]...)
+					fileData = append(fileData, dataShards[i][start:start+pieceSize]...)
 				}
 			}
 		} else {
@@ -1558,19 +1567,22 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			chunks = append(chunks, chunkHash)
 		}
 
-		// ETag: hash data piece bytes (zero-padding is deterministic, so the
-		// ETag is stable across re-uploads of the same file).
+		// ETag: hash data piece bytes including zero-padding on the last block.
+		// This makes the ETag stable across re-uploads of identical files, but
+		// it does not equal MD5(file bytes) for files that are not an exact
+		// multiple of ecStreamBlock — a known semantic departure from S3's ETag
+		// convention for non-multipart uploads.
 		for i := 0; i < ecDataShards; i++ {
 			md5Hasher.Write(pieces[i])
 		}
 
-		blockIdx++
 		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
 			break
 		}
 		if readErr != nil {
 			return nil, fmt.Errorf("read block %d: %w", blockIdx, readErr)
 		}
+		blockIdx++
 	}
 
 	// Verify size if the caller provided a known Content-Length.

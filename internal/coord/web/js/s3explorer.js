@@ -2499,10 +2499,7 @@
     function uploadFileWithProgress(file, key, bucket, onProgress, signal) {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
-            xhr.open(
-                'PUT',
-                `/api/s3/buckets/${encodeURIComponent(bucket)}/objects/${encodeURIComponent(key)}`,
-            );
+            xhr.open('PUT', `/api/s3/buckets/${encodeURIComponent(bucket)}/objects/${encodeURIComponent(key)}`);
             xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
             xhr.upload.addEventListener('progress', (e) => {
                 if (e.lengthComputable) onProgress(e.loaded / e.total);
