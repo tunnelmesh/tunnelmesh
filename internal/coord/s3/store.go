@@ -1228,16 +1228,69 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 	default:
 	}
 
-	parityShards := make([][]byte, m)
-	for i, parityHash := range ec.ParityHashes {
-		chunk, err := s.fetchChunkDistributed(ctx, parityHash)
-		if err != nil {
-			// Parity shard unavailable locally and remotely
-			s.logger.Debug().Str("hash", truncHash(parityHash)).Int("shard", i).Msg("parity shard unavailable")
-			parityShards[i] = nil
+	// Parity shards are CDC-chunked (same as data shards), so we must group
+	// them by ShardIndex, sort by ChunkSequence, and concatenate — identical
+	// logic to Phase 1 for data shards.
+	parityShardChunks := make(map[int][]chunkEntry) // shardIndex -> []chunkEntry
+	incompleteParityShard := make(map[int]bool)
+	for j, parityHash := range ec.ParityHashes {
+		if j%contextCheckInterval == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, fmt.Errorf("context canceled during parity chunk fetch: %w", ctx.Err())
+			default:
+			}
+		}
+
+		chunkMeta, exists := meta.ChunkMetadata[parityHash]
+		if !exists {
+			// Legacy object written before CDC-chunked parity: treat entire hash
+			// as a single chunk with shardIndex=j and sequence=0.
+			chunk, err := s.fetchChunkDistributed(ctx, parityHash)
+			if err != nil {
+				s.logger.Debug().Str("hash", truncHash(parityHash)).Int("shard", j).Msg("parity shard unavailable (legacy)")
+				incompleteParityShard[j] = true
+				continue
+			}
+			parityShardChunks[j] = append(parityShardChunks[j], chunkEntry{data: chunk, sequence: 0})
 			continue
 		}
-		parityShards[i] = chunk
+
+		chunk, err := s.fetchChunkDistributed(ctx, parityHash)
+		if err != nil {
+			s.logger.Debug().Str("hash", truncHash(parityHash)).Int("shard", chunkMeta.ShardIndex).Msg("parity chunk unavailable")
+			incompleteParityShard[chunkMeta.ShardIndex] = true
+			continue
+		}
+		parityShardChunks[chunkMeta.ShardIndex] = append(parityShardChunks[chunkMeta.ShardIndex], chunkEntry{
+			data:     chunk,
+			sequence: chunkMeta.ChunkSequence,
+		})
+	}
+
+	parityShards := make([][]byte, m)
+	for shardIdx := 0; shardIdx < m; shardIdx++ {
+		if incompleteParityShard[shardIdx] {
+			parityShards[shardIdx] = nil
+			continue
+		}
+		entries := parityShardChunks[shardIdx]
+		if len(entries) == 0 {
+			parityShards[shardIdx] = nil
+			continue
+		}
+		sort.Slice(entries, func(a, b int) bool {
+			return entries[a].sequence < entries[b].sequence
+		})
+		totalSize := 0
+		for _, entry := range entries {
+			totalSize += len(entry.data)
+		}
+		shardData := make([]byte, 0, totalSize)
+		for _, entry := range entries {
+			shardData = append(shardData, entry.data...)
+		}
+		parityShards[shardIdx] = shardData
 	}
 
 	// Count available parity shards
@@ -1347,6 +1400,88 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 }
 
 // putObjectWithErasureCoding stores an object using Reed-Solomon erasure coding.
+// writeShardChunks CDC-chunks a single erasure-coding shard and writes all chunks
+// to the CAS. Both data and parity shards use this path so chunks are uniformly
+// small (~2 MB max) for bounded replication-pipeline memory use.
+//
+// Returns the chunk hashes (in CDC order) and per-chunk metadata. The caller
+// appends hashes to its type-specific list (dataHashes / parityHashes) and
+// merges the metadata map into the object's ChunkMetadata.
+func (s *Store) writeShardChunks(ctx context.Context, shard []byte, shardIdx, totalShards int, shardType, versionID, coordID string, replicationFactor int, now time.Time) ([]string, map[string]*ChunkMetadata, error) {
+	chunker := NewStreamingChunker(bytes.NewReader(shard))
+	var hashes []string
+	metadata := make(map[string]*ChunkMetadata)
+	chunkSeq := 0
+
+	versionVector := make(map[string]uint64)
+	var owners []string
+	if coordID != "" {
+		versionVector[coordID] = 1
+		owners = []string{coordID}
+	}
+
+	for {
+		chunk, chunkHash, err := chunker.NextChunk()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("chunk %s shard %d/%d (versionID=%s): %w", shardType, shardIdx, totalShards, versionID, err)
+		}
+
+		onDiskBytes, err := s.cas.writeChunkKnown(ctx, chunk, chunkHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("write %s shard %d/%d chunk %s (versionID=%s): %w", shardType, shardIdx, totalShards, chunkHash[:8], versionID, err)
+		}
+
+		var chunkOnDiskSize int64
+		if onDiskBytes > 0 {
+			s.statsChunkCount.Add(1)
+			s.statsChunkBytes.Add(onDiskBytes)
+			chunkOnDiskSize = onDiskBytes
+		} else {
+			if sz, szErr := s.cas.ChunkSize(ctx, chunkHash); szErr == nil {
+				chunkOnDiskSize = sz
+			}
+		}
+
+		if s.chunkRegistry != nil {
+			if err := s.chunkRegistry.RegisterShardChunk(chunkHash, int64(len(chunk)), versionID, shardType, shardIdx, replicationFactor); err != nil {
+				if os.Getenv("DEBUG") != "" || os.Getenv("TUNNELMESH_DEBUG") != "" {
+					fmt.Fprintf(os.Stderr, "chunk registry warning: failed to register %s shard chunk %s: %v\n", shardType, chunkHash[:8], err)
+				}
+			}
+		}
+
+		// Each chunk gets its own copy of the version vector/owners maps to
+		// ensure they are independently mutable after this function returns.
+		chunkVV := make(map[string]uint64, len(versionVector))
+		for k, v := range versionVector {
+			chunkVV[k] = v
+		}
+		chunkOwners := append([]string(nil), owners...)
+
+		metadata[chunkHash] = &ChunkMetadata{
+			Hash:           chunkHash,
+			Size:           int64(len(chunk)),
+			CompressedSize: chunkOnDiskSize,
+			VersionVector:  chunkVV,
+			Owners:         chunkOwners,
+			FirstSeen:      now,
+			LastModified:   now,
+			ShardType:      shardType,
+			ShardIndex:     shardIdx,
+			ChunkSequence:  chunkSeq,
+			ParentFileID:   versionID,
+		}
+
+		hashes = append(hashes, chunkHash)
+		chunkSeq++
+	}
+
+	return hashes, metadata, nil
+}
+
 // The entire file is buffered in memory, encoded into data+parity shards, then stored.
 // Data shards are CDC chunked (preserves deduplication), parity shards are stored directly.
 //
@@ -1457,125 +1592,37 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		}
 	}()
 
-	// Process data shards: chunk them using CDC to preserve deduplication
+	// Process data shards: chunk them using CDC to preserve deduplication.
+	// Data shards also contribute to the ETag MD5.
 	md5Hasher := md5.New()
 	for i, shard := range dataShards {
 		md5Hasher.Write(shard)
 
-		shardChunker := NewStreamingChunker(bytes.NewReader(shard))
-		chunkSeq := 0
-		for {
-			chunk, chunkHash, err := shardChunker.NextChunk()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("chunk data shard %d/%d (versionID=%s): %w", i, k, versionID, err)
-			}
-
-			onDiskBytes, err := s.cas.writeChunkKnown(ctx, chunk, chunkHash)
-			if err != nil {
-				return nil, fmt.Errorf("write data shard %d/%d chunk %s (versionID=%s): %w", i, k, chunkHash[:8], versionID, err)
-			}
-
-			var chunkOnDiskSize int64
-			if onDiskBytes > 0 {
-				s.statsChunkCount.Add(1)
-				s.statsChunkBytes.Add(onDiskBytes)
-				chunkOnDiskSize = onDiskBytes
-			} else {
-				if sz, szErr := s.cas.ChunkSize(ctx, chunkHash); szErr == nil {
-					chunkOnDiskSize = sz
-				}
-			}
-
-			if s.chunkRegistry != nil {
-				if err := s.chunkRegistry.RegisterShardChunk(chunkHash, int64(len(chunk)), versionID, "data", i, bucketMeta.ReplicationFactor); err != nil {
-					if os.Getenv("DEBUG") != "" || os.Getenv("TUNNELMESH_DEBUG") != "" {
-						fmt.Fprintf(os.Stderr, "chunk registry warning: failed to register data shard chunk %s: %v\n", chunkHash[:8], err)
-					}
-				}
-			}
-
-			versionVector := make(map[string]uint64)
-			if coordID != "" {
-				versionVector[coordID] = 1
-			}
-			var owners []string
-			if coordID != "" {
-				owners = []string{coordID}
-			}
-
-			chunkMetadata[chunkHash] = &ChunkMetadata{
-				Hash:           chunkHash,
-				Size:           int64(len(chunk)),
-				CompressedSize: chunkOnDiskSize,
-				VersionVector:  versionVector,
-				Owners:         owners,
-				FirstSeen:      now,
-				LastModified:   now,
-				ShardType:      "data",
-				ShardIndex:     i,
-				ChunkSequence:  chunkSeq,
-				ParentFileID:   versionID,
-			}
-
-			chunks = append(chunks, chunkHash)
-			dataHashes = append(dataHashes, chunkHash)
-			chunkSeq++
+		shardHashes, shardMeta, err := s.writeShardChunks(ctx, shard, i, k, "data", versionID, coordID, bucketMeta.ReplicationFactor, now)
+		if err != nil {
+			return nil, err
 		}
+		for h, m2 := range shardMeta {
+			chunkMetadata[h] = m2
+		}
+		chunks = append(chunks, shardHashes...)
+		dataHashes = append(dataHashes, shardHashes...)
 	}
 
-	// Process parity shards
+	// Process parity shards: CDC-chunk them exactly like data shards so each
+	// chunk is ~2 MB max. A 100 MB file has ~25 MB parity shards per shard —
+	// storing them as single chunks would create 25 MB blobs in the replication
+	// pipeline. CDC keeps all chunks uniformly small for bounded memory use.
 	for i, shard := range parityShards {
-		parityHash, parityOnDiskBytes, err := s.cas.WriteChunk(ctx, shard)
+		shardHashes, shardMeta, err := s.writeShardChunks(ctx, shard, i, m, "parity", versionID, coordID, bucketMeta.ReplicationFactor, now)
 		if err != nil {
-			return nil, fmt.Errorf("write parity shard %d/%d (versionID=%s): %w", i, m, versionID, err)
+			return nil, err
 		}
-
-		var parityOnDiskSize int64
-		if parityOnDiskBytes > 0 {
-			s.statsChunkCount.Add(1)
-			s.statsChunkBytes.Add(parityOnDiskBytes)
-			parityOnDiskSize = parityOnDiskBytes
-		} else {
-			if sz, szErr := s.cas.ChunkSize(ctx, parityHash); szErr == nil {
-				parityOnDiskSize = sz
-			}
+		for h, m2 := range shardMeta {
+			chunkMetadata[h] = m2
 		}
-
-		if s.chunkRegistry != nil {
-			if err := s.chunkRegistry.RegisterShardChunk(parityHash, int64(len(shard)), versionID, "parity", i, bucketMeta.ReplicationFactor); err != nil {
-				if os.Getenv("DEBUG") != "" || os.Getenv("TUNNELMESH_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "chunk registry warning: failed to register parity shard %s: %v\n", parityHash[:8], err)
-				}
-			}
-		}
-
-		versionVector := make(map[string]uint64)
-		if coordID != "" {
-			versionVector[coordID] = 1
-		}
-		var owners []string
-		if coordID != "" {
-			owners = []string{coordID}
-		}
-
-		chunkMetadata[parityHash] = &ChunkMetadata{
-			Hash:           parityHash,
-			Size:           int64(len(shard)),
-			CompressedSize: parityOnDiskSize,
-			VersionVector:  versionVector,
-			Owners:         owners,
-			FirstSeen:      now,
-			LastModified:   now,
-			ShardType:      "parity",
-			ShardIndex:     i,
-			ParentFileID:   versionID,
-		}
-
-		chunks = append(chunks, parityHash)
-		parityHashes = append(parityHashes, parityHash)
+		chunks = append(chunks, shardHashes...)
+		parityHashes = append(parityHashes, shardHashes...)
 	}
 
 	hash := md5Hasher.Sum(nil)

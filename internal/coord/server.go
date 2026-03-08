@@ -475,7 +475,8 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 			AckTimeout:           10 * time.Second,
 			RetryInterval:        30 * time.Second,
 			MaxPendingOperations: 10000,
-			ChunkPipelineWindow:  5,               // Send up to 5 chunks concurrently per object
+			MaxConcurrentSends:   8,               // Bound concurrent chunk loads/sends to 8 (was 20)
+			ChunkPipelineWindow:  2,               // Send up to 2 chunks concurrently per object (was 5)
 			AutoSyncInterval:     5 * time.Minute, // Re-enqueue all objects every 5 minutes
 			// Independent jitter from GC/listing-reconcile is intentional:
 			// we want the three periodic ops to fire at unrelated times so

@@ -2536,6 +2536,7 @@ function openBucketModal() {
     document.getElementById('bucket-name').value = '';
     document.getElementById('bucket-replication').value = '2'; // Default
     document.getElementById('bucket-quota').value = '';
+    document.getElementById('bucket-ec-enabled').checked = false;
     document.getElementById('bucket-name').focus();
 }
 window.openBucketModal = openBucketModal;
@@ -2549,6 +2550,7 @@ async function createBucket() {
     const name = document.getElementById('bucket-name').value.trim();
     const replicationFactor = parseInt(document.getElementById('bucket-replication').value, 10);
     const quotaMB = parseInt(document.getElementById('bucket-quota').value, 10) || 0;
+    const erasureCodingEnabled = document.getElementById('bucket-ec-enabled').checked;
 
     // Validate bucket name
     if (!name) {
@@ -2570,6 +2572,7 @@ async function createBucket() {
                 name: name,
                 replication_factor: replicationFactor,
                 quota_bytes: quotaMB > 0 ? quotaMB * 1024 * 1024 : 0,
+                erasure_coding_enabled: erasureCodingEnabled,
             }),
         });
 
