@@ -224,9 +224,13 @@ type Store struct {
 	maxVersionsPerObject     int                      // Max versions to keep per object (0 = unlimited)
 	versionRetentionPolicy   VersionRetentionPolicy
 	erasureCodingSemaphore   chan struct{} // Limits concurrent erasure coding operations (memory safety)
-	// uploadSem caps concurrent non-EC PutObject calls. Each concurrent upload
-	// holds one chunk (~128 KB–4 MB) plus zstd/crypto overhead in heap at a time.
-	// 3 slots allow normal throughput while preventing memory blow-up under burst load.
+	// uploadSem caps concurrent non-EC PutObject calls. Under the 400 MiB
+	// GOMEMLIMIT set in systemd/docker-compose, a single large upload binds
+	// ~4–8 MB of transient heap (one chunk at ~2–4 MB + zstd/crypto overhead).
+	// 3 slots comfortably fit inside that budget while handling normal concurrent
+	// use (a busy coordinator typically sees 1–2 simultaneous uploads). The EC
+	// path is gated separately by erasureCodingSemaphore. Hard-coded intentionally:
+	// making it configurable would obscure the memory model from operators.
 	uploadSem chan struct{}  // Limits concurrent CDC upload operations (memory safety)
 	bgWg      sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
 	mu        sync.RWMutex
@@ -1749,7 +1753,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 	}
 
 	// Bound concurrent CDC uploads to cap peak heap under burst load.
-	// Each slot holds one active upload pipeline (one chunk in flight at a time).
+	// See Store.uploadSem for the memory budget rationale.
 	select {
 	case s.uploadSem <- struct{}{}:
 		defer func() { <-s.uploadSem }()

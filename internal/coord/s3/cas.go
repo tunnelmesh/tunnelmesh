@@ -162,7 +162,16 @@ func (c *CAS) WriteChunk(ctx context.Context, data []byte) (hash string, onDiskB
 // writeChunkKnown is like WriteChunk but accepts a pre-computed content hash,
 // avoiding a redundant SHA-256 when the caller has already computed it
 // (e.g. StreamingChunker.NextChunk returns the hash alongside the chunk data).
-// knownHash must be the SHA-256 hex digest of data; behaviour is undefined otherwise.
+//
+// knownHash must be the SHA-256 hex digest of data; callers are responsible for
+// ensuring this invariant before calling. All internal call sites either:
+//   - receive the hash from StreamingChunker.NextChunk (which computes it),
+//   - validate the hash against ContentHash(data) before calling (fetch paths), or
+//   - receive the hash as a trusted parameter already verified by WriteChunkDirect.
+//
+// ctx is accepted for API symmetry with WriteChunk and WriteChunkRaw; it is not
+// currently used inside this function (file I/O is not context-aware), but is
+// retained so callers can pass it without branching and future changes can wire it in.
 func (c *CAS) writeChunkKnown(ctx context.Context, data []byte, knownHash string) (onDiskBytes int64, err error) {
 	chunkPath := c.chunkPath(knownHash)
 
