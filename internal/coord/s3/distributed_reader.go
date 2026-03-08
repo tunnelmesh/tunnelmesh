@@ -305,8 +305,8 @@ func (r *DistributedChunkReader) fetchChunk(idx int) ([]byte, error) {
 			continue
 		}
 
-		// Cache locally for future reads
-		if _, onDiskBytes, werr := r.localCAS.WriteChunk(r.ctx, chunkData); werr != nil {
+		// Cache locally for future reads; pass chunkHash to skip redundant SHA-256.
+		if onDiskBytes, werr := r.localCAS.writeChunkKnown(r.ctx, chunkData, chunkHash); werr != nil {
 			r.logger.Warn().
 				Err(werr).
 				Str("chunk_hash", chunkHash[:8]+"...").

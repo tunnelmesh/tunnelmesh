@@ -71,6 +71,11 @@ type CAS struct {
 	// update storage stats and unregister the chunk from the chunk registry.
 	// May be nil. Called with the chunk hash and the freed on-disk bytes.
 	onSelfHeal func(hash string, freedBytes int64)
+
+	// knownDirs caches the set of two-hex-char subdirectories that have been
+	// created under chunksDir. There are only 256 possible subdirectories (00–ff);
+	// after warmup all are cached and chunkPath() skips os.MkdirAll entirely.
+	knownDirs sync.Map
 }
 
 // DeriveMasterKey derives a stable CAS master key from the mesh auth token using HKDF.
@@ -150,24 +155,33 @@ func (c *CAS) Close() error {
 func (c *CAS) WriteChunk(ctx context.Context, data []byte) (hash string, onDiskBytes int64, err error) {
 	// Compute hash on plaintext for content addressing
 	hash = c.contentHash(data)
-	chunkPath := c.chunkPath(hash)
+	onDiskBytes, err = c.writeChunkKnown(ctx, data, hash)
+	return hash, onDiskBytes, err
+}
+
+// writeChunkKnown is like WriteChunk but accepts a pre-computed content hash,
+// avoiding a redundant SHA-256 when the caller has already computed it
+// (e.g. StreamingChunker.NextChunk returns the hash alongside the chunk data).
+// knownHash must be the SHA-256 hex digest of data; behaviour is undefined otherwise.
+func (c *CAS) writeChunkKnown(ctx context.Context, data []byte, knownHash string) (onDiskBytes int64, err error) {
+	chunkPath := c.chunkPath(knownHash)
 
 	// Check if chunk already exists (dedup)
 	// Safe without lock: os.Stat is atomic and we only need an approximate check.
 	if fileExists(chunkPath) {
-		return hash, 0, nil // dedup hit
+		return 0, nil // dedup hit
 	}
 
 	// Compress
 	compressed, err := c.compress(data)
 	if err != nil {
-		return "", 0, fmt.Errorf("compress chunk: %w", err)
+		return 0, fmt.Errorf("compress chunk: %w", err)
 	}
 
 	// Encrypt with convergent encryption (deterministic key/nonce from content hash)
-	encrypted, err := c.encrypt(compressed, hash)
+	encrypted, err := c.encrypt(compressed, knownHash)
 	if err != nil {
-		return "", 0, fmt.Errorf("encrypt chunk: %w", err)
+		return 0, fmt.Errorf("encrypt chunk: %w", err)
 	}
 
 	// Write atomically via unique temp file.
@@ -179,18 +193,18 @@ func (c *CAS) WriteChunk(ctx context.Context, data []byte) (hash string, onDiskB
 	// file content is byte-identical either way.
 	tmpFile, err := os.CreateTemp(filepath.Dir(chunkPath), ".chunk-*.tmp")
 	if err != nil {
-		return "", 0, fmt.Errorf("create temp file: %w", err)
+		return 0, fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(encrypted); err != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
-		return "", 0, fmt.Errorf("write chunk: %w", err)
+		return 0, fmt.Errorf("write chunk: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return "", 0, fmt.Errorf("close temp file: %w", err)
+		return 0, fmt.Errorf("close temp file: %w", err)
 	}
 
 	onDiskBytes = int64(len(encrypted))
@@ -202,12 +216,12 @@ func (c *CAS) WriteChunk(ctx context.Context, data []byte) (hash string, onDiskB
 		// a concurrent writer already placed the correct file — treat as
 		// successful dedup.
 		if fileExists(chunkPath) {
-			return hash, 0, nil // concurrent dedup
+			return 0, nil // concurrent dedup
 		}
-		return "", 0, fmt.Errorf("rename chunk: %w", err)
+		return 0, fmt.Errorf("rename chunk: %w", err)
 	}
 
-	return hash, onDiskBytes, nil
+	return onDiskBytes, nil
 }
 
 // ReadChunk retrieves and decrypts a chunk by its hash.
@@ -382,9 +396,14 @@ func (c *CAS) chunkPath(hash string) string {
 	if len(hash) < 2 {
 		return filepath.Join(c.chunksDir, hash)
 	}
-	dir := filepath.Join(c.chunksDir, hash[:2])
-	_ = os.MkdirAll(dir, 0755) // Ensure subdir exists
-	return filepath.Join(dir, hash)
+	subdir := hash[:2]
+	// Only call MkdirAll once per unique subdir prefix; there are at most 256
+	// possible values (00–ff) so knownDirs reaches steady state quickly.
+	if _, ok := c.knownDirs.Load(subdir); !ok {
+		_ = os.MkdirAll(filepath.Join(c.chunksDir, subdir), 0755)
+		c.knownDirs.Store(subdir, struct{}{})
+	}
+	return filepath.Join(c.chunksDir, subdir, hash)
 }
 
 // deriveChunkKey derives a per-chunk encryption key using HKDF.
