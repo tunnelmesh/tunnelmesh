@@ -155,7 +155,7 @@ func (a *S3StoreAdapter) ChunkExists(_ context.Context, hash string) bool {
 	return a.store.ChunkExists(hash)
 }
 
-// ReadChunk reads a chunk from CAS by hash (Phase 4).
+// ReadChunk reads a chunk from CAS by hash (returns plaintext).
 func (a *S3StoreAdapter) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	data, err := a.store.ReadChunk(ctx, hash)
 	if err != nil {
@@ -165,7 +165,18 @@ func (a *S3StoreAdapter) ReadChunk(ctx context.Context, hash string) ([]byte, er
 	return data, nil
 }
 
-// WriteChunkDirect writes chunk data directly to CAS (Phase 4).
+// ReadChunkRaw reads the raw encrypted+compressed bytes from CAS without decrypting.
+// Used by the replication sender to avoid unnecessary crypto overhead.
+func (a *S3StoreAdapter) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
+	raw, err := a.store.ReadChunkRaw(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("read chunk raw: %w", err)
+	}
+
+	return raw, nil
+}
+
+// WriteChunkDirect writes chunk data (plaintext) directly to CAS.
 func (a *S3StoreAdapter) WriteChunkDirect(ctx context.Context, hash string, data []byte) error {
 	err := a.store.WriteChunkDirect(ctx, hash, data)
 	if err != nil {
@@ -173,6 +184,33 @@ func (a *S3StoreAdapter) WriteChunkDirect(ctx context.Context, hash string, data
 	}
 
 	return nil
+}
+
+// WriteChunkDirectRaw writes pre-encrypted+compressed chunk bytes directly to CAS.
+// Used by the replication receiver to avoid re-encrypting already-encrypted bytes.
+func (a *S3StoreAdapter) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	err := a.store.WriteChunkDirectRaw(ctx, hash, raw)
+	if err != nil {
+		return fmt.Errorf("write chunk direct raw: %w", err)
+	}
+
+	return nil
+}
+
+// GetObjectMetaJSON returns the full JSON-serialized object metadata, preserving
+// all fields including ErasureCoding. Used by the replication sender.
+func (a *S3StoreAdapter) GetObjectMetaJSON(ctx context.Context, bucket, key string) ([]byte, error) {
+	meta, err := a.store.GetObjectMeta(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("get object meta JSON: %w", err)
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("marshal object meta: %w", err)
+	}
+
+	return data, nil
 }
 
 // ImportObjectMeta writes object metadata directly (for replication receiver).

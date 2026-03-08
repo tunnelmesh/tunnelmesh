@@ -2676,6 +2676,41 @@ func (s *Store) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	return s.cas.ReadChunk(ctx, hash)
 }
 
+// ReadChunkRaw reads the raw encrypted+compressed bytes for a chunk without
+// decrypting or decompressing. Used by the replication sender.
+func (s *Store) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
+	if s.cas == nil {
+		return nil, fmt.Errorf("CAS not initialized")
+	}
+
+	return s.cas.ReadChunkRaw(ctx, hash)
+}
+
+// WriteChunkDirectRaw writes pre-encrypted+compressed chunk bytes directly to CAS.
+// Used by the replication receiver — skips the decrypt+compress+encrypt cycle.
+func (s *Store) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	if s.cas == nil {
+		return fmt.Errorf("CAS not initialized")
+	}
+
+	onDiskBytes, err := s.cas.WriteChunkRaw(ctx, hash, raw)
+	if err != nil {
+		return fmt.Errorf("write raw chunk to CAS: %w", err)
+	}
+
+	if onDiskBytes > 0 {
+		s.statsChunkCount.Add(1)
+		s.statsChunkBytes.Add(onDiskBytes)
+	}
+
+	// Register chunk in distributed registry so GC can track ownership.
+	if s.chunkRegistry != nil {
+		_ = s.chunkRegistry.RegisterChunk(hash, onDiskBytes)
+	}
+
+	return nil
+}
+
 // WriteChunkDirect writes chunk data directly to CAS.
 // This is used by the replication receiver to store incoming chunks.
 // Unlike WriteChunk via PutObject, this doesn't create object metadata.

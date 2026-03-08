@@ -70,15 +70,17 @@ func (m *mockTransport) getLastSent(coordMeshIP string) []byte {
 
 // mockS3Store implements S3Store for testing.
 type mockS3Store struct {
-	mu             sync.Mutex
-	objects        map[string]mockS3Object   // map["bucket/key"]object
-	chunks         map[string][]byte         // map[hash]data (for chunk-level operations)
-	versionHistory map[string][]VersionEntry // map["bucket/key:versions"]entries
-	bucketOwners   map[string]string         // map[bucket]ownerNodeID
-	putErr         error                     // If set, Put will return this error
-	metaErr        error                     // If set, GetObjectMeta will return this error
-	chunkErr       error                     // If set, chunk operations will return this error
-	chunkRequests  int                       // Count of ReadChunk calls
+	mu               sync.Mutex
+	objects          map[string]mockS3Object   // map["bucket/key"]object
+	chunks           map[string][]byte         // map[hash]data (for chunk-level operations)
+	rawChunksWritten map[string][]byte         // map[hash]raw bytes written via WriteChunkDirectRaw
+	versionHistory   map[string][]VersionEntry // map["bucket/key:versions"]entries
+	bucketOwners     map[string]string         // map[bucket]ownerNodeID
+	putErr           error                     // If set, Put will return this error
+	metaErr          error                     // If set, GetObjectMeta will return this error
+	chunkErr         error                     // If set, chunk operations will return this error
+	chunkRequests    int                       // Count of ReadChunk calls
+	rawChunkRequests int                       // Count of ReadChunkRaw calls
 }
 
 type mockS3Object struct {
@@ -91,8 +93,9 @@ type mockS3Object struct {
 
 func newMockS3Store() *mockS3Store {
 	return &mockS3Store{
-		objects: make(map[string]mockS3Object),
-		chunks:  make(map[string][]byte),
+		objects:          make(map[string]mockS3Object),
+		chunks:           make(map[string][]byte),
+		rawChunksWritten: make(map[string][]byte),
 	}
 }
 
@@ -234,7 +237,7 @@ func (m *mockS3Store) ReadChunk(ctx context.Context, hash string) ([]byte, error
 	return data, nil
 }
 
-// WriteChunkDirect writes a chunk to CAS.
+// WriteChunkDirect writes a chunk (plaintext) to CAS.
 func (m *mockS3Store) WriteChunkDirect(ctx context.Context, hash string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -245,6 +248,66 @@ func (m *mockS3Store) WriteChunkDirect(ctx context.Context, hash string, data []
 
 	m.chunks[hash] = append([]byte(nil), data...)
 	return nil
+}
+
+// ReadChunkRaw returns the "raw" bytes — in the mock, this is the same as ReadChunk
+// since the mock doesn't actually encrypt. The test can distinguish by checking
+// rawChunkRequests vs chunkRequests.
+func (m *mockS3Store) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.rawChunkRequests++
+
+	if m.chunkErr != nil {
+		return nil, m.chunkErr
+	}
+
+	data, exists := m.chunks[hash]
+	if !exists {
+		return nil, fmt.Errorf("chunk not found: %s", hash)
+	}
+
+	return append([]byte(nil), data...), nil
+}
+
+// WriteChunkDirectRaw writes raw (pre-encrypted) chunk bytes to CAS.
+func (m *mockS3Store) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.chunkErr != nil {
+		return m.chunkErr
+	}
+
+	m.rawChunksWritten[hash] = append([]byte(nil), raw...)
+	m.chunks[hash] = append([]byte(nil), raw...)
+	return nil
+}
+
+// GetObjectMetaJSON returns the JSON serialization of the object metadata.
+func (m *mockS3Store) GetObjectMetaJSON(ctx context.Context, bucket, key string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.metaErr != nil {
+		return nil, m.metaErr
+	}
+
+	obj, exists := m.objects[m.makeKey(bucket, key)]
+	if !exists {
+		return nil, fmt.Errorf("object not found")
+	}
+
+	meta := ObjectMeta{
+		Key:           key,
+		Size:          int64(len(obj.data)),
+		ContentType:   obj.contentType,
+		Metadata:      obj.metadata,
+		Chunks:        obj.chunks,
+		ChunkMetadata: obj.chunkMeta,
+	}
+	return json.Marshal(meta)
 }
 
 // ImportObjectMeta writes object metadata directly.
@@ -480,8 +543,9 @@ func (t *brokerTransport) RegisterHandler(handler func(ctx context.Context, from
 
 // mockChunkRegistry implements ChunkRegistryInterface for testing.
 type mockChunkRegistry struct {
-	mu        sync.Mutex
-	ownership map[string]map[string]bool // map[chunkHash]map[coordID]bool
+	mu          sync.Mutex
+	ownership   map[string]map[string]bool // map[chunkHash]map[coordID]bool
+	shardChunks []string                   // hashes registered via RegisterShardChunk
 }
 
 func newMockChunkRegistry() *mockChunkRegistry {
@@ -492,6 +556,13 @@ func newMockChunkRegistry() *mockChunkRegistry {
 
 func (m *mockChunkRegistry) RegisterChunk(hash string, size int64) error {
 	return nil // No-op for tests
+}
+
+func (m *mockChunkRegistry) RegisterShardChunk(hash string, size int64, parentFileID, shardType string, shardIndex, replicationFactor int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shardChunks = append(m.shardChunks, hash)
+	return nil
 }
 
 func (m *mockChunkRegistry) UnregisterChunk(hash string) error {
@@ -2236,4 +2307,246 @@ func TestSendSemaphoreRespectsContextCancellation(t *testing.T) {
 
 	// Release the slot
 	r.releaseSendSlot()
+}
+
+// TestReplicateSingleChunk_UsesRawRead verifies that replicateSingleChunk calls
+// ReadChunkRaw (not ReadChunk) for the normal path.
+func TestReplicateSingleChunk_UsesRawRead(t *testing.T) {
+	ctx := context.Background()
+	senderS3 := newMockS3Store()
+	receiverS3 := newMockS3Store()
+	registry := newMockChunkRegistry()
+	broker := newTestTransportBroker()
+
+	// Use real sha256 hash so integrity checks pass
+	data := []byte("test chunk for raw read path")
+	h := sha256.Sum256(data)
+	chunkHash := hex.EncodeToString(h[:])
+
+	chunks := []string{chunkHash}
+	chunkData := map[string][]byte{chunkHash: data}
+	senderS3.addObjectWithChunks("bucket", "file.txt", chunks, chunkData)
+	registry.setOwnership(chunkHash, []string{"coord-sender"})
+
+	sender := NewReplicator(Config{
+		NodeID:          "coord-sender",
+		Transport:       broker.newTransportFor("coord-sender"),
+		S3Store:         senderS3,
+		ChunkRegistry:   registry,
+		ChunkAckTimeout: 1 * time.Second,
+		Logger:          zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = sender.Stop() })
+
+	receiver := NewReplicator(Config{
+		NodeID:        "coord-receiver",
+		Transport:     broker.newTransportFor("coord-receiver"),
+		S3Store:       receiverS3,
+		ChunkRegistry: registry,
+		Logger:        zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = receiver.Stop() })
+	_ = receiver
+
+	err := sender.ReplicateObject(ctx, "bucket", "file.txt", "coord-receiver")
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	senderS3.mu.Lock()
+	rawReqs := senderS3.rawChunkRequests
+	plainReqs := senderS3.chunkRequests
+	senderS3.mu.Unlock()
+
+	assert.Greater(t, rawReqs, 0, "ReadChunkRaw should have been called")
+	assert.Equal(t, 0, plainReqs, "ReadChunk (plaintext) should NOT have been called for normal path")
+}
+
+// TestHandleReplicateChunk_UsesRawWrite verifies that when IsRaw=true the receiver
+// stores via WriteChunkDirectRaw (not WriteChunkDirect).
+func TestHandleReplicateChunk_UsesRawWrite(t *testing.T) {
+	ctx := context.Background()
+	senderS3 := newMockS3Store()
+	receiverS3 := newMockS3Store()
+	registry := newMockChunkRegistry()
+	broker := newTestTransportBroker()
+
+	data := []byte("raw write path test data")
+	h := sha256.Sum256(data)
+	chunkHash := hex.EncodeToString(h[:])
+
+	chunks := []string{chunkHash}
+	chunkData := map[string][]byte{chunkHash: data}
+	senderS3.addObjectWithChunks("bucket", "file.txt", chunks, chunkData)
+	registry.setOwnership(chunkHash, []string{"coord-sender"})
+
+	sender := NewReplicator(Config{
+		NodeID:          "coord-sender",
+		Transport:       broker.newTransportFor("coord-sender"),
+		S3Store:         senderS3,
+		ChunkRegistry:   registry,
+		ChunkAckTimeout: 1 * time.Second,
+		Logger:          zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = sender.Stop() })
+
+	receiver := NewReplicator(Config{
+		NodeID:        "coord-receiver",
+		Transport:     broker.newTransportFor("coord-receiver"),
+		S3Store:       receiverS3,
+		ChunkRegistry: registry,
+		Logger:        zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = receiver.Stop() })
+	_ = receiver
+
+	err := sender.ReplicateObject(ctx, "bucket", "file.txt", "coord-receiver")
+	require.NoError(t, err)
+
+	time.Sleep(100 * time.Millisecond)
+
+	receiverS3.mu.Lock()
+	rawWritten := len(receiverS3.rawChunksWritten)
+	receiverS3.mu.Unlock()
+
+	assert.Greater(t, rawWritten, 0, "WriteChunkDirectRaw should have been called on receiver")
+	assert.Contains(t, receiverS3.rawChunksWritten, chunkHash, "raw chunk hash should be in rawChunksWritten")
+}
+
+// TestHandleReplicateObjectMeta_ECShardRegistry verifies that EC shard chunks are
+// registered in the chunk registry when metadata is received.
+func TestHandleReplicateObjectMeta_ECShardRegistry(t *testing.T) {
+	// Build EC metadata JSON with shard chunk entries
+	parentFileID := "version-abc-123"
+	ecMetaJSON := []byte(`{
+		"key": "ec-file.bin",
+		"size": 1024,
+		"chunk_metadata": {
+			"datahash1": {
+				"hash": "datahash1",
+				"size": 512,
+				"shard_type": "data",
+				"shard_index": 0,
+				"parent_file_id": "` + parentFileID + `"
+			},
+			"datahash2": {
+				"hash": "datahash2",
+				"size": 512,
+				"shard_type": "data",
+				"shard_index": 1,
+				"parent_file_id": "` + parentFileID + `"
+			},
+			"parityhash1": {
+				"hash": "parityhash1",
+				"size": 512,
+				"shard_type": "parity",
+				"shard_index": 0,
+				"parent_file_id": "` + parentFileID + `"
+			},
+			"regularChunk": {
+				"hash": "regularChunk",
+				"size": 256
+			}
+		},
+		"chunks": ["datahash1", "datahash2", "parityhash1"]
+	}`)
+
+	receiverS3 := newMockS3Store()
+	registry := newMockChunkRegistry()
+	broker := newTestTransportBroker()
+
+	receiver := NewReplicator(Config{
+		NodeID:        "coord-receiver",
+		Transport:     broker.newTransportFor("coord-receiver"),
+		S3Store:       receiverS3,
+		ChunkRegistry: registry,
+		Logger:        zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = receiver.Stop() })
+	_ = receiver
+
+	// Craft and send a ReplicateObjectMeta message directly
+	payload := ReplicateObjectMetaPayload{
+		Bucket:      "bucket",
+		Key:         "ec-file.bin",
+		MetaJSON:    ecMetaJSON,
+		BucketOwner: "alice",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	msg := &Message{
+		ID:      "test-msg-1",
+		Type:    MessageTypeReplicateObjectMeta,
+		From:    "coord-sender",
+		Payload: payloadJSON,
+	}
+
+	err = receiver.handleReplicateObjectMeta(msg)
+	require.NoError(t, err)
+
+	registry.mu.Lock()
+	shards := append([]string(nil), registry.shardChunks...)
+	registry.mu.Unlock()
+
+	// Must have registered all 3 EC shards (data×2 + parity×1), NOT regularChunk
+	assert.Len(t, shards, 3, "should register 3 EC shard chunks")
+	assert.Contains(t, shards, "datahash1")
+	assert.Contains(t, shards, "datahash2")
+	assert.Contains(t, shards, "parityhash1")
+	assert.NotContains(t, shards, "regularChunk", "non-shard chunk must not be registered via RegisterShardChunk")
+}
+
+// TestReplicateChunk_RawBytesRoundtrip is a regression guard: a chunk replicated
+// from sender to receiver via the raw path must be readable as the original data.
+func TestReplicateChunk_RawBytesRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	senderS3 := newMockS3Store()
+	receiverS3 := newMockS3Store()
+	registry := newMockChunkRegistry()
+	broker := newTestTransportBroker()
+
+	data := []byte("regression guard for raw chunk roundtrip")
+	h := sha256.Sum256(data)
+	chunkHash := hex.EncodeToString(h[:])
+
+	chunks := []string{chunkHash}
+	chunkData := map[string][]byte{chunkHash: data}
+	senderS3.addObjectWithChunks("bucket", "file.txt", chunks, chunkData)
+	registry.setOwnership(chunkHash, []string{"coord-sender"})
+
+	sender := NewReplicator(Config{
+		NodeID:          "coord-sender",
+		Transport:       broker.newTransportFor("coord-sender"),
+		S3Store:         senderS3,
+		ChunkRegistry:   registry,
+		ChunkAckTimeout: 1 * time.Second,
+		Logger:          zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = sender.Stop() })
+
+	receiver := NewReplicator(Config{
+		NodeID:        "coord-receiver",
+		Transport:     broker.newTransportFor("coord-receiver"),
+		S3Store:       receiverS3,
+		ChunkRegistry: registry,
+		Logger:        zerolog.Nop(),
+	})
+	t.Cleanup(func() { _ = receiver.Stop() })
+	_ = receiver
+
+	err := sender.ReplicateObject(ctx, "bucket", "file.txt", "coord-receiver")
+	require.NoError(t, err)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// The chunk should be present in receiver — what was stored is the raw bytes (same as sender stored)
+	receiverS3.mu.Lock()
+	storedRaw, ok := receiverS3.rawChunksWritten[chunkHash]
+	receiverS3.mu.Unlock()
+
+	require.True(t, ok, "chunk must be stored on receiver via WriteChunkDirectRaw")
+	// The stored raw bytes must be the same as what the sender read (mock doesn't encrypt,
+	// so raw == data in the mock — in production the raw bytes are encrypted+compressed)
+	assert.Equal(t, data, storedRaw, "raw bytes on receiver must match what sender stored")
 }

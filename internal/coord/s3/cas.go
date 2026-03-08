@@ -210,6 +210,64 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	return data, nil
 }
 
+// ReadChunkRaw reads the raw encrypted+compressed bytes from disk without
+// decrypting or decompressing. Used by the replication sender to transfer
+// chunks without paying unnecessary crypto overhead.
+func (c *CAS) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
+	chunkPath := c.chunkPath(hash)
+
+	raw, err := os.ReadFile(chunkPath)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("chunk not found: %s", hash)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read raw chunk: %w", err)
+	}
+
+	return raw, nil
+}
+
+// WriteChunkRaw writes pre-encrypted+compressed chunk bytes directly to disk.
+// Used by the replication receiver to store incoming chunks without re-encrypting.
+// The hash is used only for naming/dedup; the caller is responsible for ensuring
+// the raw bytes were produced by a CAS with the same master key.
+// Returns onDiskBytes=0 if the chunk already exists (dedup hit).
+func (c *CAS) WriteChunkRaw(ctx context.Context, hash string, raw []byte) (onDiskBytes int64, err error) {
+	chunkPath := c.chunkPath(hash)
+
+	// Dedup check: skip if chunk already exists.
+	if fileExists(chunkPath) {
+		return 0, nil
+	}
+
+	// Write atomically via temp file + rename (same pattern as WriteChunk).
+	tmpFile, err := os.CreateTemp(filepath.Dir(chunkPath), ".chunk-*.tmp")
+	if err != nil {
+		return 0, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("write raw chunk: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, chunkPath); err != nil {
+		_ = os.Remove(tmpPath)
+		if fileExists(chunkPath) {
+			return 0, nil // concurrent dedup
+		}
+		return 0, fmt.Errorf("rename raw chunk: %w", err)
+	}
+
+	return int64(len(raw)), nil
+}
+
 // DeleteChunk removes a chunk from storage and returns the freed bytes.
 // Returns 0 if the chunk didn't exist.
 func (c *CAS) DeleteChunk(ctx context.Context, hash string) (int64, error) {

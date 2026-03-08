@@ -117,7 +117,8 @@ type ReplicateChunkPayload struct {
 	Bucket        string        `json:"bucket"`         // File this chunk belongs to
 	Key           string        `json:"key"`            // File key
 	ChunkHash     string        `json:"chunk_hash"`     // SHA-256 of chunk plaintext
-	ChunkData     []byte        `json:"chunk_data"`     // Compressed + encrypted chunk
+	ChunkData     []byte        `json:"chunk_data"`     // Chunk bytes (see IsRaw for format)
+	IsRaw         bool          `json:"is_raw"`         // If true, ChunkData is encrypted+compressed; if false, plaintext
 	ChunkIndex    int           `json:"chunk_index"`    // Position in file (for ordering)
 	TotalChunks   int           `json:"total_chunks"`   // Total number of chunks in file
 	ChunkSize     int64         `json:"chunk_size"`     // Uncompressed chunk size
