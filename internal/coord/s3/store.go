@@ -223,17 +223,18 @@ type Store struct {
 	versionRetentionDays     int                      // Days to retain object versions (0 = forever)
 	maxVersionsPerObject     int                      // Max versions to keep per object (0 = unlimited)
 	versionRetentionPolicy   VersionRetentionPolicy
-	erasureCodingSemaphore   chan struct{} // Limits concurrent erasure coding operations (memory safety)
 	// uploadSem caps concurrent non-EC PutObject calls. Under the 400 MiB
-	// GOMEMLIMIT set in systemd/docker-compose, a single large upload binds
-	// ~4–8 MB of transient heap (one chunk at ~2–4 MB + zstd/crypto overhead).
-	// 3 slots comfortably fit inside that budget while handling normal concurrent
-	// use (a busy coordinator typically sees 1–2 simultaneous uploads). The EC
-	// path is gated separately by erasureCodingSemaphore. Hard-coded intentionally:
-	// making it configurable would obscure the memory model from operators.
-	uploadSem chan struct{}  // Limits concurrent CDC upload operations (memory safety)
-	bgWg      sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu        sync.RWMutex
+	// GOMEMLIMIT, a single large CDC upload binds ~4–8 MB of transient heap
+	// (one chunk at ~2–4 MB + zstd/crypto overhead). 3 slots fit comfortably.
+	uploadSem chan struct{}
+	// erasureCodingSemaphore serializes EC uploads. Each EC operation reads the
+	// entire file into memory (io.ReadAll, store.go:1379) then builds k+m shards
+	// via EncodeFile, peaking at ~(1 + m/k + 1) × fileSize ≈ 280 MB for a 100 MB
+	// file with RS(4,2). Capacity=1 keeps peak heap under ~400 MB combined with
+	// uploadSem. EC is I/O-bound; serialization doesn't hurt real throughput.
+	erasureCodingSemaphore chan struct{}
+	bgWg                   sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	mu                     sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -257,9 +258,9 @@ func NewStore(dataDir string, quota *QuotaManager) (*Store, error) {
 	store := &Store{
 		dataDir:                dataDir,
 		quota:                  quota,
-		logger:                 zerolog.Nop(),           // Default to no-op logger
-		erasureCodingSemaphore: make(chan struct{}, 10), // Allow 10 concurrent EC operations
-		uploadSem:              make(chan struct{}, 3),  // Allow 3 concurrent CDC uploads
+		logger:                 zerolog.Nop(),          // Default to no-op logger
+		erasureCodingSemaphore: make(chan struct{}, 1), // Serialize EC: each op peaks ~280 MB (see comment above)
+		uploadSem:              make(chan struct{}, 3), // Allow 3 concurrent CDC uploads
 	}
 
 	// Calculate initial quota usage from existing objects
