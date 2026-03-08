@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"testing"
 
@@ -430,4 +432,49 @@ func TestCAS_ReadChunk_SelfHealsCorruptedChunk(t *testing.T) {
 
 	// File must be deleted
 	assert.False(t, casA.ChunkExists(hash), "corrupted chunk file must be removed")
+}
+
+// TestCASEncoderMemoryBudget verifies that the CAS encoder stays within a
+// bounded memory budget after upload spikes. casEncoderConcurrency=1 means
+// a single zstd sub-encoder (~13 MB with lowMem) rather than GOMAXPROCS
+// sub-encoders (~13 MB each). The test also validates that idle heap is
+// returned to the OS when the runtime is given the opportunity — simulating
+// what happens in production with GOMEMLIMIT=400MiB set in systemd/docker.
+func TestCASEncoderMemoryBudget(t *testing.T) {
+	// Tighten GOMEMLIMIT so the background scavenger runs aggressively
+	// during this test. In production, GOMEMLIMIT=400MiB in the systemd unit
+	// and docker-compose files provides the same pressure automatically.
+	const testLimit = 200 * 1024 * 1024 // 200 MiB
+	prev := debug.SetMemoryLimit(int64(testLimit))
+	defer debug.SetMemoryLimit(prev)
+
+	cas := newTestCAS(t)
+	ctx := context.Background()
+
+	// Spike: write a 50 MB chunk — this exercises the zstd encoder and the
+	// CAS pipeline, allocating ~50–80 MB of transient heap.
+	data := make([]byte, 50*1024*1024)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	_, _, err := cas.WriteChunk(ctx, data)
+	require.NoError(t, err)
+	data = nil //nolint:ineffassign // intentional: releases the 50 MiB before FreeOSMemory
+
+	// FreeOSMemory runs GC then synchronously returns all idle heap spans to
+	// the OS. In production, GOMEMLIMIT causes the background scavenger to do
+	// this within ~60 s of a spike; here we force it for a fast deterministic test.
+	debug.FreeOSMemory()
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+
+	// After FreeOSMemory the idle heap should be well below the spike size.
+	// The threshold accounts for the live CAS encoder (~13 MiB), Go runtime
+	// internals, and heap span granularity. Without scavenging, HeapIdle
+	// would be ~80–150 MiB (the spike size stays idle indefinitely).
+	const maxIdle = 100 * 1024 * 1024 // 100 MiB
+	assert.Less(t, ms.HeapIdle, uint64(maxIdle),
+		"HeapIdle=%d MiB after FreeOSMemory; want < 100 MiB — idle pages should be returned to OS promptly under GOMEMLIMIT pressure",
+		ms.HeapIdle/1024/1024)
 }
