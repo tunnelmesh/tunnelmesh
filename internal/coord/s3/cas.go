@@ -17,6 +17,12 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+// macFailureMsg is the error string returned by chacha20poly1305.Open() when the
+// message authentication code check fails (wrong key or corrupt ciphertext).
+// Extracted as a constant to make it grep-able and document the upstream dependency.
+// Source: golang.org/x/crypto/chacha20poly1305 — Open() → errOpen.
+const macFailureMsg = "message authentication failed"
+
 // casEncoderConcurrency caps the zstd encoder's internal sub-encoder pool.
 // At SpeedDefault with lowMem, each sub-encoder uses ~12–13 MB, so
 // 4 × 13 MB ≈ 52 MB memory budget. Increase for higher throughput at the
@@ -71,6 +77,10 @@ type CAS struct {
 // token must be a 64-character hex string (32 raw bytes); any other format is hashed directly.
 func DeriveMasterKey(token string) ([32]byte, error) {
 	var masterKey [32]byte
+	// Trim whitespace before hex-decoding so that tokens with a trailing newline
+	// (e.g., copy-pasted from a config file) don't silently fall through to the
+	// raw-bytes path and produce a different key.
+	token = strings.TrimSpace(token)
 	tokenBytes, err := hex.DecodeString(token)
 	if err != nil {
 		// Non-hex token (unusual): use raw UTF-8 bytes
@@ -221,10 +231,15 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 		// (e.g., replicated from a peer before all coordinators adopted the shared
 		// CAS key). Delete the corrupted file so the caller can re-fetch from a
 		// peer that has the correct plaintext, which will re-encrypt with our key.
-		if strings.Contains(err.Error(), "message authentication failed") {
-			_ = os.Remove(chunkPath)
-			if c.onSelfHeal != nil {
-				c.onSelfHeal(hash, int64(len(encrypted)))
+		if strings.Contains(err.Error(), macFailureMsg) {
+			// Gate the callback on a successful remove: if two concurrent ReadChunk
+			// calls both hit the same corrupt chunk, only the first os.Remove
+			// succeeds. Without this guard both goroutines would invoke onSelfHeal,
+			// double-decrementing statsChunkCount and statsChunkBytes.
+			if removeErr := os.Remove(chunkPath); removeErr == nil {
+				if c.onSelfHeal != nil {
+					c.onSelfHeal(hash, int64(len(encrypted)))
+				}
 			}
 			return nil, fmt.Errorf("chunk not found: %s", hash)
 		}
