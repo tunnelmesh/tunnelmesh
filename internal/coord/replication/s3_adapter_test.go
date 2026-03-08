@@ -677,27 +677,55 @@ func TestS3StoreAdapter_RawChunkRoundtrip(t *testing.T) {
 	if err != nil || len(metaA.Chunks) == 0 {
 		t.Fatalf("get meta: %v", err)
 	}
-	hash := metaA.Chunks[0]
 
-	// Read raw from A
-	raw, err := adapterA.ReadChunkRaw(ctx, hash)
-	if err != nil {
-		t.Fatalf("ReadChunkRaw: %v", err)
+	// Transfer ALL chunks raw from A to B (chunks are now RS pieces, not plaintext).
+	for _, hash := range metaA.Chunks {
+		raw, readErr := adapterA.ReadChunkRaw(ctx, hash)
+		if readErr != nil {
+			t.Fatalf("ReadChunkRaw(%s): %v", hash[:8], readErr)
+		}
+
+		writeErr := adapterB.WriteChunkDirectRaw(ctx, hash, raw)
+		if writeErr != nil {
+			t.Fatalf("WriteChunkDirectRaw(%s): %v", hash[:8], writeErr)
+		}
+
+		// Verify the chunk round-tripped: ReadChunk on B should return the same
+		// bytes as ReadChunk on A (both decrypt the same RS piece data).
+		gotA, errA := storeA.ReadChunk(ctx, hash)
+		gotB, errB := storeB.ReadChunk(ctx, hash)
+		if errA != nil || errB != nil {
+			t.Fatalf("ReadChunk: A=%v B=%v", errA, errB)
+		}
+		if string(gotA) != string(gotB) {
+			t.Errorf("chunk %s: A and B data differ after raw transfer", hash[:8])
+		}
 	}
 
-	// Write raw to B
-	err = adapterB.WriteChunkDirectRaw(ctx, hash, raw)
-	if err != nil {
-		t.Fatalf("WriteChunkDirectRaw: %v", err)
+	// Import the metadata into B and verify the full object can be read.
+	if err := storeB.CreateBucket(ctx, "bucket", "alice", 2, nil); err != nil {
+		t.Fatalf("create bucket B: %v", err)
+	}
+	importJSON, marshalErr := json.Marshal(metaA)
+	if marshalErr != nil {
+		t.Fatalf("marshal meta: %v", marshalErr)
+	}
+	if _, importErr := storeB.ImportObjectMeta(ctx, "bucket", "file.txt", importJSON, "alice"); importErr != nil {
+		t.Fatalf("ImportObjectMeta on B: %v", importErr)
 	}
 
-	// ReadChunk (plaintext) on B must match original
-	got, err := storeB.ReadChunk(ctx, hash)
+	reader, _, err := storeB.GetObject(ctx, "bucket", "file.txt")
 	if err != nil {
-		t.Fatalf("ReadChunk on B: %v", err)
+		t.Fatalf("GetObject on B: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll on B: %v", err)
 	}
 	if string(got) != string(plaintext) {
-		t.Errorf("expected %q, got %q", plaintext, got)
+		t.Errorf("expected %q after full object roundtrip on B, got %q", plaintext, got)
 	}
 }
 

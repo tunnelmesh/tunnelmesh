@@ -3057,25 +3057,30 @@ func TestGetBucketErasureCodingPolicy_NoEC(t *testing.T) {
 
 	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "alice", 2, nil))
 
+	// EC is now universal (always RS(4,2)), so even buckets created without an
+	// explicit EC policy return enabled=true with the canonical parameters.
 	enabled, k, m, err := store.GetBucketErasureCodingPolicy(ctx, "test-bucket")
 	require.NoError(t, err)
-	assert.False(t, enabled)
-	assert.Equal(t, 0, k)
-	assert.Equal(t, 0, m)
+	assert.True(t, enabled)
+	assert.Equal(t, ecDataShards, k)
+	assert.Equal(t, ecParityShards, m)
 }
 
 func TestGetBucketErasureCodingPolicy_WithEC(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	ctx := context.Background()
 
+	// The stored EC policy parameters are accepted for compatibility but
+	// GetBucketErasureCodingPolicy now always reports the canonical RS(4,2)
+	// because EC is universal and the stored policy is informational only.
 	ecPolicy := &ErasureCodingPolicy{Enabled: true, DataShards: 10, ParityShards: 3}
 	require.NoError(t, store.CreateBucket(ctx, "ec-bucket", "alice", 2, ecPolicy))
 
 	enabled, k, m, err := store.GetBucketErasureCodingPolicy(ctx, "ec-bucket")
 	require.NoError(t, err)
 	assert.True(t, enabled)
-	assert.Equal(t, 10, k)
-	assert.Equal(t, 3, m)
+	assert.Equal(t, ecDataShards, k)
+	assert.Equal(t, ecParityShards, m)
 }
 
 func TestGetBucketErasureCodingPolicy_BucketNotFound(t *testing.T) {

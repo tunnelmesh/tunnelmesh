@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestStoreWithErasureCoding creates a test store and a bucket with erasure coding enabled.
+// newTestStoreWithErasureCoding creates a test store and a bucket.
+// The k and m parameters are stored as the bucket policy for API compatibility,
+// but the store always encodes with the universal RS(ecDataShards, ecParityShards).
 func newTestStoreWithErasureCoding(t *testing.T, k, m int) *Store {
 	t.Helper()
 	store := newTestStoreWithCAS(t)
@@ -43,6 +45,24 @@ func putAndGet(t *testing.T, store *Store, bucket, key string, data []byte) []by
 	return got
 }
 
+// deleteDataShard removes all CAS chunks belonging to data shard shardIdx.
+// Uses position-based routing (DataHashes is shard-major) to correctly handle
+// the case where multiple shards have identical content.
+func deleteDataShard(t *testing.T, store *Store, meta *ObjectMeta, shardIdx int) {
+	t.Helper()
+	k := meta.ErasureCoding.DataShards
+	numBlocks := len(meta.ErasureCoding.DataHashes) / k
+	if numBlocks == 0 {
+		numBlocks = 1
+	}
+	start := shardIdx * numBlocks
+	end := start + numBlocks
+	ctx := context.Background()
+	for i := start; i < end && i < len(meta.ErasureCoding.DataHashes); i++ {
+		_, _ = store.cas.DeleteChunk(ctx, meta.ErasureCoding.DataHashes[i])
+	}
+}
+
 // TestErasureCodingReadPath_FastPath verifies the fast path (all data shards available).
 func TestErasureCodingReadPath_FastPath(t *testing.T) {
 	tests := []struct {
@@ -61,66 +81,54 @@ func TestErasureCodingReadPath_FastPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStoreWithErasureCoding(t, tt.k, tt.m)
 			got := putAndGet(t, store, "ec-bucket", "test.bin", tt.data)
-			assert.Equal(t, tt.data, got, "read data should match written data")
+			assert.Equal(t, tt.data, got, "data should round-trip through erasure coding")
 		})
 	}
 }
 
 // TestErasureCodingReadPath_LargeFile tests the fast path with a larger file
-// that produces multiple CDC chunks per shard.
+// that produces multiple RS blocks.
 func TestErasureCodingReadPath_LargeFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping large file erasure coding test in short mode")
 	}
 
-	// 256KB file with 6+3 encoding → each shard ~43KB → multiple CDC chunks per shard
-	data := make([]byte, 256*1024)
+	// 9 MB — produces 3 RS blocks (> 2 × ecStreamBlock/2)
+	data := make([]byte, 9*1024*1024)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, 6, 3)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	got := putAndGet(t, store, "ec-bucket", "large.bin", data)
 	assert.Equal(t, data, got, "large file should round-trip through erasure coding")
 }
 
 // TestErasureCodingReadPath_Reconstruction tests reading when some data shards are missing.
+// Uses random data to ensure all RS pieces have distinct hashes.
 func TestErasureCodingReadPath_Reconstruction(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024) // 24KB → 4KB per shard
+	// Use random data large enough to fill ecStreamBlock so all k pieces are distinct.
+	// A file that fills the entire 4 MB block guarantees no zero-pad pieces.
+	data := make([]byte, ecStreamBlock) // exactly 4 MB → 4 × 1 MB non-zero pieces
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	for missing := 1; missing <= m; missing++ {
+	// With k=4, m=2 we can tolerate up to m=2 missing data shards.
+	for missing := 1; missing <= ecParityShards; missing++ {
 		t.Run(fmt.Sprintf("missing_%d_data_shards", missing), func(t *testing.T) {
-			store := newTestStoreWithErasureCoding(t, k, m)
+			store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 			ctx := context.Background()
 
-			// Write the object
 			meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 			require.NoError(t, err)
 			require.NotNil(t, meta.ErasureCoding)
+			assert.Equal(t, ecDataShards, meta.ErasureCoding.DataShards)
 
-			// Delete some data chunks from CAS to simulate missing shards
-			// Group data hashes by shard index to know which chunks to delete
-			shardsDeleted := make(map[int]bool)
-			for _, chunkHash := range meta.ErasureCoding.DataHashes {
-				chunkMeta := meta.ChunkMetadata[chunkHash]
-				if chunkMeta == nil {
-					continue
-				}
-				if shardsDeleted[chunkMeta.ShardIndex] {
-					// Already deleting this shard's chunks
-					_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-					continue
-				}
-				if len(shardsDeleted) < missing {
-					shardsDeleted[chunkMeta.ShardIndex] = true
-					_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-				}
+			// Delete chunks for 'missing' data shards using position-based routing.
+			for s := 0; s < missing; s++ {
+				deleteDataShard(t, store, meta, s)
 			}
-			require.Equal(t, missing, len(shardsDeleted), "should have deleted chunks for %d shards", missing)
 
-			// Read should succeed via reconstruction
+			// Read should succeed via RS reconstruction.
 			reader, _, err := store.GetObject(ctx, "ec-bucket", "test.bin")
 			require.NoError(t, err)
 			defer func() { _ = reader.Close() }()
@@ -129,7 +137,6 @@ func TestErasureCodingReadPath_Reconstruction(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, data, got, "reconstructed data should match original with %d missing shards", missing)
 
-			// Wait for background caching goroutine to complete
 			store.WaitBackground()
 		})
 	}
@@ -137,25 +144,32 @@ func TestErasureCodingReadPath_Reconstruction(t *testing.T) {
 
 // TestErasureCodingReadPath_InsufficientShards tests that reading fails when too many shards are missing.
 func TestErasureCodingReadPath_InsufficientShards(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024)
+	data := make([]byte, ecStreamBlock)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 
-	// Delete ALL data chunks AND one parity shard (m+1 shards missing → insufficient)
+	// Delete ALL data chunks.
 	for _, chunkHash := range meta.ErasureCoding.DataHashes {
 		_, _ = store.cas.DeleteChunk(ctx, chunkHash)
 	}
-	// Also delete one parity shard so we have < k available
-	_, _ = store.cas.DeleteChunk(ctx, meta.ErasureCoding.ParityHashes[0])
+	// Delete one parity shard too so we have fewer than k shards available.
+	k := meta.ErasureCoding.DataShards
+	m := meta.ErasureCoding.ParityShards
+	numParBlocks := len(meta.ErasureCoding.ParityHashes) / m
+	if numParBlocks == 0 {
+		numParBlocks = 1
+	}
+	for i := 0; i < numParBlocks && i < len(meta.ErasureCoding.ParityHashes); i++ {
+		_, _ = store.cas.DeleteChunk(ctx, meta.ErasureCoding.ParityHashes[i])
+	}
+	_ = k
 
-	// Read should fail
 	_, _, err = store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "insufficient shards")
@@ -163,18 +177,15 @@ func TestErasureCodingReadPath_InsufficientShards(t *testing.T) {
 
 // TestErasureCodingReadPath_ContextCancellation tests that reads respect context cancellation.
 func TestErasureCodingReadPath_ContextCancellation(t *testing.T) {
-	k, m := 3, 2
 	data := []byte("Test data for context cancellation")
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 
-	// Write the object
 	_, err := store.PutObject(context.Background(), "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "text/plain", nil)
 	require.NoError(t, err)
 
-	// Read with already-cancelled context
 	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	_, _, err = store.GetObject(canceledCtx, "ec-bucket", "test.bin")
 	require.Error(t, err)
@@ -182,33 +193,28 @@ func TestErasureCodingReadPath_ContextCancellation(t *testing.T) {
 }
 
 // TestErasureCodingReadPath_ChunkOrdering verifies that chunks are reassembled
-// in the correct order even with multiple chunks per shard.
+// in the correct order for multi-block files.
 func TestErasureCodingReadPath_ChunkOrdering(t *testing.T) {
-	// Use large enough random data so each shard has multiple CDC chunks.
-	// Random data avoids cross-shard CDC hash collisions that could occur
-	// with sequential/repeating patterns.
-	// With k=3, each shard will be ~85KB → multiple CDC chunks (target 4KB)
-	data := make([]byte, 256*1024)
+	// Use a 10 MB file → 3 RS blocks; data is random so all pieces are distinct.
+	if testing.Short() {
+		t.Skip("skipping chunk ordering test in short mode")
+	}
+	data := make([]byte, 10*1024*1024)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, 3, 2)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "ordered.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 	require.NotNil(t, meta.ErasureCoding)
 
-	// Verify ChunkSequence is set in metadata
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		chunkMeta := meta.ChunkMetadata[chunkHash]
-		require.NotNil(t, chunkMeta, "chunk metadata should exist for %s", chunkHash[:8])
-		assert.Equal(t, "data", chunkMeta.ShardType)
-		// ChunkSequence should be >= 0 (0-based)
-		assert.GreaterOrEqual(t, chunkMeta.ChunkSequence, 0)
-	}
+	// DataHashes is shard-major: numBlocks × k entries total.
+	expectedHashes := ecDataShards * 3 // 3 blocks × 4 shards
+	assert.Equal(t, expectedHashes, len(meta.ErasureCoding.DataHashes),
+		"10 MB file should produce 3 blocks × k=%d data hashes", ecDataShards)
 
-	// Read back and verify byte-for-byte correctness
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "ordered.bin")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -219,62 +225,54 @@ func TestErasureCodingReadPath_ChunkOrdering(t *testing.T) {
 }
 
 // TestErasureCodingReadPath_ParityOnlyReconstruction tests reconstruction using
-// only parity shards when all data shards are missing.
+// parity shards when some data shards are missing.
+// With k=4, m=2 we can tolerate up to m=2 missing shards. This test
+// removes exactly m data shards (maximum tolerance) and verifies reconstruction.
 func TestErasureCodingReadPath_ParityOnlyReconstruction(t *testing.T) {
-	// Use k=3, m=3 so we have enough parity to reconstruct with zero data shards
-	k, m := 3, 3
-	data := []byte("Test parity-only reconstruction with equal data and parity shards")
+	// Random data filling a full block ensures distinct piece hashes.
+	data := make([]byte, ecStreamBlock)
+	_, err := rand.Read(data)
+	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "text/plain", nil)
 	require.NoError(t, err)
 
-	// Delete ALL data chunks
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		_, _ = store.cas.DeleteChunk(ctx, chunkHash)
+	// Delete the maximum tolerated number of data shards (= ecParityShards).
+	for s := 0; s < ecParityShards; s++ {
+		deleteDataShard(t, store, meta, s)
 	}
 
-	// Read should succeed (k=3 parity shards available = k needed)
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
 
 	got, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, data, got, "should reconstruct from parity shards alone")
+	assert.Equal(t, data, got, "should reconstruct with max-tolerance missing shards")
 
-	// Wait for background caching goroutine
 	store.WaitBackground()
 }
 
 // TestErasureCodingReadPath_MixedShardReconstruction tests reconstruction with
-// a mix of data and parity shards.
+// a mix of data and parity shards missing (but within tolerance).
 func TestErasureCodingReadPath_MixedShardReconstruction(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024)
+	data := make([]byte, ecStreamBlock)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 
-	// Delete 2 data shards and 1 parity shard (still have k+m-3 = 6 available)
-	shardsDeleted := 0
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		chunkMeta := meta.ChunkMetadata[chunkHash]
-		if chunkMeta != nil && chunkMeta.ShardIndex < 2 {
-			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-			shardsDeleted++
-		}
-	}
+	// Delete 1 data shard and 1 parity chunk — total 2 shards missing = m.
+	deleteDataShard(t, store, meta, 0)
 	_, _ = store.cas.DeleteChunk(ctx, meta.ErasureCoding.ParityHashes[0])
 
-	// Should still be able to read (6 data + 3 parity - 2 data - 1 parity = 6 ≥ k=6)
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -283,15 +281,16 @@ func TestErasureCodingReadPath_MixedShardReconstruction(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data, got, "should reconstruct with mixed available shards")
 
-	// Wait for background caching goroutine
 	store.WaitBackground()
 }
 
 // TestErasureCodingReadPath_MetadataIntegrity verifies that erasure coding metadata
-// is correctly stored and retrieved.
+// is correctly stored and retrieved with the universal RS(4,2) encoder.
 func TestErasureCodingReadPath_MetadataIntegrity(t *testing.T) {
-	k, m := 6, 3
-	data := bytes.Repeat([]byte("metadata test"), 1000)
+	// Use data that produces exactly 1 RS block.
+	data := bytes.Repeat([]byte("metadata test"), 1000) // ~13 KB
+	k := ecDataShards
+	m := ecParityShards
 
 	store := newTestStoreWithErasureCoding(t, k, m)
 	ctx := context.Background()
@@ -299,38 +298,22 @@ func TestErasureCodingReadPath_MetadataIntegrity(t *testing.T) {
 	meta, err := store.PutObject(ctx, "ec-bucket", "meta-test.bin", bytes.NewReader(data), int64(len(data)), "text/plain", nil)
 	require.NoError(t, err)
 
-	// Verify ErasureCodingInfo
 	ec := meta.ErasureCoding
 	require.NotNil(t, ec)
 	assert.True(t, ec.Enabled)
-	assert.Equal(t, k, ec.DataShards)
-	assert.Equal(t, m, ec.ParityShards)
-	assert.NotEmpty(t, ec.DataHashes, "should have data chunk hashes")
-	assert.Equal(t, m, len(ec.ParityHashes), "should have exactly m parity hashes")
+	assert.Equal(t, ecDataShards, ec.DataShards)
+	assert.Equal(t, ecParityShards, ec.ParityShards)
+	// 1 block: k data hashes + m parity hashes.
+	assert.Equal(t, k, len(ec.DataHashes), "1-block file should have k=%d data hashes", k)
+	assert.Equal(t, m, len(ec.ParityHashes), "1-block file should have m=%d parity hashes", m)
 	assert.Greater(t, ec.ShardSize, int64(0), "shard size should be positive")
-
-	// Verify ChunkMetadata for data chunks
-	for _, hash := range ec.DataHashes {
-		cm := meta.ChunkMetadata[hash]
-		require.NotNil(t, cm, "data chunk %s should have metadata", hash[:8])
-		assert.Equal(t, "data", cm.ShardType)
-		assert.GreaterOrEqual(t, cm.ShardIndex, 0)
-		assert.Less(t, cm.ShardIndex, k)
-	}
-
-	// Verify ChunkMetadata for parity shards
-	for i, hash := range ec.ParityHashes {
-		cm := meta.ChunkMetadata[hash]
-		require.NotNil(t, cm, "parity shard %d should have metadata", i)
-		assert.Equal(t, "parity", cm.ShardType)
-		assert.Equal(t, i, cm.ShardIndex)
-	}
+	assert.Equal(t, int64(ecPieceSize), ec.ShardSize)
 }
 
 // TestErasureCodingReadPath_MultipleObjects tests reading multiple erasure-coded
 // objects from the same bucket.
 func TestErasureCodingReadPath_MultipleObjects(t *testing.T) {
-	store := newTestStoreWithErasureCoding(t, 3, 2)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	objects := map[string][]byte{
@@ -340,13 +323,11 @@ func TestErasureCodingReadPath_MultipleObjects(t *testing.T) {
 	}
 	_, _ = rand.Read(objects["file3.bin"])
 
-	// Write all objects
 	for key, data := range objects {
 		_, err := store.PutObject(ctx, "ec-bucket", key, bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 		require.NoError(t, err)
 	}
 
-	// Read all objects and verify
 	for key, expected := range objects {
 		reader, _, err := store.GetObject(ctx, "ec-bucket", key)
 		require.NoError(t, err)
@@ -358,17 +339,19 @@ func TestErasureCodingReadPath_MultipleObjects(t *testing.T) {
 	}
 }
 
-// TestErasureCodingReadPath_NonErasureBucketUnaffected tests that non-EC buckets
-// continue to work normally.
+// TestErasureCodingReadPath_NonErasureBucketUnaffected tests that all buckets
+// (even those created without an explicit EC policy) use EC and read back correctly.
+// Since EC is now universal, all objects are stored with RS(4,2) regardless of
+// bucket policy.
 func TestErasureCodingReadPath_NonErasureBucketUnaffected(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	ctx := context.Background()
 
-	// Create a non-EC bucket
+	// Create a bucket without an explicit EC policy.
 	err := store.CreateBucket(ctx, "normal-bucket", "test-user", 2, nil)
 	require.NoError(t, err)
 
-	data := []byte("Normal bucket data without erasure coding")
+	data := []byte("Normal bucket data — EC is universal so this uses RS(4,2) too")
 	_, err = store.PutObject(ctx, "normal-bucket", "test.txt", bytes.NewReader(data), int64(len(data)), "text/plain", nil)
 	require.NoError(t, err)
 
@@ -376,7 +359,9 @@ func TestErasureCodingReadPath_NonErasureBucketUnaffected(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
 
-	assert.Nil(t, meta.ErasureCoding, "non-EC bucket should not have erasure coding metadata")
+	// EC is universal — all objects have ErasureCoding set.
+	require.NotNil(t, meta.ErasureCoding, "universal EC: all objects should have ErasureCoding metadata")
+	assert.True(t, meta.ErasureCoding.Enabled)
 
 	got, err := io.ReadAll(reader)
 	require.NoError(t, err)
@@ -385,10 +370,9 @@ func TestErasureCodingReadPath_NonErasureBucketUnaffected(t *testing.T) {
 
 // TestErasureCodingReadPath_VersionedObject tests erasure coding with versioning.
 func TestErasureCodingReadPath_VersionedObject(t *testing.T) {
-	store := newTestStoreWithErasureCoding(t, 3, 2)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
-	// Write two versions
 	v1Data := []byte("Version 1 of the file")
 	_, err := store.PutObject(ctx, "ec-bucket", "versioned.txt", bytes.NewReader(v1Data), int64(len(v1Data)), "text/plain", nil)
 	require.NoError(t, err)
@@ -397,7 +381,7 @@ func TestErasureCodingReadPath_VersionedObject(t *testing.T) {
 	_, err = store.PutObject(ctx, "ec-bucket", "versioned.txt", bytes.NewReader(v2Data), int64(len(v2Data)), "text/plain", nil)
 	require.NoError(t, err)
 
-	// Read current version (should be v2)
+	// Read current version (should be v2).
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "versioned.txt")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -410,10 +394,8 @@ func TestErasureCodingReadPath_VersionedObject(t *testing.T) {
 // TestErasureCodingReadPath_RepeatedContent tests erasure coding with data that
 // may produce duplicate chunk hashes (deduplication scenario).
 func TestErasureCodingReadPath_RepeatedContent(t *testing.T) {
-	// Data with repeated patterns that CDC may chunk similarly
 	data := []byte(strings.Repeat("ABCDEFGHIJKLMNOP", 256)) // 4KB of repeated pattern
-
-	store := newTestStoreWithErasureCoding(t, 3, 2)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	got := putAndGet(t, store, "ec-bucket", "repeated.bin", data)
 	assert.Equal(t, data, got, "repeated content should round-trip correctly")
 }
@@ -421,54 +403,49 @@ func TestErasureCodingReadPath_RepeatedContent(t *testing.T) {
 // TestErasureCodingReadPath_DistributedFetch tests that missing local chunks are
 // fetched from remote coordinators via the chunk registry and replicator.
 func TestErasureCodingReadPath_DistributedFetch(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024) // 24KB
+	// Use a full-block file so all k data pieces have distinct hashes.
+	data := make([]byte, ecStreamBlock)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
-	// Write the object
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 	require.NotNil(t, meta.ErasureCoding)
 
-	// Read all data chunks from CAS before deleting them (to populate the mock replicator)
+	// Move 2 data shards to a simulated remote coordinator.
+	shardsToMove := 2
+	k := meta.ErasureCoding.DataShards
+	numBlocks := len(meta.ErasureCoding.DataHashes) / k
+	if numBlocks == 0 {
+		numBlocks = 1
+	}
+
 	remoteChunks := make(map[string][]byte)
 	registryOwners := make(map[string][]string)
-	shardsToDelete := 2 // Delete 2 data shards' worth of chunks
-	shardsDeleted := make(map[int]bool)
 
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		chunkMeta := meta.ChunkMetadata[chunkHash]
-		if chunkMeta == nil {
-			continue
-		}
-		chunkData, readErr := store.cas.ReadChunk(ctx, chunkHash)
-		if readErr != nil {
-			continue
-		}
-		// Mark first N unseen shards for deletion
-		if !shardsDeleted[chunkMeta.ShardIndex] && len(shardsDeleted) < shardsToDelete {
-			shardsDeleted[chunkMeta.ShardIndex] = true
-		}
-		// Move all chunks belonging to marked shards to remote
-		if shardsDeleted[chunkMeta.ShardIndex] {
+	for s := 0; s < shardsToMove; s++ {
+		start := s * numBlocks
+		end := start + numBlocks
+		for i := start; i < end && i < len(meta.ErasureCoding.DataHashes); i++ {
+			chunkHash := meta.ErasureCoding.DataHashes[i]
+			chunkData, readErr := store.cas.ReadChunk(ctx, chunkHash)
+			if readErr != nil {
+				continue
+			}
 			remoteChunks[chunkHash] = chunkData
 			registryOwners[chunkHash] = []string{"remote-coord-1"}
 			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
 		}
 	}
-	require.Equal(t, shardsToDelete, len(shardsDeleted), "should have deleted chunks for %d shards", shardsToDelete)
 
-	// Set up mock registry and replicator
 	mockReg := &mockChunkRegistry{owners: registryOwners}
 	mockRepl := &mockReplicator{chunks: remoteChunks}
 	store.SetChunkRegistry(mockReg)
 	store.SetReplicator(mockRepl)
 
-	// Read should succeed by fetching missing chunks from remote
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -481,42 +458,26 @@ func TestErasureCodingReadPath_DistributedFetch(t *testing.T) {
 // TestErasureCodingReadPath_DistributedFetchFallbackToReconstruction tests that when
 // remote fetch fails for some chunks, the EC path falls back to RS reconstruction.
 func TestErasureCodingReadPath_DistributedFetchFallbackToReconstruction(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024)
+	data := make([]byte, ecStreamBlock)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 
-	// Delete 2 data shard chunks - but do NOT populate the replicator with them
-	// This simulates remote fetch failing, forcing RS reconstruction
-	shardsDeleted := make(map[int]bool)
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		chunkMeta := meta.ChunkMetadata[chunkHash]
-		if chunkMeta == nil {
-			continue
-		}
-		if shardsDeleted[chunkMeta.ShardIndex] {
-			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-			continue
-		}
-		if len(shardsDeleted) < 2 {
-			shardsDeleted[chunkMeta.ShardIndex] = true
-			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-		}
+	// Delete 2 data shards but do NOT populate the replicator with them.
+	for s := 0; s < ecParityShards; s++ {
+		deleteDataShard(t, store, meta, s)
 	}
 
-	// Set up registry with empty owners (remote fetch will fail)
 	mockReg := &mockChunkRegistry{owners: make(map[string][]string)}
 	mockRepl := &mockReplicator{chunks: make(map[string][]byte)}
 	store.SetChunkRegistry(mockReg)
 	store.SetReplicator(mockRepl)
 
-	// Read should still succeed via RS reconstruction (we have enough parity)
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -525,42 +486,27 @@ func TestErasureCodingReadPath_DistributedFetchFallbackToReconstruction(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, data, got, "should reconstruct via RS after failed distributed fetch")
 
-	// Wait for background caching goroutine
 	store.WaitBackground()
 }
 
 // TestErasureCodingReadPath_NoDistributedWithoutReplicator tests that without
-// a replicator, the EC read path behaves as before (local-only + reconstruction).
+// a replicator, the EC read path falls back to RS reconstruction.
 func TestErasureCodingReadPath_NoDistributedWithoutReplicator(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024)
+	data := make([]byte, ecStreamBlock)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 
-	// Delete 2 data shards (within parity tolerance)
-	shardsDeleted := make(map[int]bool)
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		chunkMeta := meta.ChunkMetadata[chunkHash]
-		if chunkMeta == nil {
-			continue
-		}
-		if shardsDeleted[chunkMeta.ShardIndex] {
-			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-			continue
-		}
-		if len(shardsDeleted) < 2 {
-			shardsDeleted[chunkMeta.ShardIndex] = true
-			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
-		}
+	// Delete 2 data shards (within parity tolerance).
+	for s := 0; s < ecParityShards; s++ {
+		deleteDataShard(t, store, meta, s)
 	}
 
-	// No registry or replicator set - should fall back to RS reconstruction
 	assert.Nil(t, store.chunkRegistry)
 	assert.Nil(t, store.replicator)
 
@@ -572,53 +518,48 @@ func TestErasureCodingReadPath_NoDistributedWithoutReplicator(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data, got, "should reconstruct via RS without distributed fetch capability")
 
-	// Wait for background caching goroutine
 	store.WaitBackground()
 }
 
 // TestErasureCodingReadPath_DistributedFetchHashMismatch tests that corrupt chunks
 // from remote coordinators are rejected and the read falls back to RS reconstruction.
 func TestErasureCodingReadPath_DistributedFetchHashMismatch(t *testing.T) {
-	k, m := 6, 3
-	data := make([]byte, 24*1024)
+	data := make([]byte, ecStreamBlock)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	store := newTestStoreWithErasureCoding(t, k, m)
+	store := newTestStoreWithErasureCoding(t, ecDataShards, ecParityShards)
 	ctx := context.Background()
 
 	meta, err := store.PutObject(ctx, "ec-bucket", "test.bin", bytes.NewReader(data), int64(len(data)), "application/octet-stream", nil)
 	require.NoError(t, err)
 
-	// Delete 2 data shards and populate replicator with corrupted data
+	// Delete 2 data shards and populate replicator with corrupted data.
+	k := meta.ErasureCoding.DataShards
+	numBlocks := len(meta.ErasureCoding.DataHashes) / k
+	if numBlocks == 0 {
+		numBlocks = 1
+	}
+
 	corruptChunks := make(map[string][]byte)
 	registryOwners := make(map[string][]string)
-	shardsDeleted := make(map[int]bool)
 
-	for _, chunkHash := range meta.ErasureCoding.DataHashes {
-		chunkMeta := meta.ChunkMetadata[chunkHash]
-		if chunkMeta == nil {
-			continue
-		}
-		if !shardsDeleted[chunkMeta.ShardIndex] && len(shardsDeleted) < 2 {
-			shardsDeleted[chunkMeta.ShardIndex] = true
-		}
-		if shardsDeleted[chunkMeta.ShardIndex] {
-			// Store corrupted data (wrong bytes) so hash validation fails
+	for s := 0; s < ecParityShards; s++ {
+		start := s * numBlocks
+		end := start + numBlocks
+		for i := start; i < end && i < len(meta.ErasureCoding.DataHashes); i++ {
+			chunkHash := meta.ErasureCoding.DataHashes[i]
 			corruptChunks[chunkHash] = []byte("corrupted data that won't match hash")
 			registryOwners[chunkHash] = []string{"bad-coord-1"}
 			_, _ = store.cas.DeleteChunk(ctx, chunkHash)
 		}
 	}
-	require.Equal(t, 2, len(shardsDeleted))
 
 	mockReg := &mockChunkRegistry{owners: registryOwners}
 	mockRepl := &mockReplicator{chunks: corruptChunks}
 	store.SetChunkRegistry(mockReg)
 	store.SetReplicator(mockRepl)
 
-	// Remote chunks are corrupt → hash mismatch → fall back to RS reconstruction
-	// With 2 missing data shards and 3 parity shards, RS should still succeed
 	reader, _, err := store.GetObject(ctx, "ec-bucket", "test.bin")
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
@@ -627,6 +568,5 @@ func TestErasureCodingReadPath_DistributedFetchHashMismatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data, got, "should reconstruct via RS after rejecting corrupt remote chunks")
 
-	// Wait for background caching goroutine
 	store.WaitBackground()
 }

@@ -637,8 +637,16 @@ func TestRegression_GCIsolationBetweenBuckets(t *testing.T) {
 	require.NoError(t, store.CreateBucket(ctx, "keep", "admin", 2, nil))
 	require.NoError(t, store.CreateBucket(ctx, "delete", "admin", 2, nil))
 
-	keepData := []byte("This file is in the keep bucket and must survive")
-	deleteData := []byte("This file is in the delete bucket and will be purged")
+	// Use ecStreamBlock-sized random data so each RS piece is unique and the two files
+	// do not share chunk hashes via zero-padding deduplication.
+	keepData := make([]byte, ecStreamBlock)
+	deleteData := make([]byte, ecStreamBlock)
+	keepData[0] = 0xAA // distinct first byte ensures non-overlapping chunks
+	deleteData[0] = 0xBB
+	for i := 1; i < len(keepData); i++ {
+		keepData[i] = byte(i * 3)
+		deleteData[i] = byte(i * 7)
+	}
 
 	uploadFile(t, store, "keep", "precious.txt", keepData)
 	meta := uploadFile(t, store, "delete", "temp.txt", deleteData)
