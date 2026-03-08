@@ -380,14 +380,24 @@ func NewStoreWithCAS(dataDir string, quota *QuotaManager, masterKey [32]byte) (*
 	}
 	store.cas = cas
 
-	// Initialize incremental stats from filesystem (one-time walk at startup).
-	// Run in background so HTTP server can start immediately; stats are only
-	// used for metrics/quota display and the atomic counters start at zero.
-	store.bgWg.Add(1)
-	go func() {
-		defer store.bgWg.Done()
-		store.initCASStats()
-	}()
+	// Register a self-heal callback: when ReadChunk detects a MAC failure and
+	// deletes a corrupt chunk, update storage stats and unregister from the
+	// chunk registry so GC and quota tracking remain consistent.
+	cas.onSelfHeal = func(hash string, freed int64) {
+		if freed > 0 {
+			store.statsChunkCount.Add(-1)
+			store.statsChunkBytes.Add(-freed)
+		}
+		if store.chunkRegistry != nil {
+			_ = store.chunkRegistry.UnregisterChunk(hash)
+		}
+	}
+
+	// Initialize chunk stats synchronously before returning the store.
+	// Running asynchronously with Store() caused a race: concurrent WriteChunk
+	// Add() increments were silently overwritten by Store(), and GC then
+	// decremented past zero, producing negative storage metrics.
+	store.initCASStats()
 
 	return store, nil
 }

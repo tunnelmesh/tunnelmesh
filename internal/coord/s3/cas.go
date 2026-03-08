@@ -57,6 +57,12 @@ type CAS struct {
 	// after any upload burst that fully saturates the pool.
 	encoder     *zstd.Encoder
 	decoderPool sync.Pool
+
+	// onSelfHeal is called when ReadChunk deletes a chunk due to a MAC failure
+	// (the chunk was encrypted with a different key). Callers can use this to
+	// update storage stats and unregister the chunk from the chunk registry.
+	// May be nil. Called with the chunk hash and the freed on-disk bytes.
+	onSelfHeal func(hash string, freedBytes int64)
 }
 
 // DeriveMasterKey derives a stable CAS master key from the mesh auth token using HKDF.
@@ -217,6 +223,9 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 		// peer that has the correct plaintext, which will re-encrypt with our key.
 		if strings.Contains(err.Error(), "message authentication failed") {
 			_ = os.Remove(chunkPath)
+			if c.onSelfHeal != nil {
+				c.onSelfHeal(hash, int64(len(encrypted)))
+			}
 			return nil, fmt.Errorf("chunk not found: %s", hash)
 		}
 		return nil, fmt.Errorf("decrypt chunk: %w", err)
