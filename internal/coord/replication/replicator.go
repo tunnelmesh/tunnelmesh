@@ -326,7 +326,7 @@ func NewReplicator(config Config) *Replicator {
 		config.ChunkAckTimeout = 30 * time.Second // Default: 30s for chunk ACKs
 	}
 	if config.MaxConcurrentSends == 0 {
-		config.MaxConcurrentSends = 20 // Default: 20 concurrent outbound replication sends
+		config.MaxConcurrentSends = 8 // Default: 8 concurrent outbound replication sends
 	}
 	if config.ChunkPipelineWindow == 0 {
 		config.ChunkPipelineWindow = 5 // Default: 5 concurrent chunk sends per object
@@ -1541,6 +1541,17 @@ collect:
 
 // replicateSingleChunk reads and sends a single chunk to a peer.
 func (r *Replicator) replicateSingleChunk(ctx context.Context, peerID, bucket, key, chunkHash string, meta *ObjectMeta) error {
+	// Acquire send slot BEFORE loading chunk data from disk. Without this
+	// ordering, up to (pipeline_window × peer_count × queue_depth) goroutines
+	// each load their ~2 MB chunk simultaneously, ballooning heap far beyond
+	// what sendSem allows to actually transmit. Holding the slot through the
+	// ACK wait is acceptable: ACKs arrive in ~100ms, and throughput analysis
+	// shows no regression vs. actual link speed (8 slots × 2 MB / ~120ms ≫ link bw).
+	if err := r.acquireSendSlot(ctx); err != nil {
+		return fmt.Errorf("acquire send slot: %w", err)
+	}
+	defer r.releaseSendSlot()
+
 	// Normal path: read raw encrypted+compressed bytes from local CAS — no crypto overhead.
 	// The receiver stores them directly via WriteChunkDirectRaw.
 	chunkData, err := r.s3.ReadChunkRaw(ctx, chunkHash)
@@ -1652,13 +1663,9 @@ func (r *Replicator) sendReplicateChunk(ctx context.Context, peerID string, payl
 		return fmt.Errorf("dropped: pending chunk operations limit reached")
 	}
 
-	// Acquire send slot to limit concurrent outbound HTTP requests
-	if err := r.acquireSendSlot(ctx); err != nil {
-		r.removePendingChunkACK(msgID)
-		return fmt.Errorf("acquire send slot: %w", err)
-	}
+	// Send slot is acquired by the caller (replicateSingleChunk) before
+	// loading chunk data, so we transmit directly without re-acquiring here.
 	err = r.transport.SendToCoordinator(ctx, peerID, data)
-	r.releaseSendSlot()
 	if err != nil {
 		r.removePendingChunkACK(msgID)
 		return fmt.Errorf("send to coordinator: %w", err)
