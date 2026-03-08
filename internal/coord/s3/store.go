@@ -1613,12 +1613,14 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
-		// Per-bucket quota enforcement
+		// Per-bucket quota enforcement. Use the persistent ecBucketMeta.SizeBytes
+		// (live object total, written to disk on every put/delete) rather than
+		// s.quota.BucketUsedBytes which resets to 0 on restart.
 		if ecBucketMeta.QuotaBytes > 0 {
-			bucketUsed := s.quota.BucketUsedBytes(bucket)
-			if bucketUsed+delta > ecBucketMeta.QuotaBytes {
+			projected := ecBucketMeta.SizeBytes + delta
+			if projected > ecBucketMeta.QuotaBytes {
 				s.mu.Unlock()
-				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, ecBucketMeta.QuotaBytes)
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, projected, ecBucketMeta.QuotaBytes)
 			}
 		}
 	}
@@ -1930,12 +1932,14 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
-		// Per-bucket quota enforcement
+		// Per-bucket quota enforcement. Use the persistent bucketMeta.SizeBytes
+		// (live object total, written to disk on every put/delete) rather than
+		// s.quota.BucketUsedBytes which resets to 0 on restart.
 		if bucketMeta.QuotaBytes > 0 {
-			bucketUsed := s.quota.BucketUsedBytes(bucket)
-			if bucketUsed+delta > bucketMeta.QuotaBytes {
+			projected := bucketMeta.SizeBytes + delta
+			if projected > bucketMeta.QuotaBytes {
 				s.mu.Unlock()
-				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, bucketUsed+delta, bucketMeta.QuotaBytes)
+				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, projected, bucketMeta.QuotaBytes)
 			}
 		}
 	}

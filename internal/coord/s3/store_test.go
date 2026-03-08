@@ -3259,6 +3259,46 @@ func TestBucketQuota_ZeroMeansUnlimited(t *testing.T) {
 	require.NoError(t, err, "bucket with no quota set should accept any upload")
 }
 
+// TestBucketQuota_EnforcedAfterRestart verifies that per-bucket quota is still
+// enforced after the store is reopened (simulating a coordinator restart).
+// Before the fix, the in-memory BucketUsedBytes counter reset to 0 on restart,
+// allowing uploads that exceeded the bucket quota to succeed.
+func TestBucketQuota_EnforcedAfterRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterKey := [32]byte{1, 2, 3, 4}
+	ctx := context.Background()
+
+	// --- First run: fill bucket to 80 bytes, quota = 100 bytes ---
+	{
+		quota := NewQuotaManager(100 * 1024 * 1024)
+		store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+		require.NoError(t, err)
+		require.NoError(t, store.CreateBucket(ctx, "limited", "alice", 1, nil))
+
+		bucketQuota := int64(100)
+		require.NoError(t, store.UpdateBucketMetadata(ctx, "limited", BucketMetadataUpdate{
+			QuotaBytes: &bucketQuota,
+		}))
+
+		content80 := bytes.Repeat([]byte("x"), 80)
+		_, err = store.PutObject(ctx, "limited", "obj1.bin", bytes.NewReader(content80), int64(len(content80)), "application/octet-stream", nil)
+		require.NoError(t, err)
+	}
+
+	// --- Second run (restart): in-memory counter is 0, but SizeBytes = 80 on disk ---
+	{
+		quota := NewQuotaManager(100 * 1024 * 1024)
+		store, err := NewStoreWithCAS(tmpDir, quota, masterKey)
+		require.NoError(t, err)
+
+		// 30 bytes would bring total to 110, exceeding the 100-byte bucket quota.
+		content30 := bytes.Repeat([]byte("y"), 30)
+		_, err = store.PutObject(ctx, "limited", "obj2.bin", bytes.NewReader(content30), int64(len(content30)), "application/octet-stream", nil)
+		require.Error(t, err, "upload exceeding per-bucket quota should fail even after restart")
+		assert.ErrorIs(t, err, ErrBucketQuotaExceeded)
+	}
+}
+
 func TestUpdateBucketMetadata_NegativeQuotaRejected(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 	ctx := context.Background()

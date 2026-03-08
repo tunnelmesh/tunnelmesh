@@ -359,6 +359,8 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 			s.jsonError(w, fmt.Sprintf("object too large (max %s)", bytesize.Size(s.maxObjectSize)), http.StatusRequestEntityTooLarge)
 		case errors.Is(err, s3.ErrBucketNotFound):
 			s.jsonError(w, "bucket not found", http.StatusNotFound)
+		case errors.Is(err, s3.ErrQuotaExceeded), errors.Is(err, s3.ErrBucketQuotaExceeded):
+			s.jsonError(w, err.Error(), http.StatusInsufficientStorage)
 		default:
 			s.jsonError(w, "failed to store object: "+err.Error(), http.StatusInternalServerError)
 		}
