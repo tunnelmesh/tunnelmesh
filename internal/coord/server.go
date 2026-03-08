@@ -1320,30 +1320,42 @@ func (s *Server) getServicePorts() []uint16 {
 	return ports
 }
 
-// loadOrCreateCASKey loads or creates the master key for CAS encryption.
-// The key is stored in the S3 data directory as cas.key.
-func (s *Server) loadOrCreateCASKey(dataDir string) ([32]byte, error) {
+// loadOrCreateCASKey returns the master key for CAS encryption.
+//
+// When authToken is set (always the case in normal mesh deployments), the key is
+// derived deterministically from the token using HKDF so that all coordinators in
+// the same mesh share the same CAS encryption key. This is required for raw-bytes
+// chunk replication: a chunk encrypted by coordinator A must be decryptable by B.
+//
+// When no authToken is available (standalone / test mode), a random key is generated
+// and persisted in dataDir/cas.key so it survives restarts.
+func (s *Server) loadOrCreateCASKey(dataDir, authToken string) ([32]byte, error) {
+	// Prefer token-derived key: deterministic and shared across all coordinators
+	// in the same mesh (they all have the same TUNNELMESH_TOKEN).
+	if authToken != "" {
+		key, err := s3.DeriveMasterKey(authToken)
+		if err != nil {
+			return key, fmt.Errorf("derive CAS key from auth token: %w", err)
+		}
+		return key, nil
+	}
+
+	// Fallback: load or create a random key from file (no shared token).
 	keyPath := filepath.Join(dataDir, "cas.key")
 	var masterKey [32]byte
 
-	// Try to load existing key
 	data, err := os.ReadFile(keyPath)
 	if err == nil && len(data) == 32 {
 		copy(masterKey[:], data)
 		return masterKey, nil
 	}
 
-	// Create new key
 	if _, err := rand.Read(masterKey[:]); err != nil {
 		return masterKey, fmt.Errorf("generate CAS key: %w", err)
 	}
-
-	// Ensure data directory exists
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return masterKey, fmt.Errorf("create data directory: %w", err)
 	}
-
-	// Save key to disk
 	if err := os.WriteFile(keyPath, masterKey[:], 0o600); err != nil {
 		return masterKey, fmt.Errorf("save CAS key: %w", err)
 	}
@@ -1377,8 +1389,10 @@ func (s *Server) initS3Storage(ctx context.Context, cfg *config.PeerConfig) erro
 			Msg("s3.max_object_size exceeds s3.max_size: individual uploads cannot succeed once the bucket is non-empty")
 	}
 
-	// Load or create master key for CAS encryption
-	masterKey, err := s.loadOrCreateCASKey(cfg.Coordinator.S3.DataDir)
+	// Load or create master key for CAS encryption.
+	// Pass the auth token so that all coordinators in the same mesh derive the
+	// same key (required for raw chunk replication to work across coordinators).
+	masterKey, err := s.loadOrCreateCASKey(cfg.Coordinator.S3.DataDir, cfg.AuthToken)
 	if err != nil {
 		return fmt.Errorf("initialize CAS key: %w", err)
 	}

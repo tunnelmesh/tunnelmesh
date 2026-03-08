@@ -3283,3 +3283,36 @@ func TestPurgeObject_UnregistersChunksFromRegistry(t *testing.T) {
 	assert.Equal(t, 0, remaining,
 		"PurgeObject should unregister all chunk entries from the registry")
 }
+
+// TestStore_StatsNeverNegative guards against the race where initCASStats used
+// Store() and concurrent WriteChunk Add() increments were silently overwritten,
+// causing GC to later decrement past zero.
+func TestStore_StatsNeverNegative(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.CreateBucket(ctx, "bucket", "alice", 2, nil))
+
+	// Write several objects so chunks are registered and stats are non-zero.
+	for i := 0; i < 5; i++ {
+		data := []byte("stats never negative unique content " + string(rune('A'+i)))
+		_, err := store.PutObject(ctx, "bucket", "obj"+string(rune('A'+i))+".txt",
+			bytes.NewReader(data), int64(len(data)), "text/plain", nil)
+		require.NoError(t, err)
+	}
+
+	stats := store.GetCASStats()
+	require.Greater(t, stats.ChunkCount, 0, "chunk count must be positive after writes")
+	require.Greater(t, stats.ChunkBytes, int64(0), "chunk bytes must be positive after writes")
+
+	// Delete all objects and run GC — stats must not go negative.
+	for i := 0; i < 5; i++ {
+		err := store.DeleteObject(ctx, "bucket", "obj"+string(rune('A'+i))+".txt")
+		require.NoError(t, err)
+	}
+	store.RunGarbageCollection(ctx)
+
+	stats = store.GetCASStats()
+	assert.GreaterOrEqual(t, stats.ChunkCount, 0, "chunk count must not go negative after GC")
+	assert.GreaterOrEqual(t, stats.ChunkBytes, int64(0), "chunk bytes must not go negative after GC")
+}

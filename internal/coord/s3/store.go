@@ -380,14 +380,24 @@ func NewStoreWithCAS(dataDir string, quota *QuotaManager, masterKey [32]byte) (*
 	}
 	store.cas = cas
 
-	// Initialize incremental stats from filesystem (one-time walk at startup).
-	// Run in background so HTTP server can start immediately; stats are only
-	// used for metrics/quota display and the atomic counters start at zero.
-	store.bgWg.Add(1)
-	go func() {
-		defer store.bgWg.Done()
-		store.initCASStats()
-	}()
+	// Register a self-heal callback: when ReadChunk detects a MAC failure and
+	// deletes a corrupt chunk, update storage stats and unregister from the
+	// chunk registry so GC and quota tracking remain consistent.
+	cas.onSelfHeal = func(hash string, freed int64) {
+		if freed > 0 {
+			store.statsChunkCount.Add(-1)
+			store.statsChunkBytes.Add(-freed)
+		}
+		if store.chunkRegistry != nil {
+			_ = store.chunkRegistry.UnregisterChunk(hash)
+		}
+	}
+
+	// Initialize chunk stats synchronously before returning the store.
+	// Running asynchronously with Store() caused a race: concurrent WriteChunk
+	// Add() increments were silently overwritten by Store(), and GC then
+	// decremented past zero, producing negative storage metrics.
+	store.initCASStats()
 
 	return store, nil
 }
@@ -2674,6 +2684,44 @@ func (s *Store) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	}
 
 	return s.cas.ReadChunk(ctx, hash)
+}
+
+// ReadChunkRaw reads the raw encrypted+compressed bytes for a chunk without
+// decrypting or decompressing. Used by the replication sender.
+func (s *Store) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
+	if s.cas == nil {
+		return nil, fmt.Errorf("CAS not initialized")
+	}
+
+	return s.cas.ReadChunkRaw(ctx, hash)
+}
+
+// WriteChunkDirectRaw writes pre-encrypted+compressed chunk bytes directly to CAS.
+// Used by the replication receiver — skips the decrypt+compress+encrypt cycle.
+// Integrity is deferred to read-time: the MAC check in ReadChunk will reject any
+// bytes that were encrypted with a different key, and self-heals by deleting the
+// chunk so callers can re-fetch from a peer with the correct plaintext.
+func (s *Store) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
+	if s.cas == nil {
+		return fmt.Errorf("CAS not initialized")
+	}
+
+	onDiskBytes, err := s.cas.WriteChunkRaw(ctx, hash, raw)
+	if err != nil {
+		return fmt.Errorf("write raw chunk to CAS: %w", err)
+	}
+
+	if onDiskBytes > 0 {
+		s.statsChunkCount.Add(1)
+		s.statsChunkBytes.Add(onDiskBytes)
+	}
+
+	// Register chunk in distributed registry so GC can track ownership.
+	if s.chunkRegistry != nil {
+		_ = s.chunkRegistry.RegisterChunk(hash, onDiskBytes)
+	}
+
+	return nil
 }
 
 // WriteChunkDirect writes chunk data directly to CAS.

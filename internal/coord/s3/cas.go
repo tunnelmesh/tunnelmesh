@@ -9,12 +9,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
+
+// macFailureMsg is the error string returned by chacha20poly1305.Open() when the
+// message authentication code check fails (wrong key or corrupt ciphertext).
+// Extracted as a constant to make it grep-able and document the upstream dependency.
+// Source: golang.org/x/crypto/chacha20poly1305 — Open() → errOpen.
+const macFailureMsg = "message authentication failed"
 
 // casEncoderConcurrency caps the zstd encoder's internal sub-encoder pool.
 // At SpeedDefault with lowMem, each sub-encoder uses ~12–13 MB, so
@@ -56,6 +63,34 @@ type CAS struct {
 	// after any upload burst that fully saturates the pool.
 	encoder     *zstd.Encoder
 	decoderPool sync.Pool
+
+	// onSelfHeal is called when ReadChunk deletes a chunk due to a MAC failure
+	// (the chunk was encrypted with a different key). Callers can use this to
+	// update storage stats and unregister the chunk from the chunk registry.
+	// May be nil. Called with the chunk hash and the freed on-disk bytes.
+	onSelfHeal func(hash string, freedBytes int64)
+}
+
+// DeriveMasterKey derives a stable CAS master key from the mesh auth token using HKDF.
+// All coordinators in the same mesh share the same token, so they derive the same key,
+// which is required for raw-bytes chunk replication to work correctly.
+// token must be a 64-character hex string (32 raw bytes); any other format is hashed directly.
+func DeriveMasterKey(token string) ([32]byte, error) {
+	var masterKey [32]byte
+	// Trim whitespace before hex-decoding so that tokens with a trailing newline
+	// (e.g., copy-pasted from a config file) don't silently fall through to the
+	// raw-bytes path and produce a different key.
+	token = strings.TrimSpace(token)
+	tokenBytes, err := hex.DecodeString(token)
+	if err != nil {
+		// Non-hex token (unusual): use raw UTF-8 bytes
+		tokenBytes = []byte(token)
+	}
+	h := hkdf.New(sha256.New, tokenBytes, nil, []byte("tunnelmesh-cas-v1"))
+	if _, err := io.ReadFull(h, masterKey[:]); err != nil {
+		return masterKey, fmt.Errorf("derive CAS key from token: %w", err)
+	}
+	return masterKey, nil
 }
 
 // NewCAS creates a new content-addressable storage.
@@ -192,6 +227,22 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	// Decrypt
 	compressed, err := c.decrypt(encrypted, hash)
 	if err != nil {
+		// MAC failure means the stored bytes were encrypted with a different key
+		// (e.g., replicated from a peer before all coordinators adopted the shared
+		// CAS key). Delete the corrupted file so the caller can re-fetch from a
+		// peer that has the correct plaintext, which will re-encrypt with our key.
+		if strings.Contains(err.Error(), macFailureMsg) {
+			// Gate the callback on a successful remove: if two concurrent ReadChunk
+			// calls both hit the same corrupt chunk, only the first os.Remove
+			// succeeds. Without this guard both goroutines would invoke onSelfHeal,
+			// double-decrementing statsChunkCount and statsChunkBytes.
+			if removeErr := os.Remove(chunkPath); removeErr == nil {
+				if c.onSelfHeal != nil {
+					c.onSelfHeal(hash, int64(len(encrypted)))
+				}
+			}
+			return nil, fmt.Errorf("chunk not found: %s", hash)
+		}
 		return nil, fmt.Errorf("decrypt chunk: %w", err)
 	}
 
@@ -208,6 +259,64 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// ReadChunkRaw reads the raw encrypted+compressed bytes from disk without
+// decrypting or decompressing. Used by the replication sender to transfer
+// chunks without paying unnecessary crypto overhead.
+func (c *CAS) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
+	chunkPath := c.chunkPath(hash)
+
+	raw, err := os.ReadFile(chunkPath)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("chunk not found: %s", hash)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read raw chunk: %w", err)
+	}
+
+	return raw, nil
+}
+
+// WriteChunkRaw writes pre-encrypted+compressed chunk bytes directly to disk.
+// Used by the replication receiver to store incoming chunks without re-encrypting.
+// The hash is used only for naming/dedup; the caller is responsible for ensuring
+// the raw bytes were produced by a CAS with the same master key.
+// Returns onDiskBytes=0 if the chunk already exists (dedup hit).
+func (c *CAS) WriteChunkRaw(ctx context.Context, hash string, raw []byte) (onDiskBytes int64, err error) {
+	chunkPath := c.chunkPath(hash)
+
+	// Dedup check: skip if chunk already exists.
+	if fileExists(chunkPath) {
+		return 0, nil
+	}
+
+	// Write atomically via temp file + rename (same pattern as WriteChunk).
+	tmpFile, err := os.CreateTemp(filepath.Dir(chunkPath), ".chunk-*.tmp")
+	if err != nil {
+		return 0, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("write raw chunk: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, chunkPath); err != nil {
+		_ = os.Remove(tmpPath)
+		if fileExists(chunkPath) {
+			return 0, nil // concurrent dedup
+		}
+		return 0, fmt.Errorf("rename raw chunk: %w", err)
+	}
+
+	return int64(len(raw)), nil
 }
 
 // DeleteChunk removes a chunk from storage and returns the freed bytes.

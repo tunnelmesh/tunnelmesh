@@ -87,11 +87,23 @@ type S3Store interface {
 	// ChunkExists checks if a chunk exists in CAS without reading its data.
 	ChunkExists(ctx context.Context, hash string) bool
 
-	// ReadChunk reads a chunk from CAS by hash
+	// ReadChunk reads a chunk from CAS by hash (returns plaintext)
 	ReadChunk(ctx context.Context, hash string) ([]byte, error)
 
-	// WriteChunkDirect writes chunk data directly to CAS (for replication receiver)
+	// ReadChunkRaw reads the raw encrypted+compressed chunk bytes without decrypting.
+	// Used by the replication sender to avoid unnecessary crypto overhead.
+	ReadChunkRaw(ctx context.Context, hash string) ([]byte, error)
+
+	// WriteChunkDirect writes chunk data (plaintext) directly to CAS (for replication receiver)
 	WriteChunkDirect(ctx context.Context, hash string, data []byte) error
+
+	// WriteChunkDirectRaw writes pre-encrypted+compressed chunk bytes directly to CAS.
+	// Used by the replication receiver to avoid re-encrypting already-encrypted bytes.
+	WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error
+
+	// GetObjectMetaJSON returns the full JSON-serialized object metadata, preserving
+	// all fields including ErasureCoding. Used by the replication sender.
+	GetObjectMetaJSON(ctx context.Context, bucket, key string) ([]byte, error)
 
 	// ImportObjectMeta writes object metadata directly (for replication receiver).
 	// bucketOwner is used when auto-creating the bucket (empty = "system").
@@ -141,6 +153,8 @@ type ChunkRegistryInterface interface {
 	GetOwners(hash string) ([]string, error)
 	GetChunksOwnedBy(coordID string) ([]string, error)
 	AddOwner(hash string, coordID string) error
+	// RegisterShardChunk registers an erasure-coded shard chunk with shard metadata.
+	RegisterShardChunk(hash string, size int64, parentFileID, shardType string, shardIndex, replicationFactor int) error
 	// CleanupOrphanedShards removes registry entries for EC shards whose parent
 	// file version ID is no longer present in the active set. Returns count removed.
 	CleanupOrphanedShards(activeFileIDs map[string]bool) int
@@ -1399,12 +1413,14 @@ func (r *Replicator) ReplicateObject(ctx context.Context, bucket, key, peerID st
 		return err
 	}
 
+	// Fetch full metadata JSON (preserves ErasureCoding and all fields) once for both paths.
+	metaJSON, err := r.s3.GetObjectMetaJSON(ctx, bucket, key)
+	if err != nil {
+		return fmt.Errorf("get object metadata JSON: %w", err)
+	}
+
 	if len(chunksToReplicate) == 0 {
 		// Still send metadata even if all chunks were already there
-		metaJSON, err := json.Marshal(meta)
-		if err != nil {
-			return fmt.Errorf("marshal object metadata: %w", err)
-		}
 		if err := r.sendReplicateObjectMeta(ctx, peerID, bucket, key, metaJSON); err != nil {
 			r.logger.Warn().Err(err).
 				Str("peer", peerID).
@@ -1432,12 +1448,6 @@ func (r *Replicator) ReplicateObject(ctx context.Context, bucket, key, peerID st
 	// Replicate chunks with pipelining for throughput
 	if err := r.replicateChunksPipelined(ctx, peerID, bucket, key, chunksToReplicate, meta); err != nil {
 		return err
-	}
-
-	// Send object metadata so the remote peer can serve reads
-	metaJSON, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("marshal object metadata: %w", err)
 	}
 
 	if err := r.sendReplicateObjectMeta(ctx, peerID, bucket, key, metaJSON); err != nil {
@@ -1531,10 +1541,14 @@ collect:
 
 // replicateSingleChunk reads and sends a single chunk to a peer.
 func (r *Replicator) replicateSingleChunk(ctx context.Context, peerID, bucket, key, chunkHash string, meta *ObjectMeta) error {
-	// Read chunk data from local CAS. If the chunk is missing locally
-	// (e.g. GC cleaned it up), fall back to fetching from a peer.
-	chunkData, err := r.s3.ReadChunk(ctx, chunkHash)
+	// Normal path: read raw encrypted+compressed bytes from local CAS — no crypto overhead.
+	// The receiver stores them directly via WriteChunkDirectRaw.
+	chunkData, err := r.s3.ReadChunkRaw(ctx, chunkHash)
+	isRaw := err == nil
+
 	if err != nil {
+		// Fallback: chunk missing locally (e.g. GC cleaned it up).
+		// fetchChunkFromPeers returns plaintext; the receiver must re-encrypt via WriteChunkDirect.
 		localErr := err
 		chunkData, err = r.fetchChunkFromPeers(ctx, chunkHash)
 		if err != nil {
@@ -1565,6 +1579,7 @@ func (r *Replicator) replicateSingleChunk(ctx context.Context, peerID, bucket, k
 		Key:           key,
 		ChunkHash:     chunkHash,
 		ChunkData:     chunkData,
+		IsRaw:         isRaw,
 		ChunkIndex:    chunkIndex,
 		TotalChunks:   len(meta.Chunks),
 		ChunkSize:     chunkMeta.Size,
@@ -1719,11 +1734,19 @@ func (r *Replicator) handleReplicateChunk(msg *Message) error {
 		return r.sendChunkAck(msg.ID, msg.From, payload.Bucket, payload.Key, payload.ChunkHash, payload.ChunkIndex, false, "storage capacity exceeded")
 	}
 
-	// Store chunk in local CAS
-	if err := r.s3.WriteChunkDirect(r.ctx, payload.ChunkHash, payload.ChunkData); err != nil {
-		r.logger.Error().Err(err).Str("chunk", truncateHashForLog(payload.ChunkHash)).Msg("Failed to write chunk")
+	// Store chunk in local CAS.
+	// When IsRaw=true, bytes are already encrypted+compressed — write directly without re-encrypting.
+	// When IsRaw=false (fallback path), bytes are plaintext — compress+encrypt before storing.
+	var writeErr error
+	if payload.IsRaw {
+		writeErr = r.s3.WriteChunkDirectRaw(r.ctx, payload.ChunkHash, payload.ChunkData)
+	} else {
+		writeErr = r.s3.WriteChunkDirect(r.ctx, payload.ChunkHash, payload.ChunkData)
+	}
+	if writeErr != nil {
+		r.logger.Error().Err(writeErr).Str("chunk", truncateHashForLog(payload.ChunkHash)).Msg("Failed to write chunk")
 		// Error ACK stays synchronous
-		return r.sendChunkAck(msg.ID, msg.From, payload.Bucket, payload.Key, payload.ChunkHash, payload.ChunkIndex, false, err.Error())
+		return r.sendChunkAck(msg.ID, msg.From, payload.Bucket, payload.Key, payload.ChunkHash, payload.ChunkIndex, false, writeErr.Error())
 	}
 
 	// Update chunk registry (mark us as owner)
@@ -2272,6 +2295,12 @@ func (r *Replicator) handleReplicateObjectMeta(msg *Message) error {
 		}
 	}
 
+	// Register EC shard chunks in the chunk registry so GC can track ownership.
+	// Non-EC chunks are already registered via WriteChunkDirectRaw/WriteChunkDirect.
+	if r.chunkRegistry != nil {
+		r.registerECShardChunks(payload.MetaJSON, payload.Bucket)
+	}
+
 	// Release semaphore immediately after imports — expensive chunk cleanup
 	// is deferred to a background worker to keep handler response times low.
 	<-r.metaImportSem
@@ -2294,6 +2323,42 @@ func (r *Replicator) handleReplicateObjectMeta(msg *Message) error {
 
 	r.incrementReceivedCount()
 	return nil
+}
+
+// registerECShardChunks parses metaJSON for EC shard chunk entries and registers
+// each shard chunk in the distributed chunk registry. Non-shard chunks (no shard_type)
+// are skipped — they are already registered via WriteChunkDirectRaw/WriteChunkDirect.
+func (r *Replicator) registerECShardChunks(metaJSON []byte, bucket string) {
+	var meta struct {
+		ChunkMeta map[string]*struct {
+			Size         int64  `json:"size"`
+			ShardType    string `json:"shard_type,omitempty"`
+			ShardIndex   int    `json:"shard_index,omitempty"`
+			ParentFileID string `json:"parent_file_id,omitempty"`
+		} `json:"chunk_metadata,omitempty"`
+	}
+	if err := json.Unmarshal(metaJSON, &meta); err != nil || meta.ChunkMeta == nil {
+		return
+	}
+
+	// Query replication factor after ImportObjectMeta so the bucket exists locally.
+	// (registerECShardChunks is always called after ImportObjectMeta succeeds.)
+	// Fallback to 2 if the bucket is still not visible (e.g. auto-create race).
+	rf := r.s3.GetBucketReplicationFactor(r.ctx, bucket)
+	if rf < 1 {
+		rf = 2
+	}
+
+	for hash, cm := range meta.ChunkMeta {
+		if cm == nil || cm.ShardType == "" || cm.ParentFileID == "" {
+			continue
+		}
+		if err := r.chunkRegistry.RegisterShardChunk(hash, cm.Size, cm.ParentFileID, cm.ShardType, cm.ShardIndex, rf); err != nil {
+			r.logger.Warn().Err(err).
+				Str("chunk", truncateHashForLog(hash)).
+				Msg("Failed to register EC shard chunk in registry")
+		}
+	}
 }
 
 // handleObjectManifest processes an incoming object manifest from a peer.
