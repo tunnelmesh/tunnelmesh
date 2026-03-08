@@ -1364,7 +1364,28 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		return nil, fmt.Errorf("invalid erasure coding config: k=%d, m=%d (max 32 each, 64 total)", k, m)
 	}
 
-	// Acquire semaphore to limit concurrent erasure coding operations (memory safety)
+	// Spool the body to a temp file before acquiring the semaphore so the client's
+	// network upload finishes at full speed regardless of EC queue depth. Files are
+	// bounded by MaxErasureCodingFileSize (100 MB) so temp disk usage is capped.
+	spoolFile, err := os.CreateTemp("", "tunnelmesh-ec-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("create ec spool: %w", err)
+	}
+	defer func() {
+		_ = spoolFile.Close()
+		_ = os.Remove(spoolFile.Name())
+	}()
+	if n, cpErr := io.Copy(spoolFile, io.LimitReader(reader, size)); cpErr != nil {
+		return nil, fmt.Errorf("spool upload: %w", cpErr)
+	} else if n != size {
+		return nil, fmt.Errorf("spool size mismatch: expected %d bytes, got %d", size, n)
+	}
+	if _, err = spoolFile.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek spool: %w", err)
+	}
+
+	// Acquire semaphore to limit concurrent erasure coding operations (memory safety).
+	// Body is already spooled above, so waiting here does not stall the client upload.
 	select {
 	case s.erasureCodingSemaphore <- struct{}{}:
 		defer func() { <-s.erasureCodingSemaphore }()
@@ -1377,7 +1398,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 	// Phase 1: Read + encode + write chunks to CAS without holding the global lock.
 	// CAS writes are content-addressed and use atomic rename, safe for concurrent access.
 
-	data, err := io.ReadAll(io.LimitReader(reader, size))
+	data, err := io.ReadAll(spoolFile)
 	if err != nil {
 		return nil, fmt.Errorf("read file data: %w", err)
 	}
