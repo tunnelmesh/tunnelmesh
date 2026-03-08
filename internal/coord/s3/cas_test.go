@@ -332,3 +332,62 @@ func TestCAS_WriteChunkRaw_ConcurrentSameHash(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, got)
 }
+
+func TestDeriveMasterKey_DeterministicAndShared(t *testing.T) {
+	token := "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+
+	// Same token produces same key every time
+	key1, err := DeriveMasterKey(token)
+	require.NoError(t, err)
+	key2, err := DeriveMasterKey(token)
+	require.NoError(t, err)
+	assert.Equal(t, key1, key2, "same token must produce same key")
+
+	// Different token produces different key
+	otherKey, err := DeriveMasterKey("b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3")
+	require.NoError(t, err)
+	assert.NotEqual(t, key1, otherKey, "different tokens must produce different keys")
+}
+
+func TestCAS_ReadChunk_SelfHealsCorruptedChunk(t *testing.T) {
+	// Write a chunk with CAS A (one key), then overwrite the file with bytes
+	// from CAS B (different key). Reading with A should detect the MAC failure,
+	// delete the file, and return "chunk not found" so callers can re-fetch.
+	keyA := [32]byte{1}
+	keyB := [32]byte{2}
+	ctx := context.Background()
+
+	// Separate dirs so each CAS owns its own chunk files.
+	casA, err := NewCAS(t.TempDir(), keyA)
+	require.NoError(t, err)
+	defer func() { _ = casA.Close() }()
+
+	casB, err := NewCAS(t.TempDir(), keyB)
+	require.NoError(t, err)
+	defer func() { _ = casB.Close() }()
+
+	plaintext := []byte("self-heal test data")
+
+	// Write the same plaintext with both keys to get the raw bytes from key B.
+	hash, _, err := casA.WriteChunk(ctx, plaintext)
+	require.NoError(t, err)
+
+	_, _, err = casB.WriteChunk(ctx, plaintext)
+	require.NoError(t, err)
+
+	// Get raw (key-B-encrypted) bytes
+	rawB, err := casB.ReadChunkRaw(ctx, hash)
+	require.NoError(t, err)
+
+	// Overwrite A's chunk file with B's raw bytes (simulates wrong-key replication)
+	chunkPath := casA.chunkPath(hash)
+	require.NoError(t, os.WriteFile(chunkPath, rawB, 0644))
+
+	// Reading with CAS A should detect MAC failure, delete the file, return "chunk not found"
+	_, err = casA.ReadChunk(ctx, hash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chunk not found", "corrupted chunk must look like not-found after self-heal")
+
+	// File must be deleted
+	assert.False(t, casA.ChunkExists(hash), "corrupted chunk file must be removed")
+}

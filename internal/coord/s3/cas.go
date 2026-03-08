@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
@@ -56,6 +57,24 @@ type CAS struct {
 	// after any upload burst that fully saturates the pool.
 	encoder     *zstd.Encoder
 	decoderPool sync.Pool
+}
+
+// DeriveMasterKey derives a stable CAS master key from the mesh auth token using HKDF.
+// All coordinators in the same mesh share the same token, so they derive the same key,
+// which is required for raw-bytes chunk replication to work correctly.
+// token must be a 64-character hex string (32 raw bytes); any other format is hashed directly.
+func DeriveMasterKey(token string) ([32]byte, error) {
+	var masterKey [32]byte
+	tokenBytes, err := hex.DecodeString(token)
+	if err != nil {
+		// Non-hex token (unusual): use raw UTF-8 bytes
+		tokenBytes = []byte(token)
+	}
+	h := hkdf.New(sha256.New, tokenBytes, nil, []byte("tunnelmesh-cas-v1"))
+	if _, err := io.ReadFull(h, masterKey[:]); err != nil {
+		return masterKey, fmt.Errorf("derive CAS key from token: %w", err)
+	}
+	return masterKey, nil
 }
 
 // NewCAS creates a new content-addressable storage.
@@ -192,6 +211,14 @@ func (c *CAS) ReadChunk(ctx context.Context, hash string) ([]byte, error) {
 	// Decrypt
 	compressed, err := c.decrypt(encrypted, hash)
 	if err != nil {
+		// MAC failure means the stored bytes were encrypted with a different key
+		// (e.g., replicated from a peer before all coordinators adopted the shared
+		// CAS key). Delete the corrupted file so the caller can re-fetch from a
+		// peer that has the correct plaintext, which will re-encrypt with our key.
+		if strings.Contains(err.Error(), "message authentication failed") {
+			_ = os.Remove(chunkPath)
+			return nil, fmt.Errorf("chunk not found: %s", hash)
+		}
 		return nil, fmt.Errorf("decrypt chunk: %w", err)
 	}
 
