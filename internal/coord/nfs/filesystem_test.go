@@ -24,7 +24,7 @@ func newTestStore(t *testing.T) *s3.Store {
 
 func TestS3Filesystem_NormalizePath(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 
 	tests := []struct {
 		name     string
@@ -55,7 +55,7 @@ func TestS3Filesystem_NormalizePath(t *testing.T) {
 
 func TestS3Filesystem_CreateAndRead(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	// Create a file
@@ -97,7 +97,7 @@ func TestS3Filesystem_CreateAndRead(t *testing.T) {
 
 func TestS3Filesystem_ReadOnly(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", true)
 
 	// Try to create - should fail
@@ -127,7 +127,7 @@ func TestS3Filesystem_ReadOnly(t *testing.T) {
 
 func TestS3Filesystem_Stat(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	// Create a file
@@ -159,7 +159,7 @@ func TestS3Filesystem_Stat(t *testing.T) {
 
 func TestS3Filesystem_ReadDir(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	// Create some files
@@ -194,7 +194,7 @@ func TestS3Filesystem_ReadDir(t *testing.T) {
 
 func TestS3Filesystem_Chroot(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 
 	// Create a file in subdir
 	_, _ = store.PutObject(context.Background(), "test-bucket", "subdir/file.txt", bytes.NewReader([]byte("test")), 4, "text/plain", nil)
@@ -219,7 +219,7 @@ func TestS3Filesystem_Chroot(t *testing.T) {
 
 func TestS3Filesystem_MkdirAll(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	// MkdirAll should be a no-op (S3 doesn't have real directories)
@@ -231,7 +231,7 @@ func TestS3Filesystem_MkdirAll(t *testing.T) {
 
 func TestS3Filesystem_SymlinkNotSupported(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	err := fs.Symlink("target", "link")
@@ -266,7 +266,7 @@ func TestS3Filesystem_Root(t *testing.T) {
 
 func TestS3File_Seek(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	// Create a file
@@ -301,7 +301,7 @@ func TestS3File_Seek(t *testing.T) {
 
 func TestS3File_Truncate(t *testing.T) {
 	store := newTestStore(t)
-	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2, nil)
+	_ = store.CreateBucket(context.Background(), "test-bucket", "", 2)
 	fs := NewS3Filesystem(store, "test-bucket", "", false)
 
 	// Create a file

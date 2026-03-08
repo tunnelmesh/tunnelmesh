@@ -37,7 +37,7 @@ func NewSystemStore(store *Store, serviceUserID string) (*SystemStore, error) {
 
 	// Create system bucket if it doesn't exist
 	if _, err := store.HeadBucket(context.Background(), SystemBucket); errors.Is(err, ErrBucketNotFound) {
-		if err := store.CreateBucket(context.Background(), SystemBucket, serviceUserID, 3, nil); err != nil {
+		if err := store.CreateBucket(context.Background(), SystemBucket, serviceUserID, 3); err != nil {
 			return nil, fmt.Errorf("create system bucket: %w", err)
 		}
 	}

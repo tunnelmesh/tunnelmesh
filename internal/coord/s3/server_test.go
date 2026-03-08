@@ -73,8 +73,8 @@ func TestListBuckets(t *testing.T) {
 	server, store := newTestServer(t)
 
 	// Create some buckets
-	require.NoError(t, store.CreateBucket(context.Background(), "bucket-a", "alice", 2, nil))
-	require.NoError(t, store.CreateBucket(context.Background(), "bucket-b", "bob", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "bucket-a", "alice", 2))
+	require.NoError(t, store.CreateBucket(context.Background(), "bucket-b", "bob", 2))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -123,7 +123,7 @@ func TestCreateBucket(t *testing.T) {
 
 func TestCreateBucketAlreadyExists(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	req := httptest.NewRequest(http.MethodPut, "/my-bucket", nil)
 	w := httptest.NewRecorder()
@@ -139,7 +139,7 @@ func TestCreateBucketAlreadyExists(t *testing.T) {
 
 func TestDeleteBucket(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	req := httptest.NewRequest(http.MethodDelete, "/my-bucket", nil)
 	w := httptest.NewRecorder()
@@ -170,7 +170,7 @@ func TestDeleteBucketNotFound(t *testing.T) {
 
 func TestDeleteBucketNotEmpty(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 	_, err := store.PutObject(context.Background(), "my-bucket", "file.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 	require.NoError(t, err)
 
@@ -188,7 +188,7 @@ func TestDeleteBucketNotEmpty(t *testing.T) {
 
 func TestHeadBucket(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	req := httptest.NewRequest(http.MethodHead, "/my-bucket", nil)
 	w := httptest.NewRecorder()
@@ -211,7 +211,7 @@ func TestHeadBucketNotFound(t *testing.T) {
 
 func TestPutObject(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	content := []byte("hello world")
 	req := httptest.NewRequest(http.MethodPut, "/my-bucket/greeting.txt", bytes.NewReader(content))
@@ -246,7 +246,7 @@ func TestPutObjectBucketNotFound(t *testing.T) {
 
 func TestPutObjectWithMetadata(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	req := httptest.NewRequest(http.MethodPut, "/my-bucket/doc.txt", bytes.NewReader([]byte("data")))
 	req.Header.Set("X-Amz-Meta-Author", "alice")
@@ -264,7 +264,7 @@ func TestPutObjectWithMetadata(t *testing.T) {
 
 func TestGetObject(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 	content := []byte("hello world")
 	_, err := store.PutObject(context.Background(), "my-bucket", "greeting.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestGetObject(t *testing.T) {
 
 func TestGetObjectNotFound(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	req := httptest.NewRequest(http.MethodGet, "/my-bucket/nonexistent.txt", nil)
 	w := httptest.NewRecorder()
@@ -299,7 +299,7 @@ func TestGetObjectNotFound(t *testing.T) {
 
 func TestDeleteObject(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 	_, err := store.PutObject(context.Background(), "my-bucket", "file.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 	require.NoError(t, err)
 
@@ -317,7 +317,7 @@ func TestDeleteObject(t *testing.T) {
 
 func TestDeleteObjectNotFound(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	// S3 returns 204 even for non-existent objects
 	req := httptest.NewRequest(http.MethodDelete, "/my-bucket/nonexistent.txt", nil)
@@ -330,7 +330,7 @@ func TestDeleteObjectNotFound(t *testing.T) {
 
 func TestHeadObject(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 	content := []byte("hello world")
 	_, err := store.PutObject(context.Background(), "my-bucket", "greeting.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
 	require.NoError(t, err)
@@ -349,7 +349,7 @@ func TestHeadObject(t *testing.T) {
 
 func TestHeadObjectNotFound(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	req := httptest.NewRequest(http.MethodHead, "/my-bucket/nonexistent.txt", nil)
 	w := httptest.NewRecorder()
@@ -373,7 +373,7 @@ type listObjectsTestCase struct {
 func runListObjectsTest(t *testing.T, tc listObjectsTestCase) {
 	t.Helper()
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	// Add test objects
 	for _, key := range tc.objectKeys {
@@ -418,7 +418,7 @@ func TestListObjectsWithPrefix(t *testing.T) {
 
 func TestListObjectsV2(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	// Add some objects
 	for _, key := range []string{"a.txt", "b.txt"} {
@@ -474,7 +474,7 @@ func TestAccessDenied(t *testing.T) {
 
 func TestNestedObjectKey(t *testing.T) {
 	server, store := newTestServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	content := []byte("nested content")
 	req := httptest.NewRequest(http.MethodPut, "/my-bucket/path/to/deep/file.txt", bytes.NewReader(content))
@@ -496,7 +496,7 @@ func TestNestedObjectKey(t *testing.T) {
 
 func TestListObjects_PrefixFiltered(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	// Create objects in different prefixes
 	_, _ = store.PutObject(context.Background(), "my-bucket", "teamA/doc1.txt", bytes.NewReader([]byte("a1")), 2, "text/plain", nil)
@@ -534,7 +534,7 @@ func TestListObjects_PrefixFiltered(t *testing.T) {
 
 func TestListObjects_MultiplePrefixesFiltered(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	_, _ = store.PutObject(context.Background(), "my-bucket", "teamA/doc.txt", bytes.NewReader([]byte("a")), 1, "text/plain", nil)
 	_, _ = store.PutObject(context.Background(), "my-bucket", "teamB/doc.txt", bytes.NewReader([]byte("b")), 1, "text/plain", nil)
@@ -568,7 +568,7 @@ func TestListObjects_MultiplePrefixesFiltered(t *testing.T) {
 
 func TestListObjects_UnrestrictedAccess(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	_, _ = store.PutObject(context.Background(), "my-bucket", "teamA/doc.txt", bytes.NewReader([]byte("a")), 1, "text/plain", nil)
 	_, _ = store.PutObject(context.Background(), "my-bucket", "teamB/doc.txt", bytes.NewReader([]byte("b")), 1, "text/plain", nil)
@@ -598,7 +598,7 @@ func TestListObjects_UnrestrictedAccess(t *testing.T) {
 
 func TestListObjectsV2_PrefixFiltered(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	_, _ = store.PutObject(context.Background(), "my-bucket", "projects/teamA/doc.txt", bytes.NewReader([]byte("a")), 1, "text/plain", nil)
 	_, _ = store.PutObject(context.Background(), "my-bucket", "projects/teamB/doc.txt", bytes.NewReader([]byte("b")), 1, "text/plain", nil)
@@ -629,7 +629,7 @@ func TestListObjectsV2_PrefixFiltered(t *testing.T) {
 
 func TestListObjects_EmptyPrefixesNoAccess(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 
 	_, _ = store.PutObject(context.Background(), "my-bucket", "doc.txt", bytes.NewReader([]byte("a")), 1, "text/plain", nil)
 
@@ -723,7 +723,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "CreateBucket conflict",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "exists", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "exists", "alice", 2)
 			},
 			method:     http.MethodPut,
 			path:       "/exists",
@@ -733,7 +733,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "HeadBucket success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "b", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "b", "alice", 2)
 			},
 			method:     http.MethodHead,
 			path:       "/b",
@@ -750,7 +750,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "DeleteBucket success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "del", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "del", "alice", 2)
 			},
 			method:     http.MethodDelete,
 			path:       "/del",
@@ -767,7 +767,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "ListObjects success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "lb", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "lb", "alice", 2)
 			},
 			method:     http.MethodGet,
 			path:       "/lb",
@@ -784,7 +784,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "ListObjectsV2 success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "lv2", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "lv2", "alice", 2)
 			},
 			method:     http.MethodGet,
 			path:       "/lv2?list-type=2",
@@ -794,7 +794,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "PutObject success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "put", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "put", "alice", 2)
 			},
 			method:     http.MethodPut,
 			path:       "/put/file.txt",
@@ -813,7 +813,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "GetObject success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "get", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "get", "alice", 2)
 				_, _ = s.PutObject(context.Background(), "get", "f.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 			},
 			method:     http.MethodGet,
@@ -824,7 +824,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "GetObject not found",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "get2", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "get2", "alice", 2)
 			},
 			method:     http.MethodGet,
 			path:       "/get2/missing.txt",
@@ -834,7 +834,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "DeleteObject success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "do", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "do", "alice", 2)
 				_, _ = s.PutObject(context.Background(), "do", "f.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 			},
 			method:     http.MethodDelete,
@@ -845,7 +845,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "HeadObject success",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "ho", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "ho", "alice", 2)
 				_, _ = s.PutObject(context.Background(), "ho", "f.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 			},
 			method:     http.MethodHead,
@@ -856,7 +856,7 @@ func TestServerMetrics(t *testing.T) {
 		{
 			name: "HeadObject not found",
 			setup: func(s *Store) {
-				_ = s.CreateBucket(context.Background(), "ho2", "alice", 2, nil)
+				_ = s.CreateBucket(context.Background(), "ho2", "alice", 2)
 			},
 			method:     http.MethodHead,
 			path:       "/ho2/missing.txt",
@@ -927,7 +927,7 @@ func TestDeleteObject_NotifiesDeleteNotifier(t *testing.T) {
 	notifier := &mockDeleteNotifier{}
 	server.SetDeleteNotifier(notifier)
 
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 	_, err := store.PutObject(context.Background(), "my-bucket", "file.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 	require.NoError(t, err)
 
@@ -945,7 +945,7 @@ func TestDeleteObject_WorksWithoutNotifier(t *testing.T) {
 	server, store := newTestServer(t)
 	// No notifier set — nil safety check
 
-	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "my-bucket", "alice", 2))
 	_, err := store.PutObject(context.Background(), "my-bucket", "file.txt", bytes.NewReader([]byte("data")), 4, "text/plain", nil)
 	require.NoError(t, err)
 
@@ -972,7 +972,7 @@ func TestDeleteObject_NoNotifyOnError(t *testing.T) {
 
 func TestSetMetricsWiresIntoServer(t *testing.T) {
 	store := newTestStoreWithCASForServer(t)
-	require.NoError(t, store.CreateBucket(context.Background(), "b", "alice", 2, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), "b", "alice", 2))
 	auth := &mockAuthorizer{userID: "alice", allowAll: true}
 
 	// Create server without metrics

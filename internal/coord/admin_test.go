@@ -250,7 +250,7 @@ func newTestServerWithS3AndBucket(t *testing.T) *Server {
 	t.Cleanup(func() { cleanupServer(t, srv) })
 
 	// Create a test bucket
-	err = srv.s3Store.CreateBucket(context.Background(), "test-bucket", "admin", 2, nil)
+	err = srv.s3Store.CreateBucket(context.Background(), "test-bucket", "admin", 2)
 	require.NoError(t, err)
 
 	return srv
@@ -533,7 +533,7 @@ func TestS3Proxy_PutObject_TooLarge(t *testing.T) {
 	srv, err := NewServer(context.Background(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { cleanupServer(t, srv) })
-	require.NoError(t, srv.s3Store.CreateBucket(context.Background(), "test-bucket", "admin", 2, nil))
+	require.NoError(t, srv.s3Store.CreateBucket(context.Background(), "test-bucket", "admin", 2))
 
 	// Stream zeros just over testLimit to trigger MaxBytesReader without
 	// allocating the full buffer in memory.

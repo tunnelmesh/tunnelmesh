@@ -504,10 +504,9 @@ func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 // handleCreateBucket creates a new S3 bucket with specified replication factor
 func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name                 string `json:"name"`
-		ReplicationFactor    int    `json:"replication_factor"`     // Optional, defaults to 2
-		QuotaBytes           int64  `json:"quota_bytes"`            // Optional per-bucket quota in bytes; 0 = unlimited
-		ErasureCodingEnabled bool   `json:"erasure_coding_enabled"` // Optional; creates bucket with RS(4,2) EC policy
+		Name              string `json:"name"`
+		ReplicationFactor int    `json:"replication_factor"` // Optional, defaults to 2
+		QuotaBytes        int64  `json:"quota_bytes"`        // Optional per-bucket quota in bytes; 0 = unlimited
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONReqSize)
@@ -552,14 +551,8 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build optional EC policy (RS(4,2) — appropriate for 3-coordinator clusters)
-	var ecPolicy *s3.ErasureCodingPolicy
-	if req.ErasureCodingEnabled {
-		ecPolicy = &s3.ErasureCodingPolicy{Enabled: true, DataShards: 4, ParityShards: 2}
-	}
-
 	// Create bucket via S3 store
-	if err := s.s3Store.CreateBucket(r.Context(), req.Name, userID, req.ReplicationFactor, ecPolicy); err != nil {
+	if err := s.s3Store.CreateBucket(r.Context(), req.Name, userID, req.ReplicationFactor); err != nil {
 		if errors.Is(err, s3.ErrBucketExists) {
 			s.jsonError(w, "bucket already exists", http.StatusConflict)
 			return

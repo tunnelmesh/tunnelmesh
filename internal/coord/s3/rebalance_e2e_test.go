@@ -54,7 +54,7 @@ func TestE2E_FilesSurviveTopologyChangeAndGC(t *testing.T) {
 	// ── Step 1: Upload a file on coord1 ──
 
 	c1 := stores["coord1"]
-	require.NoError(t, c1.CreateBucket(ctx, "docs", "admin", 2, nil))
+	require.NoError(t, c1.CreateBucket(ctx, "docs", "admin", 2))
 
 	fileData := []byte("Hello, this is a test file that should survive topology changes and garbage collection cycles without being deleted.")
 	meta, err := c1.PutObject(ctx, "docs", "important.txt", bytes.NewReader(fileData), int64(len(fileData)), "text/plain", nil)
@@ -224,7 +224,7 @@ func TestE2E_ChunksSurviveRepeatedImportWithVersionPruning(t *testing.T) {
 	store.SetMaxVersionsPerObject(3)
 
 	// Upload a file
-	require.NoError(t, store.CreateBucket(ctx, "test", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test", "admin", 2))
 
 	fileData := []byte("Test file for version pruning survival test. This content should persist through many import cycles.")
 	meta, err := store.PutObject(ctx, "test", "file.txt", bytes.NewReader(fileData), int64(len(fileData)), "text/plain", nil)
@@ -295,7 +295,7 @@ func TestE2E_DifferentFileVersionsSurviveGC(t *testing.T) {
 
 	store.SetMaxVersionsPerObject(2) // Keep only 2 versions
 
-	require.NoError(t, store.CreateBucket(ctx, "test", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test", "admin", 2))
 
 	// Upload version 1
 	v1Data := []byte("Version 1 content - original file data that will be replaced")
@@ -371,7 +371,7 @@ func TestE2E_MultipleFilesSharedChunksSurviveGC(t *testing.T) {
 
 	store.SetMaxVersionsPerObject(1) // Very aggressive pruning
 
-	require.NoError(t, store.CreateBucket(ctx, "shared", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "shared", "admin", 2))
 
 	// Upload file1 and file2 with identical content (shared chunks via dedup)
 	sharedData := []byte("This content is shared between two files via content-addressable deduplication.")
@@ -433,7 +433,7 @@ func TestE2E_NewCoordReceivesChunksBeforeMetadata(t *testing.T) {
 	src, err := NewStore(srcDir, nil)
 	require.NoError(t, err)
 	require.NoError(t, src.InitCAS(ctx, encryptionKey))
-	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2))
 
 	fileData := []byte("File that will be partially replicated - chunks arrive before metadata.")
 	meta, err := src.PutObject(ctx, "data", "partial.txt", bytes.NewReader(fileData), int64(len(fileData)), "text/plain", nil)

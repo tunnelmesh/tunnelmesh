@@ -82,24 +82,14 @@ func removeWithRetry(path string) error {
 	return err
 }
 
-// ErasureCodingPolicy configures erasure coding for a bucket.
-// Since EC is now universal, this type is retained for API compatibility —
-// the fields are accepted but the store always uses RS(4,2) regardless.
-type ErasureCodingPolicy struct {
-	Enabled      bool `json:"enabled"`       // Whether erasure coding is enabled for new objects
-	DataShards   int  `json:"data_shards"`   // k: number of data shards (must be >= 1)
-	ParityShards int  `json:"parity_shards"` // m: number of parity shards (must be >= 1)
-}
-
 // BucketMeta contains bucket metadata.
 type BucketMeta struct {
-	Name              string               `json:"name"`
-	CreatedAt         time.Time            `json:"created_at"`
-	Owner             string               `json:"owner"`                    // User ID who created the bucket
-	SizeBytes         int64                `json:"size_bytes"`               // Total size of live objects (updated incrementally)
-	ReplicationFactor int                  `json:"replication_factor"`       // Number of replicas (1-3)
-	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"` // Per-bucket EC policy (informational; store always uses RS(4,2))
-	QuotaBytes        int64                `json:"quota_bytes,omitempty"`    // Per-bucket quota in bytes; 0 = unlimited
+	Name              string    `json:"name"`
+	CreatedAt         time.Time `json:"created_at"`
+	Owner             string    `json:"owner"`                 // User ID who created the bucket
+	SizeBytes         int64     `json:"size_bytes"`            // Total size of live objects (updated incrementally)
+	ReplicationFactor int       `json:"replication_factor"`    // Number of replicas (1-3)
+	QuotaBytes        int64     `json:"quota_bytes,omitempty"` // Per-bucket quota in bytes; 0 = unlimited
 }
 
 // BucketMetadataUpdate contains mutable bucket metadata fields (admin-only).
@@ -604,7 +594,7 @@ func (s *Store) objectMetaPath(bucket, key string) string {
 }
 
 // CreateBucket creates a new bucket with specified replication factor.
-func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicationFactor int, erasureCoding *ErasureCodingPolicy) error {
+func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicationFactor int) error {
 	// Validate bucket name (defense in depth)
 	if err := validateName(bucket); err != nil {
 		return fmt.Errorf("invalid bucket name: %w", err)
@@ -613,13 +603,6 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 	// Validate replication factor
 	if replicationFactor < 1 || replicationFactor > 3 {
 		return fmt.Errorf("replication factor must be 1-3, got %d", replicationFactor)
-	}
-
-	// Validate erasure coding policy if provided (EC is now universal, policy is informational)
-	if erasureCoding != nil && erasureCoding.Enabled {
-		if err := validateErasureCodingPolicy(erasureCoding); err != nil {
-			return fmt.Errorf("invalid erasure coding policy: %w", err)
-		}
 	}
 
 	s.mu.Lock()
@@ -643,7 +626,6 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 		CreatedAt:         time.Now().UTC(),
 		Owner:             owner,
 		ReplicationFactor: replicationFactor,
-		ErasureCoding:     erasureCoding,
 	}
 
 	metaPath := s.bucketMetaPath(bucket)
@@ -657,36 +639,6 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 	}
 
 	return nil
-}
-
-// validateErasureCodingPolicy validates a per-bucket EC policy struct.
-// Since EC is now universal, this is retained for API compatibility.
-func validateErasureCodingPolicy(policy *ErasureCodingPolicy) error {
-	if policy.DataShards < 1 {
-		return fmt.Errorf("data shards (k) must be >= 1, got %d", policy.DataShards)
-	}
-	if policy.ParityShards < 1 {
-		return fmt.Errorf("parity shards (m) must be >= 1, got %d", policy.ParityShards)
-	}
-	if policy.DataShards+policy.ParityShards > 256 {
-		return fmt.Errorf("total shards (k+m) must be <= 256, got %d", policy.DataShards+policy.ParityShards)
-	}
-	return nil
-}
-
-// GetBucketErasureCodingPolicy returns the stored EC policy for a bucket.
-// Since EC is now universal (always RS(4,2)), this always returns true with
-// ecDataShards and ecParityShards regardless of the stored policy.
-func (s *Store) GetBucketErasureCodingPolicy(ctx context.Context, bucket string) (bool, int, int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if _, err := s.getBucketMeta(bucket); err != nil {
-		return false, 0, 0, fmt.Errorf("get bucket meta: %w", err)
-	}
-
-	// EC is universal — always report the canonical RS(4,2) parameters.
-	return true, ecDataShards, ecParityShards, nil
 }
 
 // UpdateBucketMetadata updates mutable bucket metadata (admin-only operation).

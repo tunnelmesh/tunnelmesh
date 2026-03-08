@@ -103,7 +103,7 @@ func TestForwardBucketDeletion_Payload(t *testing.T) {
 
 	// Create an fs+ bucket to delete
 	bucketName := s3.FileShareBucketPrefix + "payload-test"
-	require.NoError(t, srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 1, nil))
+	require.NoError(t, srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 1))
 
 	// Simulate what forwardBucketDeletionToPeers sends to this coordinator
 	payload, _ := json.Marshal(map[string]interface{}{

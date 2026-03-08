@@ -128,7 +128,7 @@ func TestGC_GracePeriod(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create bucket
-	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2, nil)
+	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2)
 	require.NoError(t, err)
 
 	// Upload file
@@ -395,12 +395,7 @@ func TestGC_ErasureCodingKeepsReferencedShards(t *testing.T) {
 	err = store.InitCAS(ctx, encryptionKey)
 	require.NoError(t, err)
 
-	// Create bucket with erasure coding policy
-	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2, &ErasureCodingPolicy{
-		Enabled:      true,
-		DataShards:   ecDataShards,
-		ParityShards: ecParityShards,
-	})
+	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2)
 	require.NoError(t, err)
 
 	// Upload a file (will be erasure coded)

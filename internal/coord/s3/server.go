@@ -328,7 +328,7 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 
-		if err := s.store.CreateBucket(r.Context(), bucket, userID, 2, nil); err != nil {
+		if err := s.store.CreateBucket(r.Context(), bucket, userID, 2); err != nil {
 			if errors.Is(err, ErrBucketExists) {
 				s.writeError(rec, http.StatusConflict, "BucketAlreadyExists", "Bucket already exists")
 				return

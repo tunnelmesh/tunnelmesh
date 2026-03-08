@@ -39,7 +39,7 @@ func TestConcurrent_MultipleUploads(t *testing.T) {
 	ctx := context.Background()
 
 	// Create bucket
-	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2))
 
 	// Upload multiple files concurrently
 	const numUploads = 50
@@ -84,7 +84,7 @@ func TestConcurrent_ReadsAndWrites(t *testing.T) {
 	ctx := context.Background()
 
 	// Create bucket and upload some initial files
-	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2))
 
 	const numFiles = 20
 	for i := 0; i < numFiles; i++ {
@@ -223,7 +223,7 @@ func TestConcurrent_RegistryUpdates(t *testing.T) {
 	ctx := context.Background()
 
 	// Create bucket
-	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2))
 
 	// Concurrent uploads will trigger concurrent registry updates
 	const numUploads = 30
@@ -334,7 +334,7 @@ func TestConcurrent_DeleteAndRead(t *testing.T) {
 	ctx := context.Background()
 
 	// Create bucket and upload files
-	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2))
 
 	const numFiles = 50
 	for i := 0; i < numFiles; i++ {
@@ -438,7 +438,7 @@ func TestConcurrent_BucketOperations(t *testing.T) {
 			owner := fmt.Sprintf("owner-%d", workerID)
 
 			// Create bucket
-			err := store.CreateBucket(ctx, bucketName, owner, 2, nil)
+			err := store.CreateBucket(ctx, bucketName, owner, 2)
 			if err != nil {
 				errs <- fmt.Errorf("create bucket: %w", err)
 				return
@@ -504,7 +504,7 @@ func TestConcurrent_VersioningAndReads(t *testing.T) {
 	ctx := context.Background()
 
 	// Create bucket
-	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "test-owner", 2))
 
 	const key = "versioned-file.txt"
 

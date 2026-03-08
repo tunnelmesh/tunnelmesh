@@ -755,7 +755,7 @@ func TestPurgeOrphanedFileShareBuckets_GracePeriod(t *testing.T) {
 	// Create a fs+ bucket directly (no share config) — simulates replication
 	// arriving before the share config is replicated.
 	bucketName := FileShareBucketPrefix + "replicated"
-	err = store.CreateBucket(context.Background(), bucketName, "alice", 1, nil)
+	err = store.CreateBucket(context.Background(), bucketName, "alice", 1)
 	require.NoError(t, err)
 
 	// Bucket was just created (young) — purge should skip it
@@ -783,7 +783,7 @@ func TestPurgeOrphanedFileShareBuckets_KeepsRecentOrphanInRaceWindow(t *testing.
 	// Create a fs+ bucket with no share config — simulates a bucket replicated
 	// before its file_shares.json arrived (the race window).
 	bucketName := FileShareBucketPrefix + "race-window"
-	err = store.CreateBucket(context.Background(), bucketName, "alice", 1, nil)
+	err = store.CreateBucket(context.Background(), bucketName, "alice", 1)
 	require.NoError(t, err)
 
 	// Backdate the bucket to 5 minutes old — past the old 2-min grace period
@@ -818,7 +818,7 @@ func TestPurgeOrphanedFileShareBuckets_DeletesOldOrphans(t *testing.T) {
 
 	// Create a fs+ bucket directly (no share config)
 	bucketName := FileShareBucketPrefix + "stale"
-	err = store.CreateBucket(context.Background(), bucketName, "alice", 1, nil)
+	err = store.CreateBucket(context.Background(), bucketName, "alice", 1)
 	require.NoError(t, err)
 
 	// Backdate the bucket's CreatedAt to make it older than the grace period

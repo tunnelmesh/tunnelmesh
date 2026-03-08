@@ -14,16 +14,12 @@ import (
 )
 
 // newTestStoreWithErasureCoding creates a test store and a bucket.
-// The k and m parameters are stored as the bucket policy for API compatibility,
-// but the store always encodes with the universal RS(ecDataShards, ecParityShards).
+// k and m are accepted for call-site compatibility but ignored — EC is
+// universal and always uses RS(ecDataShards, ecParityShards).
 func newTestStoreWithErasureCoding(t *testing.T, k, m int) *Store {
 	t.Helper()
 	store := newTestStoreWithCAS(t)
-	err := store.CreateBucket(context.Background(), "ec-bucket", "test-user", 2, &ErasureCodingPolicy{
-		Enabled:      true,
-		DataShards:   k,
-		ParityShards: m,
-	})
+	err := store.CreateBucket(context.Background(), "ec-bucket", "test-user", 2)
 	require.NoError(t, err)
 	return store
 }
@@ -348,7 +344,7 @@ func TestErasureCodingReadPath_NonErasureBucketUnaffected(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a bucket without an explicit EC policy.
-	err := store.CreateBucket(ctx, "normal-bucket", "test-user", 2, nil)
+	err := store.CreateBucket(ctx, "normal-bucket", "test-user", 2)
 	require.NoError(t, err)
 
 	data := []byte("Normal bucket data — EC is universal so this uses RS(4,2) too")
