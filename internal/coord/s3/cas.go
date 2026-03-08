@@ -24,11 +24,12 @@ import (
 const macFailureMsg = "message authentication failed"
 
 // casEncoderConcurrency caps the zstd encoder's internal sub-encoder pool.
-// At SpeedDefault with lowMem, each sub-encoder uses ~12–13 MB.
-// 1 sub-encoder uses ~13 MB; concurrent callers queue behind it.
-// EncodeAll is fast enough that the queue is rarely a bottleneck for
-// the chunk sizes (≤4 MB) seen in practice.
-const casEncoderConcurrency = 1
+// At SpeedDefault with lowMem, each sub-encoder uses ~12–13 MB, so
+// 2 × 13 MB ≈ 26 MB. This allows two concurrent WriteChunk callers to
+// compress in parallel (relevant when large-tier chunks of ~2 MB arrive
+// from multiple peers simultaneously) while staying well within the 400 MiB
+// GOMEMLIMIT budget set in systemd and docker-compose.
+const casEncoderConcurrency = 2
 
 // CAS (Content-Addressable Storage) manages encrypted, compressed chunks.
 // Chunks are identified by their SHA-256 hash (computed on plaintext).
@@ -109,8 +110,8 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 	// Initialize single shared encoder with bounded concurrency.
 	// See casEncoderConcurrency for the memory/throughput tradeoff rationale.
 	// WithLowerEncoderMem reduces the per-sub-encoder history buffer from
-	// ~32 MB (SpeedDefault without lowMem) to ~12–13 MB; with concurrency=1
-	// total zstd encoder memory stays at ~13 MB with no change in compression ratio.
+	// ~32 MB (SpeedDefault without lowMem) to ~12–13 MB; with concurrency=2
+	// total zstd encoder memory stays at ~26 MB with no change in compression ratio.
 	enc, err := zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.SpeedDefault),
 		zstd.WithEncoderConcurrency(casEncoderConcurrency),

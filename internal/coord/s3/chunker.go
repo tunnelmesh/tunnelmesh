@@ -49,6 +49,13 @@ type ChunkerConfig struct {
 //
 // Negative or zero size (e.g. -1 from chunked HTTP transfer encoding where
 // Content-Length is unknown) selects the smallest tier — a safe, conservative default.
+//
+// Dedup tradeoff: two uploads of identical content with different Content-Length
+// values (e.g. one with a known size, one chunked) may land in different tiers,
+// producing different chunk boundaries and therefore different CAS hashes. The
+// content is stored twice on disk but deduplicated within each tier. This is an
+// accepted tradeoff: large files (where cross-tier dedup would matter most) are
+// overwhelmingly unique binaries or archives.
 func ChunkConfigForSize(fileSize int64) ChunkerConfig {
 	const (
 		mb1  = 1 * 1024 * 1024

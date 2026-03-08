@@ -435,12 +435,18 @@ func TestCAS_ReadChunk_SelfHealsCorruptedChunk(t *testing.T) {
 }
 
 // TestCASEncoderMemoryBudget verifies that the CAS encoder stays within a
-// bounded memory budget after upload spikes. casEncoderConcurrency=1 means
-// a single zstd sub-encoder (~13 MB with lowMem) rather than GOMAXPROCS
+// bounded memory budget after upload spikes. casEncoderConcurrency=2 means
+// two zstd sub-encoders (~13 MB each with lowMem) rather than GOMAXPROCS
 // sub-encoders (~13 MB each). The test also validates that idle heap is
 // returned to the OS when the runtime is given the opportunity — simulating
 // what happens in production with GOMEMLIMIT=400MiB set in systemd/docker.
+//
+// Skipped under -short because it depends on GC timing and OS page
+// reclaim behaviour which can be slow on memory-constrained CI runners.
 func TestCASEncoderMemoryBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping memory budget test in -short mode")
+	}
 	// Tighten GOMEMLIMIT so the background scavenger runs aggressively
 	// during this test. In production, GOMEMLIMIT=400MiB in the systemd unit
 	// and docker-compose files provides the same pressure automatically.

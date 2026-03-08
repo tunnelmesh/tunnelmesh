@@ -251,6 +251,7 @@ func TestChunkConfigForSize(t *testing.T) {
 		size     int64
 		wantMask uint32
 	}{
+		{-1, 0xFFF}, // chunked HTTP transfer encoding: Content-Length unknown
 		{0, 0xFFF},
 		{512 * 1024, 0xFFF},
 		{1 * 1024 * 1024, 0xFFF},
