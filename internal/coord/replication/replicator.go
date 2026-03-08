@@ -2341,6 +2341,9 @@ func (r *Replicator) registerECShardChunks(metaJSON []byte, bucket string) {
 		return
 	}
 
+	// Query replication factor after ImportObjectMeta so the bucket exists locally.
+	// (registerECShardChunks is always called after ImportObjectMeta succeeds.)
+	// Fallback to 2 if the bucket is still not visible (e.g. auto-create race).
 	rf := r.s3.GetBucketReplicationFactor(r.ctx, bucket)
 	if rf < 1 {
 		rf = 2

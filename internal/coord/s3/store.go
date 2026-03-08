@@ -2688,6 +2688,9 @@ func (s *Store) ReadChunkRaw(ctx context.Context, hash string) ([]byte, error) {
 
 // WriteChunkDirectRaw writes pre-encrypted+compressed chunk bytes directly to CAS.
 // Used by the replication receiver — skips the decrypt+compress+encrypt cycle.
+// Integrity is deferred to read-time: the MAC check in ReadChunk will reject any
+// bytes that were encrypted with a different key, and self-heals by deleting the
+// chunk so callers can re-fetch from a peer with the correct plaintext.
 func (s *Store) WriteChunkDirectRaw(ctx context.Context, hash string, raw []byte) error {
 	if s.cas == nil {
 		return fmt.Errorf("CAS not initialized")
