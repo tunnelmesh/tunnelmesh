@@ -46,6 +46,9 @@ type ChunkerConfig struct {
 //   - <= 1 MB:  ~4 KB avg chunks (mask=0xFFF)
 //   - <= 64 MB: ~64 KB avg chunks (mask=0xFFFF)
 //   - > 64 MB:  ~512 KB avg chunks (mask=0x7FFFF)
+//
+// Negative or zero size (e.g. -1 from chunked HTTP transfer encoding where
+// Content-Length is unknown) selects the smallest tier — a safe, conservative default.
 func ChunkConfigForSize(fileSize int64) ChunkerConfig {
 	const (
 		mb1  = 1 * 1024 * 1024
@@ -244,7 +247,8 @@ func (r *byteReader) Read(p []byte) (int, error) {
 
 // StreamingChunker wraps the existing Chunker and adds hash computation.
 // It processes data in a streaming fashion, never buffering entire files in memory.
-// For a 1GB file, peak memory usage is ~64KB (single chunk).
+// Peak buffer memory is MaxSize*2 per instance: ~128 KB for the default config,
+// up to ~4 MB when using the large-file config via NewStreamingChunkerWithConfig.
 type StreamingChunker struct {
 	chunker *Chunker
 }

@@ -326,8 +326,9 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 	}
 
 	// Stream body directly to PutObject — avoids buffering the entire object in memory.
-	// PutObject uses StreamingChunker internally (~64KB peak memory per upload).
-	// r.ContentLength is used for early quota checks; -1 if chunked (quota still enforced post-write).
+	// PutObject uses an adaptive StreamingChunker: ~128 KB buffer for small files, up to ~4 MB for
+	// large files (>64 MB). r.ContentLength is used for chunk-tier selection and early quota checks;
+	// -1 (chunked transfer encoding) selects the smallest tier (safe default).
 	meta, err := s.s3Store.PutObject(r.Context(), bucket, key, r.Body, r.ContentLength, contentType, nil)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
