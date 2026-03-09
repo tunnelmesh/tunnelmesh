@@ -434,6 +434,110 @@ func TestCAS_ReadChunk_SelfHealsCorruptedChunk(t *testing.T) {
 	assert.False(t, casA.ChunkExists(hash), "corrupted chunk file must be removed")
 }
 
+// TestCAS_EncryptIntoParity verifies that encryptInto produces identical output
+// to encrypt, confirming the buffer-pooling refactor didn't change cipher semantics.
+func TestCAS_EncryptIntoParity(t *testing.T) {
+	cas := newTestCAS(t)
+	plaintext := []byte("parity check plaintext")
+	hash := ContentHash(plaintext)
+
+	got, err := cas.encrypt(plaintext, hash)
+	require.NoError(t, err)
+
+	// encryptInto with nil dst must produce the same bytes
+	gotInto, err := cas.encryptInto(nil, plaintext, hash)
+	require.NoError(t, err)
+	require.Equal(t, got, gotInto, "encryptInto(nil,...) must match encrypt()")
+
+	// encryptInto with a pre-allocated dst must also produce the same bytes
+	preDst := make([]byte, 0, len(got)+16)
+	gotWithDst, err := cas.encryptInto(preDst, plaintext, hash)
+	require.NoError(t, err)
+	require.Equal(t, got, gotWithDst, "encryptInto(preDst,...) must match encrypt()")
+}
+
+// TestCAS_WriteChunkKnown_BufferReuse exercises the compressBufPool and
+// encryptBufPool under dedup and concurrent scenarios with the race detector.
+func TestCAS_WriteChunkKnown_BufferReuse(t *testing.T) {
+	cas := newTestCAS(t)
+	ctx := context.Background()
+
+	data := []byte("buffer reuse test data")
+
+	// First write must succeed and return on-disk bytes.
+	_, onDisk1, err := cas.WriteChunk(ctx, data)
+	require.NoError(t, err)
+	require.Greater(t, onDisk1, int64(0))
+
+	// Second write of the same data must be a dedup hit.
+	_, onDisk2, err := cas.WriteChunk(ctx, data)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), onDisk2, "dedup hit must return 0 on-disk bytes")
+
+	// Concurrent writes of two different chunks must both succeed and be readable.
+	data1 := []byte("concurrent chunk alpha")
+	data2 := []byte("concurrent chunk beta")
+	var wg sync.WaitGroup
+	var hash1, hash2 string
+	var err1, err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		hash1, _, err1 = cas.WriteChunk(ctx, data1)
+	}()
+	go func() {
+		defer wg.Done()
+		hash2, _, err2 = cas.WriteChunk(ctx, data2)
+	}()
+	wg.Wait()
+	require.NoError(t, err1)
+	require.NoError(t, err2)
+
+	got1, err := cas.ReadChunk(ctx, hash1)
+	require.NoError(t, err)
+	require.Equal(t, data1, got1)
+
+	got2, err := cas.ReadChunk(ctx, hash2)
+	require.NoError(t, err)
+	require.Equal(t, data2, got2)
+}
+
+// TestCAS_WriteChunkKnown_LargeChunk verifies that the pooled buffers grow to
+// fit a larger-than-typical piece (2× ecPieceSize) and the pool entry is
+// correctly reused on a subsequent write.
+func TestCAS_WriteChunkKnown_LargeChunk(t *testing.T) {
+	cas := newTestCAS(t)
+	ctx := context.Background()
+
+	// First large chunk — forces pool buffer to grow to high-water mark.
+	large := make([]byte, 2*ecPieceSize)
+	for i := range large {
+		large[i] = byte(i % 251)
+	}
+	hash1, onDisk1, err := cas.WriteChunk(ctx, large)
+	require.NoError(t, err)
+	require.Greater(t, onDisk1, int64(0))
+
+	// Second large chunk (different content) — reuses the grown pool buffer.
+	large2 := make([]byte, 2*ecPieceSize)
+	for i := range large2 {
+		large2[i] = byte((i + 1) % 251)
+	}
+	hash2, onDisk2, err := cas.WriteChunk(ctx, large2)
+	require.NoError(t, err)
+	require.Greater(t, onDisk2, int64(0))
+	require.NotEqual(t, hash1, hash2)
+
+	// Both chunks must be readable with correct content.
+	got1, err := cas.ReadChunk(ctx, hash1)
+	require.NoError(t, err)
+	require.Equal(t, large, got1)
+
+	got2, err := cas.ReadChunk(ctx, hash2)
+	require.NoError(t, err)
+	require.Equal(t, large2, got2)
+}
+
 // TestCASEncoderMemoryBudget verifies that the CAS encoder stays within a
 // bounded memory budget after upload spikes. casEncoderConcurrency=2 means
 // two zstd sub-encoders (~13 MB each with lowMem) rather than GOMAXPROCS

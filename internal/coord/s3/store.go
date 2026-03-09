@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1790,6 +1791,15 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 
 	// Phase 3: After lock — pruning (filesystem walk, safe without lock).
 	s.pruneExpiredVersions(ctx, bucket, key)
+
+	// For large uploads, proactively return freed memory pages to the OS.
+	// debug.FreeOSMemory runs GC (clearing sync.Pool victim caches) then
+	// calls madvise MADV_DONTNEED on all non-live spans. This makes freed
+	// memory visible in top/ps RSS within seconds rather than waiting for
+	// the background scavenger. The goroutine is non-blocking.
+	if actualSize >= 100*1024*1024 {
+		go debug.FreeOSMemory()
+	}
 
 	return &objMeta, nil
 }
@@ -3637,7 +3647,14 @@ func (s *Store) runGC(ctx context.Context, skipGracePeriod bool) GCStats {
 //   - Chunks written during the scan are newer than gcStartTime and will be
 //     skipped by deleteOrphanedChunks
 func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} {
-	referencedChunks := make(map[string]struct{})
+	// Pre-allocate using the live chunk count to avoid O(log N) rehash steps
+	// during the reference set build. statsChunkCount is maintained atomically
+	// at every write/delete, so it's an accurate hint with no extra I/O.
+	hint := int(s.statsChunkCount.Load())
+	if hint < 64 {
+		hint = 64
+	}
+	referencedChunks := make(map[string]struct{}, hint)
 
 	bucketsDir := filepath.Join(s.dataDir, "buckets")
 	bucketEntries, err := os.ReadDir(bucketsDir)
