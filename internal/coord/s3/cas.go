@@ -208,6 +208,8 @@ func (c *CAS) writeChunkKnown(ctx context.Context, data []byte, knownHash string
 	encrypted, err := c.encryptInto(encryptBuf, compressed, knownHash)
 	if err != nil {
 		c.compressBufPool.Put(&compressed)
+		// On error, encryptInto returns nil — put back encryptBuf (the pre-Seal
+		// pool entry), not encrypted (which is nil and would panic on deref).
 		if encryptBuf != nil {
 			c.encryptBufPool.Put(&encryptBuf)
 		}

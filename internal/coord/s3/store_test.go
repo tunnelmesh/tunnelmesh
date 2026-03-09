@@ -3391,3 +3391,117 @@ func TestStore_StatsNeverNegative(t *testing.T) {
 	assert.GreaterOrEqual(t, stats.ChunkCount, 0, "chunk count must not go negative after GC")
 	assert.GreaterOrEqual(t, stats.ChunkBytes, int64(0), "chunk bytes must not go negative after GC")
 }
+
+// TestPutObject_ECBoundarySizes verifies correct round-trip for sizes that probe
+// the EC streaming boundaries: empty, 1 byte, one-below-block, exact-block, one-above-block.
+// These sizes exercise zero-pad edge cases in putObjectWithErasureCoding.
+func TestPutObject_ECBoundarySizes(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "bkt", "alice", 2))
+
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"one_byte", 1},
+		{"block_minus_1", ecStreamBlock - 1},
+		{"exact_block", ecStreamBlock},
+		{"block_plus_1", ecStreamBlock + 1},
+	}
+
+	for _, tc := range sizes {
+		t.Run(tc.name, func(t *testing.T) {
+			data := make([]byte, tc.size)
+			for i := range data {
+				data[i] = byte(i%251 + 1) // non-zero to distinguish from zero-padding
+			}
+
+			key := "boundary-" + tc.name
+			_, err := store.PutObject(ctx, "bkt", key, bytes.NewReader(data), int64(tc.size), "application/octet-stream", nil)
+			require.NoError(t, err, "PutObject size=%d", tc.size)
+
+			rc, meta, err := store.GetObject(ctx, "bkt", key)
+			require.NoError(t, err, "GetObject size=%d", tc.size)
+			defer func() { _ = rc.Close() }()
+
+			got, err := io.ReadAll(rc)
+			require.NoError(t, err)
+			assert.Equal(t, int64(tc.size), meta.Size, "metadata size mismatch")
+			assert.Equal(t, data, got, "content mismatch for size=%d", tc.size)
+		})
+	}
+}
+
+// TestPutObject_UniversalEC verifies that every object, regardless of size or
+// bucket configuration, receives EC metadata. This replaces the removed
+// GetBucketErasureCodingPolicy tests and confirms the universal-EC invariant.
+func TestPutObject_UniversalEC(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "bkt", "alice", 2))
+
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", []byte{}},
+		{"tiny", []byte("hi")},
+		{"medium", bytes.Repeat([]byte("x"), 512*1024)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := store.PutObject(ctx, "bkt", tc.name, bytes.NewReader(tc.data), int64(len(tc.data)), "text/plain", nil)
+			require.NoError(t, err)
+
+			_, meta, err := store.GetObject(ctx, "bkt", tc.name)
+			require.NoError(t, err)
+
+			require.NotNil(t, meta.ErasureCoding, "ErasureCoding must be set for all objects (universal EC)")
+			assert.True(t, meta.ErasureCoding.Enabled, "ErasureCoding.Enabled must be true")
+			assert.Equal(t, ecDataShards, meta.ErasureCoding.DataShards)
+			assert.Equal(t, ecParityShards, meta.ErasureCoding.ParityShards)
+		})
+	}
+}
+
+// TestReadErasureCoded_CorruptDataHashesLen verifies that a corrupt EC metadata
+// entry (DataHashes length not divisible by k) is rejected with a clear error
+// rather than silently truncating or panicking.
+func TestReadErasureCoded_CorruptDataHashesLen(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+	require.NoError(t, store.CreateBucket(ctx, "bkt", "alice", 2))
+
+	// Write a valid object so we have a metadata file to corrupt.
+	data := []byte("corruption test content")
+	_, err := store.PutObject(ctx, "bkt", "obj.txt", bytes.NewReader(data), int64(len(data)), "text/plain", nil)
+	require.NoError(t, err)
+
+	// Read and mutate the metadata to produce a DataHashes slice whose length
+	// is not divisible by ecDataShards (= 4).
+	metaPath := store.objectMetaPath("bkt", "obj.txt")
+	raw, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+
+	var meta ObjectMeta
+	require.NoError(t, json.Unmarshal(raw, &meta))
+	require.NotNil(t, meta.ErasureCoding)
+
+	// Truncate to an invalid length (not divisible by k=4).
+	meta.ErasureCoding.DataHashes = meta.ErasureCoding.DataHashes[:len(meta.ErasureCoding.DataHashes)-1]
+	if len(meta.ErasureCoding.DataHashes)%ecDataShards == 0 {
+		// Make sure it's actually invalid — remove one more if needed.
+		meta.ErasureCoding.DataHashes = meta.ErasureCoding.DataHashes[:len(meta.ErasureCoding.DataHashes)-1]
+	}
+
+	corrupted, err := json.Marshal(meta)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(metaPath, corrupted, 0644))
+
+	_, _, err = store.GetObject(ctx, "bkt", "obj.txt")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not divisible by k", "should report corrupt DataHashes length")
+}

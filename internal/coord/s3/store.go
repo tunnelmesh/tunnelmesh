@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1152,6 +1151,9 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 	// mostly-zero-padded RS pieces.
 	numDataBlocks := 1
 	if k > 0 && len(ec.DataHashes) > 0 {
+		if len(ec.DataHashes)%k != 0 {
+			return nil, nil, fmt.Errorf("corrupt EC metadata: DataHashes length %d not divisible by k=%d", len(ec.DataHashes), k)
+		}
 		numDataBlocks = len(ec.DataHashes) / k
 		if numDataBlocks < 1 {
 			numDataBlocks = 1
@@ -1619,6 +1621,10 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 	// Doing this after the loop (vs inside) keeps per-iteration allocations at
 	// ~64 bytes (ecShardRecord) instead of ~450 bytes (*ChunkMetadata + map header).
 	// For a 10 GB file this reduces peak heap growth during streaming by ~7 MB.
+	// sharedOwners is intentionally aliased across all ChunkMetadata entries to
+	// avoid one allocation per shard. This is safe as long as all consumers treat
+	// Owners as read-only after construction. Callers that need a mutable copy
+	// (e.g., replication merge) must copy before appending: append([]string(nil), m.Owners...).
 	var sharedOwners []string
 	if coordID != "" {
 		sharedOwners = []string{coordID}
@@ -1791,15 +1797,6 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 
 	// Phase 3: After lock — pruning (filesystem walk, safe without lock).
 	s.pruneExpiredVersions(ctx, bucket, key)
-
-	// For large uploads, proactively return freed memory pages to the OS.
-	// debug.FreeOSMemory runs GC (clearing sync.Pool victim caches) then
-	// calls madvise MADV_DONTNEED on all non-live spans. This makes freed
-	// memory visible in top/ps RSS within seconds rather than waiting for
-	// the background scavenger. The goroutine is non-blocking.
-	if actualSize >= 100*1024*1024 {
-		go debug.FreeOSMemory()
-	}
 
 	return &objMeta, nil
 }
@@ -2762,6 +2759,15 @@ func (s *Store) DeleteUnreferencedChunks(ctx context.Context, chunkHashes []stri
 	}
 
 	// Build reference set once for all chunks (single filesystem walk).
+	//
+	// Known race: an in-progress upload that has written CAS chunks (dedup or new)
+	// but not yet committed its object metadata is invisible to this scan. If that
+	// upload shares a chunk hash with a chunk being purged (common with small files
+	// where zero-padded RS pieces share hashes), the chunk may be deleted here and
+	// the in-progress upload will later produce an unreadable object. The full GC
+	// path mitigates this via GCGracePeriod (only deletes chunks older than 10 min).
+	// TODO: apply the same GCGracePeriod protection here to close the race in
+	// production; requires exposing chunk modification time through the CAS API.
 	referencedChunks := s.buildChunkReferenceSet(ctx)
 
 	var totalFreed int64
