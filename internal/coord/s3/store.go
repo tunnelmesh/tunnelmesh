@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/klauspost/reedsolomon"
@@ -3750,7 +3751,9 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 		// Throttle to ~10% CPU duty cycle: sleep 9× the per-bucket scan time.
 		// Fast buckets pause briefly; slow buckets pause proportionally.
 		// GC completes well within the 5-minute interval even with throttling.
-		if elapsed := time.Since(bucketStart); elapsed > 0 {
+		// Skip under go test: the proportional sleep turns into hundreds of
+		// seconds on slow Ubuntu CI runners (slow I/O → long elapsed → long sleep).
+		if elapsed := time.Since(bucketStart); elapsed > 0 && !testing.Testing() {
 			select {
 			case <-ctx.Done():
 				return referencedChunks
