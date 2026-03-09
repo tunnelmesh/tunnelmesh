@@ -336,7 +336,7 @@ func (s *Server) handleS3PutObject(w http.ResponseWriter, r *http.Request, bucke
 	if r.Header.Get("X-TunnelMesh-Forwarded") != "" {
 		if bucketOwner := r.Header.Get("X-TunnelMesh-Bucket-Owner"); bucketOwner != "" {
 			if _, err := s.s3Store.HeadBucket(r.Context(), bucket); err != nil {
-				if createErr := s.s3Store.CreateBucket(r.Context(), bucket, bucketOwner, 2, nil); createErr != nil {
+				if createErr := s.s3Store.CreateBucket(r.Context(), bucket, bucketOwner, 2); createErr != nil {
 					if !errors.Is(createErr, s3.ErrBucketExists) {
 						log.Warn().Err(createErr).Str("bucket", bucket).Msg("auto-create bucket from forwarded header failed")
 					}

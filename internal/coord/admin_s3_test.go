@@ -124,7 +124,7 @@ func TestForceDeleteBucketsViaGC(t *testing.T) {
 
 	// Create a fresh fs+ bucket (simulates a young replicated share bucket on coord-2/3)
 	bucketName := s3.FileShareBucketPrefix + "accordion-share"
-	err := srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 2, nil)
+	err := srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 2)
 	require.NoError(t, err)
 
 	// Verify it exists

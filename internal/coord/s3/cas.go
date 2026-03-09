@@ -66,6 +66,15 @@ type CAS struct {
 	encoder     *zstd.Encoder
 	decoderPool sync.Pool
 
+	// compressBufPool and encryptBufPool pool the intermediate []byte buffers used
+	// in writeChunkKnown. Without pooling, every chunk write allocates two fresh
+	// ~200-300 KB slices (compressed and encrypted output) that are immediately
+	// discarded, generating hundreds of MB of short-lived allocations per large
+	// upload and triggering frequent GC cycles. Pooled slices grow to their
+	// high-water mark once and are reused across all future writes.
+	compressBufPool sync.Pool // pools []byte for zstd EncodeAll output
+	encryptBufPool  sync.Pool // pools []byte for ChaCha20 Seal output
+
 	// onSelfHeal is called when ReadChunk deletes a chunk due to a MAC failure
 	// (the chunk was encrypted with a different key). Callers can use this to
 	// update storage stats and unregister the chunk from the chunk registry.
@@ -114,11 +123,12 @@ func NewCAS(chunksDir string, masterKey [32]byte) (*CAS, error) {
 
 	// Initialize single shared encoder with bounded concurrency.
 	// See casEncoderConcurrency for the memory/throughput tradeoff rationale.
-	// WithLowerEncoderMem reduces the per-sub-encoder history buffer from
-	// ~32 MB (SpeedDefault without lowMem) to ~12–13 MB; with concurrency=2
-	// total zstd encoder memory stays at ~26 MB with no change in compression ratio.
+	// SpeedFastest (level 1) uses ~3-4 MB per sub-encoder vs ~12–13 MB at
+	// SpeedDefault with lowMem; with concurrency=2 total zstd encoder memory
+	// stays at ~6-8 MB. Compression ratio impact is negligible for the binary/
+	// encrypted content typical in this store.
 	enc, err := zstd.NewWriter(nil,
-		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithEncoderLevel(zstd.SpeedFastest),
 		zstd.WithEncoderConcurrency(casEncoderConcurrency),
 		zstd.WithLowerEncoderMem(true),
 	)
@@ -181,15 +191,28 @@ func (c *CAS) writeChunkKnown(ctx context.Context, data []byte, knownHash string
 		return 0, nil // dedup hit
 	}
 
-	// Compress
-	compressed, err := c.compress(data)
-	if err != nil {
-		return 0, fmt.Errorf("compress chunk: %w", err)
+	// Compress using a pooled output buffer to avoid per-chunk allocation.
+	// Pool stores *[]byte (pointer-like) to satisfy sync.Pool's SA6002 requirement
+	// and avoid the interface-boxing allocation that a raw []byte value would incur.
+	var compressBuf []byte
+	if v := c.compressBufPool.Get(); v != nil {
+		compressBuf = (*v.(*[]byte))[:0]
 	}
+	compressed := c.encoder.EncodeAll(data, compressBuf)
 
-	// Encrypt with convergent encryption (deterministic key/nonce from content hash)
-	encrypted, err := c.encrypt(compressed, knownHash)
+	// Encrypt with convergent encryption into a pooled output buffer.
+	var encryptBuf []byte
+	if v := c.encryptBufPool.Get(); v != nil {
+		encryptBuf = (*v.(*[]byte))[:0]
+	}
+	encrypted, err := c.encryptInto(encryptBuf, compressed, knownHash)
 	if err != nil {
+		c.compressBufPool.Put(&compressed)
+		// On error, encryptInto returns nil — put back encryptBuf (the pre-Seal
+		// pool entry), not encrypted (which is nil and would panic on deref).
+		if encryptBuf != nil {
+			c.encryptBufPool.Put(&encryptBuf)
+		}
 		return 0, fmt.Errorf("encrypt chunk: %w", err)
 	}
 
@@ -202,6 +225,8 @@ func (c *CAS) writeChunkKnown(ctx context.Context, data []byte, knownHash string
 	// file content is byte-identical either way.
 	tmpFile, err := os.CreateTemp(filepath.Dir(chunkPath), ".chunk-*.tmp")
 	if err != nil {
+		c.compressBufPool.Put(&compressed)
+		c.encryptBufPool.Put(&encrypted)
 		return 0, fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
@@ -209,14 +234,21 @@ func (c *CAS) writeChunkKnown(ctx context.Context, data []byte, knownHash string
 	if _, err := tmpFile.Write(encrypted); err != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
+		c.compressBufPool.Put(&compressed)
+		c.encryptBufPool.Put(&encrypted)
 		return 0, fmt.Errorf("write chunk: %w", err)
 	}
+
+	// Buffers no longer needed once Write returns — return them to the pool
+	// before the close/rename so a concurrent writer can reuse them immediately.
+	onDiskBytes = int64(len(encrypted))
+	c.compressBufPool.Put(&compressed)
+	c.encryptBufPool.Put(&encrypted)
+
 	if err := tmpFile.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return 0, fmt.Errorf("close temp file: %w", err)
 	}
-
-	onDiskBytes = int64(len(encrypted))
 
 	if err := os.Rename(tmpPath, chunkPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -440,7 +472,17 @@ func (c *CAS) deriveNonce(hash string) ([24]byte, error) {
 }
 
 // encrypt encrypts data using XChaCha20-Poly1305 with convergent encryption.
+// It allocates a new output buffer; callers that can supply a reusable buffer
+// should use encryptInto instead.
 func (c *CAS) encrypt(plaintext []byte, hash string) ([]byte, error) {
+	return c.encryptInto(nil, plaintext, hash)
+}
+
+// encryptInto encrypts plaintext using XChaCha20-Poly1305 with convergent
+// encryption, appending the result to dst (as aead.Seal does). Passing a
+// pre-allocated dst from a sync.Pool avoids per-chunk allocation in the hot
+// path; pass nil to allocate a fresh slice.
+func (c *CAS) encryptInto(dst, plaintext []byte, hash string) ([]byte, error) {
 	key, err := c.deriveChunkKey(hash)
 	if err != nil {
 		return nil, err
@@ -456,9 +498,7 @@ func (c *CAS) encrypt(plaintext []byte, hash string) ([]byte, error) {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}
 
-	// Encrypt in place with authentication tag
-	ciphertext := aead.Seal(nil, nonce[:], plaintext, nil)
-	return ciphertext, nil
+	return aead.Seal(dst, nonce[:], plaintext, nil), nil
 }
 
 // decrypt decrypts data using XChaCha20-Poly1305.
@@ -484,11 +524,6 @@ func (c *CAS) decrypt(ciphertext []byte, hash string) ([]byte, error) {
 	}
 
 	return plaintext, nil
-}
-
-// compress compresses data using zstd.
-func (c *CAS) compress(data []byte) ([]byte, error) {
-	return c.encoder.EncodeAll(data, nil), nil
 }
 
 // decompress decompresses zstd-compressed data.

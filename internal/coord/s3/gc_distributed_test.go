@@ -128,7 +128,7 @@ func TestGC_GracePeriod(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create bucket
-	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2, nil)
+	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2)
 	require.NoError(t, err)
 
 	// Upload file
@@ -152,7 +152,8 @@ func TestGC_GracePeriod(t *testing.T) {
 
 	// Chunk should NOT be deleted (within grace period)
 	assert.Equal(t, 0, stats.ChunksDeleted, "Should not delete recent chunks")
-	assert.Equal(t, 1, stats.ChunksSkippedGracePeriod, "Should skip chunks in grace period")
+	// With universal EC (k=4, m=2), each object produces k+m chunks; all are within grace period.
+	assert.GreaterOrEqual(t, stats.ChunksSkippedGracePeriod, 1, "Should skip chunks in grace period")
 
 	// Verify chunk still exists
 	_, err = store.cas.ReadChunk(ctx, chunkHash)
@@ -394,12 +395,7 @@ func TestGC_ErasureCodingKeepsReferencedShards(t *testing.T) {
 	err = store.InitCAS(ctx, encryptionKey)
 	require.NoError(t, err)
 
-	// Create bucket with erasure coding policy
-	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2, &ErasureCodingPolicy{
-		Enabled:      true,
-		DataShards:   6,
-		ParityShards: 3,
-	})
+	err = store.CreateBucket(ctx, "test-bucket", "test-user", 2)
 	require.NoError(t, err)
 
 	// Upload a file (will be erasure coded)
@@ -412,7 +408,7 @@ func TestGC_ErasureCodingKeepsReferencedShards(t *testing.T) {
 	// Verify we have both data chunk hashes and parity shard hashes
 	require.NotEmpty(t, meta.ErasureCoding.DataHashes, "should have data chunk hashes")
 	require.NotEmpty(t, meta.ErasureCoding.ParityHashes, "should have parity shard hashes")
-	require.Equal(t, 3, len(meta.ErasureCoding.ParityHashes), "should have 3 parity shards")
+	require.Equal(t, ecParityShards, len(meta.ErasureCoding.ParityHashes), "should have ecParityShards parity hashes")
 
 	// Age all chunks (set mod time to 2 hours ago - normally would be GC'd)
 	allChunks := append([]string{}, meta.ErasureCoding.DataHashes...)

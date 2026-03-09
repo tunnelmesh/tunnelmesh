@@ -59,7 +59,7 @@ func NewFileShareManager(store *Store, systemStore *SystemStore, authorizer *aut
 				if rf < 1 || rf > 3 {
 					rf = 2 // Default for shares persisted before RF was stored
 				}
-				if createErr := store.CreateBucket(context.Background(), bucketName, share.Owner, rf, nil); createErr == nil {
+				if createErr := store.CreateBucket(context.Background(), bucketName, share.Owner, rf); createErr == nil {
 					log.Info().Str("share", share.Name).Str("bucket", bucketName).Int("rf", rf).Msg("recreated missing bucket for share")
 				} else {
 					log.Warn().Err(createErr).Str("share", share.Name).Str("bucket", bucketName).Msg("failed to recreate missing bucket for share")
@@ -129,7 +129,7 @@ func (m *FileShareManager) Create(ctx context.Context, name, description, ownerI
 		bucketExists = true
 	} else {
 		// Create new bucket
-		if err := m.store.CreateBucket(ctx, bucketName, ownerID, replicationFactor, nil); err != nil {
+		if err := m.store.CreateBucket(ctx, bucketName, ownerID, replicationFactor); err != nil {
 			return nil, fmt.Errorf("create bucket: %w", err)
 		}
 	}
@@ -300,7 +300,7 @@ func (m *FileShareManager) EnsureBucketForShare(ctx context.Context, bucketName 
 		rf = 2
 	}
 
-	err := m.store.CreateBucket(ctx, bucketName, share.Owner, rf, nil)
+	err := m.store.CreateBucket(ctx, bucketName, share.Owner, rf)
 	if err != nil && errors.Is(err, ErrBucketExists) {
 		return nil // concurrent creation, fine
 	}

@@ -30,7 +30,7 @@ func TestNewSystemStoreExistingBucket(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 
 	// Pre-create the system bucket
-	require.NoError(t, store.CreateBucket(context.Background(), SystemBucket, "svc:coordinator", 3, nil))
+	require.NoError(t, store.CreateBucket(context.Background(), SystemBucket, "svc:coordinator", 3))
 
 	// Should not error when bucket exists
 	ss, err := NewSystemStore(store, "svc:coordinator")

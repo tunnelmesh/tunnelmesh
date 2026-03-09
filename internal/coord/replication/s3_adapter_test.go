@@ -31,7 +31,7 @@ func TestS3StoreAdapter_Get_Success(t *testing.T) {
 	}
 
 	// Put object into store
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestS3StoreAdapter_Get_NotFound(t *testing.T) {
 	testStore := createTestS3Store(t)
 	adapter := NewS3StoreAdapter(testStore)
 
-	err := testStore.CreateBucket(context.Background(), "test-bucket", "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), "test-bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestS3StoreAdapter_Get_NilMetadata(t *testing.T) {
 	testKey := "test-key"
 	testData := []byte("data")
 
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestS3StoreAdapter_Put_Success(t *testing.T) {
 		"x-amz-meta-type": "text",
 	}
 
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestS3StoreAdapter_Put_EmptyData(t *testing.T) {
 	testBucket := "test-bucket"
 	testKey := "empty-file"
 
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestS3StoreAdapter_List_Success(t *testing.T) {
 
 	testBucket := "test-bucket"
 
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestS3StoreAdapter_List_Empty(t *testing.T) {
 
 	testBucket := "test-bucket"
 
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestS3StoreAdapter_ListBuckets_Success(t *testing.T) {
 	// Create some buckets
 	buckets := []string{"bucket1", "bucket2", "bucket3"}
 	for _, bucket := range buckets {
-		err := testStore.CreateBucket(context.Background(), bucket, "alice", 2, nil)
+		err := testStore.CreateBucket(context.Background(), bucket, "alice", 2)
 		if err != nil {
 			t.Fatalf("failed to create bucket %s: %v", bucket, err)
 		}
@@ -365,7 +365,7 @@ func TestS3StoreAdapter_Put_WithComplexMetadata(t *testing.T) {
 		"x-amz-meta-empty": "",
 	}
 
-	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(context.Background(), testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestS3StoreAdapter_List_ExcludesDeletedObjects(t *testing.T) {
 	testBucket := "test-bucket"
 	ctx := context.Background()
 
-	err := testStore.CreateBucket(ctx, testBucket, "alice", 2, nil)
+	err := testStore.CreateBucket(ctx, testBucket, "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestS3StoreAdapter_ListBuckets_ExcludesDeletedBuckets(t *testing.T) {
 
 	// Create 3 buckets
 	for _, bucket := range []string{"bucket1", "bucket2", "bucket3"} {
-		err := testStore.CreateBucket(ctx, bucket, "alice", 2, nil)
+		err := testStore.CreateBucket(ctx, bucket, "alice", 2)
 		if err != nil {
 			t.Fatalf("failed to create bucket %s: %v", bucket, err)
 		}
@@ -499,7 +499,7 @@ func TestS3Adapter_GetVersionHistory(t *testing.T) {
 	ctx := context.Background()
 
 	// Create bucket and write multiple versions
-	err := store.CreateBucket(ctx, "test-bucket", "alice", 2, nil)
+	err := store.CreateBucket(ctx, "test-bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestS3Adapter_ImportVersionHistory(t *testing.T) {
 	adapter := NewS3StoreAdapter(store)
 	ctx := context.Background()
 
-	err := store.CreateBucket(ctx, "test-bucket", "alice", 2, nil)
+	err := store.CreateBucket(ctx, "test-bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestS3Adapter_GetAllObjectKeys(t *testing.T) {
 	adapter := NewS3StoreAdapter(store)
 	ctx := context.Background()
 
-	err := store.CreateBucket(ctx, "test-bucket", "alice", 2, nil)
+	err := store.CreateBucket(ctx, "test-bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestS3StoreAdapter_ReadChunkRaw_IsEncrypted(t *testing.T) {
 
 	plaintext := []byte("raw chunk adapter test")
 
-	err := store.CreateBucket(ctx, "bucket", "alice", 2, nil)
+	err := store.CreateBucket(ctx, "bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
@@ -663,7 +663,7 @@ func TestS3StoreAdapter_RawChunkRoundtrip(t *testing.T) {
 
 	plaintext := []byte("roundtrip via raw adapter")
 
-	err := storeA.CreateBucket(ctx, "bucket", "alice", 2, nil)
+	err := storeA.CreateBucket(ctx, "bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("create bucket A: %v", err)
 	}
@@ -677,27 +677,55 @@ func TestS3StoreAdapter_RawChunkRoundtrip(t *testing.T) {
 	if err != nil || len(metaA.Chunks) == 0 {
 		t.Fatalf("get meta: %v", err)
 	}
-	hash := metaA.Chunks[0]
 
-	// Read raw from A
-	raw, err := adapterA.ReadChunkRaw(ctx, hash)
-	if err != nil {
-		t.Fatalf("ReadChunkRaw: %v", err)
+	// Transfer ALL chunks raw from A to B (chunks are now RS pieces, not plaintext).
+	for _, hash := range metaA.Chunks {
+		raw, readErr := adapterA.ReadChunkRaw(ctx, hash)
+		if readErr != nil {
+			t.Fatalf("ReadChunkRaw(%s): %v", hash[:8], readErr)
+		}
+
+		writeErr := adapterB.WriteChunkDirectRaw(ctx, hash, raw)
+		if writeErr != nil {
+			t.Fatalf("WriteChunkDirectRaw(%s): %v", hash[:8], writeErr)
+		}
+
+		// Verify the chunk round-tripped: ReadChunk on B should return the same
+		// bytes as ReadChunk on A (both decrypt the same RS piece data).
+		gotA, errA := storeA.ReadChunk(ctx, hash)
+		gotB, errB := storeB.ReadChunk(ctx, hash)
+		if errA != nil || errB != nil {
+			t.Fatalf("ReadChunk: A=%v B=%v", errA, errB)
+		}
+		if string(gotA) != string(gotB) {
+			t.Errorf("chunk %s: A and B data differ after raw transfer", hash[:8])
+		}
 	}
 
-	// Write raw to B
-	err = adapterB.WriteChunkDirectRaw(ctx, hash, raw)
-	if err != nil {
-		t.Fatalf("WriteChunkDirectRaw: %v", err)
+	// Import the metadata into B and verify the full object can be read.
+	if err := storeB.CreateBucket(ctx, "bucket", "alice", 2); err != nil {
+		t.Fatalf("create bucket B: %v", err)
+	}
+	importJSON, marshalErr := json.Marshal(metaA)
+	if marshalErr != nil {
+		t.Fatalf("marshal meta: %v", marshalErr)
+	}
+	if _, importErr := storeB.ImportObjectMeta(ctx, "bucket", "file.txt", importJSON, "alice"); importErr != nil {
+		t.Fatalf("ImportObjectMeta on B: %v", importErr)
 	}
 
-	// ReadChunk (plaintext) on B must match original
-	got, err := storeB.ReadChunk(ctx, hash)
+	reader, _, err := storeB.GetObject(ctx, "bucket", "file.txt")
 	if err != nil {
-		t.Fatalf("ReadChunk on B: %v", err)
+		t.Fatalf("GetObject on B: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll on B: %v", err)
 	}
 	if string(got) != string(plaintext) {
-		t.Errorf("expected %q, got %q", plaintext, got)
+		t.Errorf("expected %q after full object roundtrip on B, got %q", plaintext, got)
 	}
 }
 
@@ -706,13 +734,7 @@ func TestS3StoreAdapter_GetObjectMetaJSON_IncludesErasureCodingFields(t *testing
 	adapter := NewS3StoreAdapter(store)
 	ctx := context.Background()
 
-	ecPolicy := &s3.ErasureCodingPolicy{
-		Enabled:      true,
-		DataShards:   2,
-		ParityShards: 1,
-	}
-
-	err := store.CreateBucket(ctx, "ec-bucket", "alice", 2, ecPolicy)
+	err := store.CreateBucket(ctx, "ec-bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
@@ -754,7 +776,7 @@ func TestS3StoreAdapter_GetObjectMetaJSON_PreservesAllFields(t *testing.T) {
 	adapter := NewS3StoreAdapter(store)
 	ctx := context.Background()
 
-	err := store.CreateBucket(ctx, "bucket", "alice", 2, nil)
+	err := store.CreateBucket(ctx, "bucket", "alice", 2)
 	if err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}

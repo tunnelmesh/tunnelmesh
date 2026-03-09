@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/md5"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/klauspost/reedsolomon"
 	"github.com/rs/zerolog"
 )
 
@@ -35,10 +37,22 @@ import (
 // For large file uploads or high-latency networks: Consider 1 hour or more
 const GCGracePeriod = 10 * time.Minute
 
-// MaxErasureCodingFileSize is the maximum file size for erasure coding (Phase 1).
-// Files larger than this will use standard replication.
-// Streaming encoder (Phase 6) will remove this limit.
-const MaxErasureCodingFileSize = 100 * 1024 * 1024 // 100 MB
+// ecDataShards is the number of data shards for the universal RS(4,2) encoder.
+const ecDataShards = 4
+
+// ecParityShards is the number of parity shards for the universal RS(4,2) encoder.
+const ecParityShards = 2
+
+// ecStreamBlock is the RS stripe size: data read per iteration of the streaming
+// write loop. Must equal ecDataShards * ecPieceSize.
+const ecStreamBlock = 4 * 1024 * 1024 // 4 MB
+
+// ecPieceSize is the size of each shard piece within one RS stripe.
+// A piece is stored as a single fixed-size CAS chunk (no CDC).
+const ecPieceSize = ecStreamBlock / ecDataShards // 1 MB
+
+// Compile-time assertion: ecStreamBlock must equal ecDataShards * ecPieceSize.
+var _ [1]struct{} = [ecStreamBlock / (ecDataShards * ecPieceSize)]struct{}{}
 
 // contextCheckInterval is how often to check for context cancellation during
 // chunk fetching loops (~400KB at average chunk size of 4KB).
@@ -71,29 +85,20 @@ func removeWithRetry(path string) error {
 	return err
 }
 
-// ErasureCodingPolicy defines the erasure coding configuration for a bucket.
-type ErasureCodingPolicy struct {
-	Enabled      bool `json:"enabled"`       // Whether erasure coding is enabled for new objects
-	DataShards   int  `json:"data_shards"`   // k: number of data shards (must be >= 1)
-	ParityShards int  `json:"parity_shards"` // m: number of parity shards (must be >= 1)
-}
-
 // BucketMeta contains bucket metadata.
 type BucketMeta struct {
-	Name              string               `json:"name"`
-	CreatedAt         time.Time            `json:"created_at"`
-	Owner             string               `json:"owner"`                    // User ID who created the bucket
-	SizeBytes         int64                `json:"size_bytes"`               // Total size of live objects (updated incrementally)
-	ReplicationFactor int                  `json:"replication_factor"`       // Number of replicas (1-3)
-	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"` // Erasure coding policy for new objects
-	QuotaBytes        int64                `json:"quota_bytes,omitempty"`    // Per-bucket quota in bytes; 0 = unlimited
+	Name              string    `json:"name"`
+	CreatedAt         time.Time `json:"created_at"`
+	Owner             string    `json:"owner"`                 // User ID who created the bucket
+	SizeBytes         int64     `json:"size_bytes"`            // Total size of live objects (updated incrementally)
+	ReplicationFactor int       `json:"replication_factor"`    // Number of replicas (1-3)
+	QuotaBytes        int64     `json:"quota_bytes,omitempty"` // Per-bucket quota in bytes; 0 = unlimited
 }
 
 // BucketMetadataUpdate contains mutable bucket metadata fields (admin-only).
 type BucketMetadataUpdate struct {
-	ReplicationFactor *int                 `json:"replication_factor,omitempty"` // Update replication factor (1-3)
-	ErasureCoding     *ErasureCodingPolicy `json:"erasure_coding,omitempty"`     // Update erasure coding policy
-	QuotaBytes        *int64               `json:"quota_bytes,omitempty"`        // Update per-bucket quota; nil = no change, 0 = remove limit
+	ReplicationFactor *int   `json:"replication_factor,omitempty"` // Update replication factor (1-3)
+	QuotaBytes        *int64 `json:"quota_bytes,omitempty"`        // Update per-bucket quota; nil = no change, 0 = remove limit
 }
 
 // ChunkMetadata contains per-chunk metadata for distributed replication.
@@ -111,14 +116,26 @@ type ChunkMetadata struct {
 	ParentFileID   string            `json:"parent_file_id,omitempty"`  // Link to parent file VersionID
 }
 
+// ecShardRecord is a lightweight record accumulated during the EC streaming loop.
+// Using this flat struct instead of *ChunkMetadata in the hot path reduces
+// per-iteration allocation from ~450 bytes to ~64 bytes. The full ChunkMetadata
+// map is built once after the loop from these records.
+type ecShardRecord struct {
+	hash      string
+	onDisk    int64
+	shardType string
+	shardIdx  int
+	blockIdx  int
+}
+
 // ErasureCodingInfo contains erasure coding metadata for a specific object version.
 type ErasureCodingInfo struct {
-	Enabled      bool     `json:"enabled"`                 // Whether this object uses erasure coding
-	DataShards   int      `json:"data_shards"`             // k: number of data shards
-	ParityShards int      `json:"parity_shards"`           // m: number of parity shards
-	ShardSize    int64    `json:"shard_size"`              // Bytes per shard (before padding)
-	DataHashes   []string `json:"data_hashes,omitempty"`   // Original CDC chunk hashes (data shards)
-	ParityHashes []string `json:"parity_hashes,omitempty"` // Parity shard hashes (parity-*)
+	Enabled         bool     `json:"enabled"`                 // Whether this object uses erasure coding
+	DataShards      int      `json:"data_shards"`             // k: number of data shards
+	ParityShards    int      `json:"parity_shards"`           // m: number of parity shards
+	StreamBlockSize int64    `json:"stream_block_size"`       // RS stripe size in bytes (DataShards * piece_size)
+	DataHashes      []string `json:"data_hashes,omitempty"`   // Piece hashes for data shards, shard-major order
+	ParityHashes    []string `json:"parity_hashes,omitempty"` // Piece hashes for parity shards, shard-major order
 }
 
 // ObjectMeta contains object metadata.
@@ -223,18 +240,17 @@ type Store struct {
 	versionRetentionDays     int                      // Days to retain object versions (0 = forever)
 	maxVersionsPerObject     int                      // Max versions to keep per object (0 = unlimited)
 	versionRetentionPolicy   VersionRetentionPolicy
-	// uploadSem caps concurrent non-EC PutObject calls. Under the 400 MiB
-	// GOMEMLIMIT, a single large CDC upload binds ~4–8 MB of transient heap
-	// (one chunk at ~2–4 MB + zstd/crypto overhead). 3 slots fit comfortably.
+	// uploadSem caps concurrent PutObject calls. Each streaming EC upload uses
+	// ~10 MB peak heap (4 MB blockBuf + 2 MB parity bufs). 3 slots = ~30 MB,
+	// well within GOMEMLIMIT. Bounds concurrent CAS write pressure too.
 	uploadSem chan struct{}
-	// erasureCodingSemaphore serializes EC uploads. Each EC operation reads the
-	// entire file into memory (io.ReadAll, store.go:1379) then builds k+m shards
-	// via EncodeFile, peaking at ~(1 + m/k + 1) × fileSize ≈ 280 MB for a 100 MB
-	// file with RS(4,2). Capacity=1 keeps peak heap under ~400 MB combined with
-	// uploadSem. EC is I/O-bound; serialization doesn't hurt real throughput.
-	erasureCodingSemaphore chan struct{}
-	bgWg                   sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu                     sync.RWMutex
+	// ecEncoder is the shared RS(4,2) encoder. Initialized once in NewStore() with
+	// WithAutoGoroutines so Encode() uses 2×GOMAXPROCS goroutines instead of ~96.
+	// Safe for concurrent use: Encode() reads the immutable matrix and operates
+	// only on caller-provided shard slices (no shared mutable state).
+	ecEncoder reedsolomon.Encoder
+	bgWg      sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	mu        sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -255,12 +271,19 @@ func NewStore(dataDir string, quota *QuotaManager) (*Store, error) {
 		return nil, fmt.Errorf("create buckets dir: %w", err)
 	}
 
+	enc, err := reedsolomon.New(ecDataShards, ecParityShards,
+		reedsolomon.WithAutoGoroutines(ecPieceSize),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create RS encoder: %w", err)
+	}
+
 	store := &Store{
-		dataDir:                dataDir,
-		quota:                  quota,
-		logger:                 zerolog.Nop(),          // Default to no-op logger
-		erasureCodingSemaphore: make(chan struct{}, 1), // Serialize EC: each op peaks ~280 MB (see comment above)
-		uploadSem:              make(chan struct{}, 3), // Allow 3 concurrent CDC uploads
+		dataDir:   dataDir,
+		quota:     quota,
+		logger:    zerolog.Nop(),          // Default to no-op logger
+		uploadSem: make(chan struct{}, 3), // Allow 3 concurrent EC uploads (~10 MB each)
+		ecEncoder: enc,
 	}
 
 	// Calculate initial quota usage from existing objects
@@ -521,26 +544,58 @@ func (s *Store) QuotaStats() *QuotaStats {
 	return &stats
 }
 
-// calculateQuotaUsage scans all chunks and updates quota tracking.
-// Uses s.dataDir (immutable after construction) for the filesystem walk,
-// and QuotaManager.SetUsed has its own internal mutex.
+// calculateQuotaUsage scans all object metadata and rebuilds per-bucket quota
+// tracking from logical file sizes. This keeps quota consistent with runtime
+// tracking (which also uses logical sizes) and avoids the double-counting that
+// occurs when physical chunk sizes are mixed with logical bucket sizes.
+//
+// Called at startup (after CAS init) and after GC to reconcile quota.
+// Uses s.dataDir (immutable after construction); QuotaManager.SetUsed has its
+// own internal mutex so no Store lock is needed.
 func (s *Store) calculateQuotaUsage() error {
-	if s.cas == nil {
+	if s.quota == nil {
 		return nil
 	}
 
-	// s.dataDir is immutable after init — no lock needed for the walk.
-	chunksDir := filepath.Join(s.dataDir, "chunks")
-	var totalSize int64
-	_ = filepath.Walk(chunksDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	bucketsDir := filepath.Join(s.dataDir, "buckets")
+	bucketEntries, err := os.ReadDir(bucketsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
 			return nil
 		}
-		totalSize += info.Size()
-		return nil
-	})
-	if totalSize > 0 {
-		s.quota.SetUsed("_chunks", totalSize)
+		return fmt.Errorf("read buckets dir: %w", err)
+	}
+
+	for _, bucketEntry := range bucketEntries {
+		if !bucketEntry.IsDir() {
+			continue
+		}
+		bucketName := bucketEntry.Name()
+		// System bucket is exempt from quota (listing indexes, stats, etc. are
+		// infrastructure overhead, not user-quota-tracked data).
+		if bucketName == SystemBucket {
+			continue
+		}
+
+		// Walk the "meta" subdirectory which holds active (non-recycled) objects.
+		metaDir := filepath.Join(bucketsDir, bucketName, "meta")
+		var bucketLogicalSize int64
+		_ = filepath.Walk(metaDir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil || info.IsDir() || !strings.HasSuffix(path, ".json") {
+				return nil
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			var meta ObjectMeta
+			if jsonErr := json.Unmarshal(data, &meta); jsonErr != nil {
+				return nil
+			}
+			bucketLogicalSize += meta.Size
+			return nil
+		})
+		s.quota.SetUsed(bucketName, bucketLogicalSize)
 	}
 	return nil
 }
@@ -598,7 +653,7 @@ func (s *Store) objectMetaPath(bucket, key string) string {
 }
 
 // CreateBucket creates a new bucket with specified replication factor.
-func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicationFactor int, erasureCoding *ErasureCodingPolicy) error {
+func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicationFactor int) error {
 	// Validate bucket name (defense in depth)
 	if err := validateName(bucket); err != nil {
 		return fmt.Errorf("invalid bucket name: %w", err)
@@ -607,13 +662,6 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 	// Validate replication factor
 	if replicationFactor < 1 || replicationFactor > 3 {
 		return fmt.Errorf("replication factor must be 1-3, got %d", replicationFactor)
-	}
-
-	// Validate erasure coding policy if provided
-	if erasureCoding != nil {
-		if err := validateErasureCodingPolicy(erasureCoding); err != nil {
-			return fmt.Errorf("invalid erasure coding policy: %w", err)
-		}
 	}
 
 	s.mu.Lock()
@@ -637,7 +685,6 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 		CreatedAt:         time.Now().UTC(),
 		Owner:             owner,
 		ReplicationFactor: replicationFactor,
-		ErasureCoding:     erasureCoding,
 	}
 
 	metaPath := s.bucketMetaPath(bucket)
@@ -673,14 +720,6 @@ func (s *Store) UpdateBucketMetadata(ctx context.Context, bucket string, updates
 		meta.ReplicationFactor = rf
 	}
 
-	// Validate and apply erasure coding policy update
-	if updates.ErasureCoding != nil {
-		if err := validateErasureCodingPolicy(updates.ErasureCoding); err != nil {
-			return fmt.Errorf("invalid erasure coding policy: %w", err)
-		}
-		meta.ErasureCoding = updates.ErasureCoding
-	}
-
 	// Validate and apply per-bucket quota update
 	if updates.QuotaBytes != nil {
 		if *updates.QuotaBytes < 0 {
@@ -691,22 +730,6 @@ func (s *Store) UpdateBucketMetadata(ctx context.Context, bucket string, updates
 
 	// Save updated metadata
 	return s.writeBucketMeta(bucket, meta)
-}
-
-// validateErasureCodingPolicy validates erasure coding policy parameters.
-func validateErasureCodingPolicy(policy *ErasureCodingPolicy) error {
-	// Always validate k and m values, even if disabled (prevents surprises when enabling later)
-	if policy.DataShards < 1 {
-		return fmt.Errorf("data shards (k) must be >= 1, got %d", policy.DataShards)
-	}
-	if policy.ParityShards < 1 {
-		return fmt.Errorf("parity shards (m) must be >= 1, got %d", policy.ParityShards)
-	}
-	if policy.DataShards+policy.ParityShards > 256 {
-		return fmt.Errorf("total shards (k+m) must be <= 256, got %d", policy.DataShards+policy.ParityShards)
-	}
-
-	return nil
 }
 
 // DeleteBucket removes an empty bucket.
@@ -1114,16 +1137,36 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 	k := ec.DataShards
 	m := ec.ParityShards
 
-	// Phase 1: Fetch all CDC chunks and reassemble into data shards
-	// ec.DataHashes contains CDC chunk hashes from all data shards.
-	// We group them by shard index using ChunkMetadata, then sort
-	// by ChunkSequence to preserve correct ordering within each shard.
-	type chunkEntry struct {
-		data     []byte
-		sequence int
+	// Phase 1: Fetch all chunks and reassemble into data shards.
+	//
+	// DataHashes is shard-major: [shard0_b0, shard0_b1, ..., shard1_b0, ...]
+	// so position i in DataHashes unambiguously encodes:
+	//   numBlocks = len(DataHashes) / k
+	//   shardIdx  = i / numBlocks
+	//   blockIdx  = i % numBlocks
+	//
+	// We use position-derived shard routing instead of ChunkMetadata.ShardIndex
+	// to correctly handle the case where multiple shards have identical content
+	// (and therefore identical hashes) — which is common when small files produce
+	// mostly-zero-padded RS pieces.
+	numDataBlocks := 1
+	if k > 0 && len(ec.DataHashes) > 0 {
+		if len(ec.DataHashes)%k != 0 {
+			return nil, nil, fmt.Errorf("corrupt EC metadata: DataHashes length %d not divisible by k=%d", len(ec.DataHashes), k)
+		}
+		numDataBlocks = len(ec.DataHashes) / k
+		if numDataBlocks < 1 {
+			numDataBlocks = 1
+		}
 	}
-	dataShardChunks := make(map[int][]chunkEntry) // shardIndex -> []chunkEntry
-	incompleteShard := make(map[int]bool)         // shards with any missing chunk
+
+	// shardData[i] holds assembled piece bytes for data shard i, in block order.
+	dataShardPieces := make([][][]byte, k) // [shardIdx][blockIdx] = piece bytes
+	for i := range dataShardPieces {
+		dataShardPieces[i] = make([][]byte, numDataBlocks)
+	}
+	incompleteShard := make(map[int]bool) // shards with any missing chunk
+
 	for i, chunkHash := range ec.DataHashes {
 		// Check for cancellation periodically
 		if i%contextCheckInterval == 0 {
@@ -1134,58 +1177,44 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 			}
 		}
 
-		chunkMeta, exists := meta.ChunkMetadata[chunkHash]
-		if !exists {
-			return nil, nil, fmt.Errorf("missing chunk metadata for data chunk %s (versionID=%s)", truncHash(chunkHash), meta.VersionID)
-		}
-		if chunkMeta.ShardType != "data" {
-			return nil, nil, fmt.Errorf("expected data shard chunk, got %s for chunk %s (versionID=%s)", chunkMeta.ShardType, truncHash(chunkHash), meta.VersionID)
-		}
+		// Derive shard and block from position in DataHashes (shard-major order).
+		shardIdx := i / numDataBlocks
+		blockIdx := i % numDataBlocks
 
-		// Fetch chunk from CAS (or remote coordinator)
+		// Fetch chunk from CAS (or remote coordinator).
 		chunk, err := s.fetchChunkDistributed(ctx, chunkHash)
 		if err != nil {
-			// Chunk missing locally and remotely - entire shard will need reconstruction
-			s.logger.Debug().Str("hash", truncHash(chunkHash)).Int("shard", chunkMeta.ShardIndex).Msg("data chunk unavailable")
-			incompleteShard[chunkMeta.ShardIndex] = true
+			s.logger.Debug().Str("hash", truncHash(chunkHash)).Int("shard", shardIdx).Int("block", blockIdx).Msg("data chunk unavailable")
+			incompleteShard[shardIdx] = true
 			continue
 		}
-
-		dataShardChunks[chunkMeta.ShardIndex] = append(dataShardChunks[chunkMeta.ShardIndex], chunkEntry{
-			data:     chunk,
-			sequence: chunkMeta.ChunkSequence,
-		})
+		dataShardPieces[shardIdx][blockIdx] = chunk
 	}
 
-	// Reassemble chunks into complete data shards
+	// Assemble each data shard by concatenating its pieces in block order.
 	dataShards := make([][]byte, k)
 	for shardIdx := 0; shardIdx < k; shardIdx++ {
-		// If any chunk was missing for this shard, mark entire shard as nil
 		if incompleteShard[shardIdx] {
 			dataShards[shardIdx] = nil
 			continue
 		}
-
-		entries := dataShardChunks[shardIdx]
-		if len(entries) == 0 {
-			// No chunks found for this shard at all
+		// Verify all blocks are present.
+		allPresent := true
+		totalSize := 0
+		for _, piece := range dataShardPieces[shardIdx] {
+			if piece == nil {
+				allPresent = false
+				break
+			}
+			totalSize += len(piece)
+		}
+		if !allPresent || totalSize == 0 {
 			dataShards[shardIdx] = nil
 			continue
 		}
-
-		// Sort chunks by sequence to ensure correct ordering within shard
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].sequence < entries[j].sequence
-		})
-
-		// Pre-allocate and concatenate chunks to rebuild shard
-		totalSize := 0
-		for _, entry := range entries {
-			totalSize += len(entry.data)
-		}
 		shardData := make([]byte, 0, totalSize)
-		for _, entry := range entries {
-			shardData = append(shardData, entry.data...)
+		for _, piece := range dataShardPieces[shardIdx] {
+			shardData = append(shardData, piece...)
 		}
 		dataShards[shardIdx] = shardData
 	}
@@ -1200,18 +1229,51 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 
 	// Phase 2: Fast path - all data shards available, skip parity fetch entirely
 	if availableDataShards == k {
-		// No reconstruction needed - reassemble file from data shards
-		// Pre-allocate to avoid multiple reallocations
-		totalShardSize := int64(0)
-		for i := 0; i < k; i++ {
-			totalShardSize += int64(len(dataShards[i]))
+		// No reconstruction needed — reassemble original bytes from data shards.
+		// The write path splits each RS stripe (ecStreamBlock) into k equal pieces
+		// and appends block b's piece to shard[i]. To recover the original byte
+		// stream we must interleave pieces in block order:
+		//   for each block b: concat shard[0][b], shard[1][b], ..., shard[k-1][b]
+		// Concatenating entire shards (shard-major) produces the wrong order for
+		// files > ecPieceSize (1 MB).
+		pieceSize := int64(0)
+		if numDataBlocks > 0 && k > 0 && len(dataShards[0]) > 0 {
+			pieceSize = int64(len(dataShards[0])) / int64(numDataBlocks)
 		}
-		fileData := make([]byte, 0, totalShardSize)
-		for i := 0; i < k; i++ {
-			fileData = append(fileData, dataShards[i]...)
+		var fileData []byte
+		if pieceSize > 0 && numDataBlocks > 1 {
+			// Multi-block: interleave pieces from each shard.
+			// All data shards must have exactly numDataBlocks*pieceSize bytes;
+			// CAS hash validation guards against corruption, but a length mismatch
+			// would cause silent truncation without this explicit check.
+			for i := 0; i < k; i++ {
+				expected := int64(numDataBlocks) * pieceSize
+				if int64(len(dataShards[i])) != expected {
+					return nil, nil, fmt.Errorf("data shard %d length %d, expected %d (versionID=%s)",
+						i, len(dataShards[i]), expected, meta.VersionID)
+				}
+			}
+			fileData = make([]byte, 0, meta.Size)
+			for b := 0; b < numDataBlocks; b++ {
+				for i := 0; i < k; i++ {
+					start := int64(b) * pieceSize
+					fileData = append(fileData, dataShards[i][start:start+pieceSize]...)
+				}
+			}
+		} else {
+			// Single-block (common case for files <= ecStreamBlock = 4 MB):
+			// k pieces are already in order, concatenate directly.
+			totalShardSize := int64(0)
+			for i := 0; i < k; i++ {
+				totalShardSize += int64(len(dataShards[i]))
+			}
+			fileData = make([]byte, 0, totalShardSize)
+			for i := 0; i < k; i++ {
+				fileData = append(fileData, dataShards[i]...)
+			}
 		}
 
-		// Trim to original size (remove RS padding)
+		// Trim to original size (remove RS zero-padding from last block).
 		if int64(len(fileData)) < meta.Size {
 			return nil, nil, fmt.Errorf("reassembled data too small: got %d bytes, expected %d (versionID=%s)", len(fileData), meta.Size, meta.VersionID)
 		}
@@ -1228,11 +1290,25 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 	default:
 	}
 
-	// Parity shards are CDC-chunked (same as data shards), so we must group
-	// them by ShardIndex, sort by ChunkSequence, and concatenate — identical
-	// logic to Phase 1 for data shards.
-	parityShardChunks := make(map[int][]chunkEntry) // shardIndex -> []chunkEntry
+	// Parity shards: ParityHashes is also shard-major:
+	// [shard0_b0, shard0_b1, ..., shard1_b0, ...], so we derive shard/block
+	// from the position index — same approach as Phase 1 for data shards.
+	// This avoids the hash-collision bug where two parity shards with identical
+	// content (e.g. zero pads) would map to the same ChunkMetadata entry.
+	numParityBlocks := 1
+	if m > 0 && len(ec.ParityHashes) > 0 {
+		numParityBlocks = len(ec.ParityHashes) / m
+		if numParityBlocks < 1 {
+			numParityBlocks = 1
+		}
+	}
+
+	parityShardPieces := make([][][]byte, m) // [shardIdx][blockIdx] = piece bytes
+	for i := range parityShardPieces {
+		parityShardPieces[i] = make([][]byte, numParityBlocks)
+	}
 	incompleteParityShard := make(map[int]bool)
+
 	for j, parityHash := range ec.ParityHashes {
 		if j%contextCheckInterval == 0 {
 			select {
@@ -1242,30 +1318,17 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 			}
 		}
 
-		chunkMeta, exists := meta.ChunkMetadata[parityHash]
-		if !exists {
-			// Legacy object written before CDC-chunked parity: treat entire hash
-			// as a single chunk with shardIndex=j and sequence=0.
-			chunk, err := s.fetchChunkDistributed(ctx, parityHash)
-			if err != nil {
-				s.logger.Debug().Str("hash", truncHash(parityHash)).Int("shard", j).Msg("parity shard unavailable (legacy)")
-				incompleteParityShard[j] = true
-				continue
-			}
-			parityShardChunks[j] = append(parityShardChunks[j], chunkEntry{data: chunk, sequence: 0})
-			continue
-		}
+		// Derive shard and block from position in ParityHashes (shard-major order).
+		shardIdx := j / numParityBlocks
+		blockIdx := j % numParityBlocks
 
 		chunk, err := s.fetchChunkDistributed(ctx, parityHash)
 		if err != nil {
-			s.logger.Debug().Str("hash", truncHash(parityHash)).Int("shard", chunkMeta.ShardIndex).Msg("parity chunk unavailable")
-			incompleteParityShard[chunkMeta.ShardIndex] = true
+			s.logger.Debug().Str("hash", truncHash(parityHash)).Int("shard", shardIdx).Int("block", blockIdx).Msg("parity chunk unavailable")
+			incompleteParityShard[shardIdx] = true
 			continue
 		}
-		parityShardChunks[chunkMeta.ShardIndex] = append(parityShardChunks[chunkMeta.ShardIndex], chunkEntry{
-			data:     chunk,
-			sequence: chunkMeta.ChunkSequence,
-		})
+		parityShardPieces[shardIdx][blockIdx] = chunk
 	}
 
 	parityShards := make([][]byte, m)
@@ -1274,21 +1337,22 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 			parityShards[shardIdx] = nil
 			continue
 		}
-		entries := parityShardChunks[shardIdx]
-		if len(entries) == 0 {
+		allPresent := true
+		totalSize := 0
+		for _, piece := range parityShardPieces[shardIdx] {
+			if piece == nil {
+				allPresent = false
+				break
+			}
+			totalSize += len(piece)
+		}
+		if !allPresent || totalSize == 0 {
 			parityShards[shardIdx] = nil
 			continue
 		}
-		sort.Slice(entries, func(a, b int) bool {
-			return entries[a].sequence < entries[b].sequence
-		})
-		totalSize := 0
-		for _, entry := range entries {
-			totalSize += len(entry.data)
-		}
 		shardData := make([]byte, 0, totalSize)
-		for _, entry := range entries {
-			shardData = append(shardData, entry.data...)
+		for _, piece := range parityShardPieces[shardIdx] {
+			shardData = append(shardData, piece...)
 		}
 		parityShards[shardIdx] = shardData
 	}
@@ -1331,16 +1395,16 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 	default:
 	}
 
-	// Reconstruct using Reed-Solomon
-	// NOTE: DecodeFile modifies the shards slice in-place
-	reconstructedData, err := DecodeFile(allShards, k, m, meta.Size)
+	// Reconstruct using Reed-Solomon (block-wise streaming decoder).
+	// ReconstructBlockwise uses ec.StreamBlockSize to know how large each RS stripe is.
+	reconstructedData, err := ReconstructBlockwise(allShards, k, m, ec.StreamBlockSize, meta.Size)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to reconstruct file (versionID=%s): %w", meta.VersionID, err)
 	}
 
 	// Phase 5: Cache reconstructed data shards (best-effort, async)
 	// This improves future read performance by storing reconstructed shards locally.
-	// Deep copy reconstructed shards since DecodeFile modifies allShards in-place
+	// Deep copy reconstructed shards since ReconstructBlockwise may modify allShards in-place
 	// and the caller may still be reading reconstructedData.
 	cachedK := k
 	cachedShards := make([][]byte, k)
@@ -1399,270 +1463,238 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 	return io.NopCloser(bytes.NewReader(reconstructedData)), meta, nil
 }
 
-// putObjectWithErasureCoding stores an object using Reed-Solomon erasure coding.
-// writeShardChunks CDC-chunks a single erasure-coding shard and writes all chunks
-// to the CAS. Both data and parity shards use this path so chunks are uniformly
-// small (~2 MB max) for bounded replication-pipeline memory use.
+// putObjectWithErasureCoding stores an object using the streaming RS(4,2)
+// encoder. Each 4 MB RS stripe is split into 4 data pieces of 1 MB and 2
+// parity pieces of 1 MB, written directly to CAS as fixed-size chunks.
 //
-// Returns the chunk hashes (in CDC order) and per-chunk metadata. The caller
-// appends hashes to its type-specific list (dataHashes / parityHashes) and
-// merges the metadata map into the object's ChunkMetadata.
-func (s *Store) writeShardChunks(ctx context.Context, shard []byte, shardIdx, totalShards int, shardType, versionID, coordID string, replicationFactor int, now time.Time) ([]string, map[string]*ChunkMetadata, error) {
-	chunker := NewStreamingChunker(bytes.NewReader(shard))
-	var hashes []string
-	metadata := make(map[string]*ChunkMetadata)
-	chunkSeq := 0
-
-	versionVector := make(map[string]uint64)
-	var owners []string
-	if coordID != "" {
-		versionVector[coordID] = 1
-		owners = []string{coordID}
-	}
-
-	for {
-		chunk, chunkHash, err := chunker.NextChunk()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("chunk %s shard %d/%d (versionID=%s): %w", shardType, shardIdx, totalShards, versionID, err)
-		}
-
-		onDiskBytes, err := s.cas.writeChunkKnown(ctx, chunk, chunkHash)
-		if err != nil {
-			return nil, nil, fmt.Errorf("write %s shard %d/%d chunk %s (versionID=%s): %w", shardType, shardIdx, totalShards, chunkHash[:8], versionID, err)
-		}
-
-		var chunkOnDiskSize int64
-		if onDiskBytes > 0 {
-			s.statsChunkCount.Add(1)
-			s.statsChunkBytes.Add(onDiskBytes)
-			chunkOnDiskSize = onDiskBytes
-		} else {
-			if sz, szErr := s.cas.ChunkSize(ctx, chunkHash); szErr == nil {
-				chunkOnDiskSize = sz
-			}
-		}
-
-		if s.chunkRegistry != nil {
-			if err := s.chunkRegistry.RegisterShardChunk(chunkHash, int64(len(chunk)), versionID, shardType, shardIdx, replicationFactor); err != nil {
-				if os.Getenv("DEBUG") != "" || os.Getenv("TUNNELMESH_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "chunk registry warning: failed to register %s shard chunk %s: %v\n", shardType, chunkHash[:8], err)
-				}
-			}
-		}
-
-		// Each chunk gets its own copy of the version vector/owners maps to
-		// ensure they are independently mutable after this function returns.
-		chunkVV := make(map[string]uint64, len(versionVector))
-		for k, v := range versionVector {
-			chunkVV[k] = v
-		}
-		chunkOwners := append([]string(nil), owners...)
-
-		metadata[chunkHash] = &ChunkMetadata{
-			Hash:           chunkHash,
-			Size:           int64(len(chunk)),
-			CompressedSize: chunkOnDiskSize,
-			VersionVector:  chunkVV,
-			Owners:         chunkOwners,
-			FirstSeen:      now,
-			LastModified:   now,
-			ShardType:      shardType,
-			ShardIndex:     shardIdx,
-			ChunkSequence:  chunkSeq,
-			ParentFileID:   versionID,
-		}
-
-		hashes = append(hashes, chunkHash)
-		chunkSeq++
-	}
-
-	return hashes, metadata, nil
-}
-
-// The entire file is buffered in memory, encoded into data+parity shards, then stored.
-// Data shards are CDC chunked (preserves deduplication), parity shards are stored directly.
+// Memory: ~10 MB constant (4 MB blockBuf + 2 × 1 MB parity + overhead)
+// regardless of file size. This makes EC viable for arbitrarily large files.
 //
-// NOTE: This is Phase 1 implementation with full buffering. Streaming encoder will be added in Phase 6.
+// Dedup guarantee: identical files produce identical RS pieces → identical
+// SHA-256 hashes → zero extra CAS storage on re-upload.
 //
-//nolint:gocyclo // Complexity will be reduced when streaming encoder is added (Phase 6)
+// Lock strategy: the global lock is NOT held during streaming/encode/CAS-write.
+// It is acquired only for brief metadata operations at the end.
+//
+//nolint:gocyclo
 func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key string, reader io.Reader, size int64, contentType string, metadata map[string]string, bucketMeta *BucketMeta) (*ObjectMeta, error) {
-	// Lock strategy: global lock is NOT held during the expensive read/encode/CAS-write
-	// phases. It is acquired only for the brief metadata operations at the end.
-
-	k := bucketMeta.ErasureCoding.DataShards
-	m := bucketMeta.ErasureCoding.ParityShards
-
-	if k < 1 || k > 32 || m < 1 || m > 32 || k+m > 64 {
-		return nil, fmt.Errorf("invalid erasure coding config: k=%d, m=%d (max 32 each, 64 total)", k, m)
-	}
-
-	// Spool the body to a temp file before acquiring the semaphore so the client's
-	// network upload finishes at full speed regardless of EC queue depth. Files are
-	// bounded by MaxErasureCodingFileSize (100 MB) so temp disk usage is capped.
-	spoolFile, err := os.CreateTemp("", "tunnelmesh-ec-*.tmp")
-	if err != nil {
-		return nil, fmt.Errorf("create ec spool: %w", err)
-	}
-	defer func() {
-		_ = spoolFile.Close()
-		_ = os.Remove(spoolFile.Name())
-	}()
-	if n, cpErr := io.Copy(spoolFile, io.LimitReader(reader, size)); cpErr != nil {
-		return nil, fmt.Errorf("spool upload: %w", cpErr)
-	} else if n != size {
-		return nil, fmt.Errorf("spool size mismatch: expected %d bytes, got %d", size, n)
-	}
-	if _, err = spoolFile.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek spool: %w", err)
-	}
-
-	// Acquire semaphore to limit concurrent erasure coding operations (memory safety).
-	// Body is already spooled above, so waiting here does not stall the client upload.
-	select {
-	case s.erasureCodingSemaphore <- struct{}{}:
-		defer func() { <-s.erasureCodingSemaphore }()
-	case <-ctx.Done():
-		return nil, fmt.Errorf("waiting for erasure coding slot: %w", ctx.Err())
-	}
-
 	metaPath := s.objectMetaPath(bucket, key)
 
-	// Phase 1: Read + encode + write chunks to CAS without holding the global lock.
-	// CAS writes are content-addressed and use atomic rename, safe for concurrent access.
+	// blockBuf is the 4 MB scratch buffer. Data pieces alias its sub-slices;
+	// no copy is needed before encoding (only parity pieces are written by Encode).
+	blockBuf := make([]byte, ecStreamBlock)
 
-	data, err := io.ReadAll(spoolFile)
-	if err != nil {
-		return nil, fmt.Errorf("read file data: %w", err)
+	// pieces holds the RS shard pieces for one block.
+	// Data pieces [0..ecDataShards-1] alias blockBuf.
+	// Parity pieces [ecDataShards..ecDataShards+ecParityShards-1] are
+	// independent allocations (Encode writes into them).
+	pieces := make([][]byte, ecDataShards+ecParityShards)
+	for i := 0; i < ecDataShards; i++ {
+		pieces[i] = blockBuf[i*ecPieceSize : (i+1)*ecPieceSize]
 	}
-	if int64(len(data)) != size {
-		return nil, fmt.Errorf("file size mismatch: expected %d bytes, got %d", size, len(data))
-	}
-
-	versionID := generateVersionID()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("context canceled before encoding: %w", ctx.Err())
-	default:
+	for i := ecDataShards; i < ecDataShards+ecParityShards; i++ {
+		pieces[i] = make([]byte, ecPieceSize)
 	}
 
-	dataShards, parityShards, err := EncodeFile(data, k, m)
-	if err != nil {
-		return nil, fmt.Errorf("encode file with erasure coding (k=%d,m=%d,size=%d): %w", k, m, size, err)
-	}
-
-	shardSize := int64(0)
-	if len(dataShards) > 0 && len(dataShards[0]) > 0 {
-		shardSize = int64(len(dataShards[0]))
-	}
+	// hashes[i] accumulates CAS chunk hashes for shard i, in block order.
+	hashes := make([][]string, ecDataShards+ecParityShards)
+	var shardRecords []ecShardRecord
+	var chunks []string
+	var actualSize int64
+	blockIdx := 0
 
 	now := time.Now().UTC()
 	coordID := s.coordinatorID
+	replicationFactor := bucketMeta.ReplicationFactor
+	versionID := generateVersionID()
 
 	fileVersionVector := make(map[string]uint64)
 	if coordID != "" {
 		fileVersionVector[coordID] = 1
 	}
 
-	var chunks []string
-	chunkMetadata := make(map[string]*ChunkMetadata)
-	var dataHashes []string
-	var parityHashes []string
+	// No rollback on failure: EC chunks are content-addressed. Multiple concurrent
+	// uploads of similar-content files produce identical CAS hashes (deduplication),
+	// so deleting a chunk on rollback could corrupt another upload that shares it.
+	// Orphaned chunks from failed uploads are cleaned by the next GC run.
 
-	// Cleanup on failure: remove all written chunks from CAS and registry
-	var success bool
-	defer func() {
-		if !success && len(chunks) > 0 {
-			for _, hash := range chunks {
-				if freed, err := s.cas.DeleteChunk(context.Background(), hash); err != nil {
-					s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to cleanup chunk during rollback")
-				} else if freed > 0 {
-					s.statsChunkCount.Add(-1)
-					s.statsChunkBytes.Add(-freed)
+	md5Hasher := md5.New()
+
+	// Streaming write loop: read ecStreamBlock at a time.
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("upload canceled: %w", ctx.Err())
+		default:
+		}
+
+		n, readErr := io.ReadFull(reader, blockBuf)
+		if n == 0 && errors.Is(readErr, io.EOF) {
+			// No data: either empty file (blockIdx==0) or exact-block-aligned end.
+			break
+		}
+		actualSize += int64(n)
+
+		// Zero-pad the last (partial) block so all pieces are ecPieceSize.
+		for j := n; j < ecStreamBlock; j++ {
+			blockBuf[j] = 0
+		}
+
+		// Data-piece aliases already point into blockBuf — no reassignment needed.
+		// RS-encode: fills parity pieces in-place.
+		if encErr := s.ecEncoder.Encode(pieces); encErr != nil {
+			return nil, fmt.Errorf("rs encode block %d: %w", blockIdx, encErr)
+		}
+
+		// Write each piece to CAS.
+		for i := 0; i < ecDataShards+ecParityShards; i++ {
+			shardType := "data"
+			shardIdx := i
+			if i >= ecDataShards {
+				shardType = "parity"
+				shardIdx = i - ecDataShards
+			}
+
+			h := sha256.Sum256(pieces[i])
+			chunkHash := hex.EncodeToString(h[:])
+
+			onDiskBytes, writeErr := s.cas.writeChunkKnown(ctx, pieces[i], chunkHash)
+			if writeErr != nil {
+				return nil, fmt.Errorf("write %s shard %d block %d: %w", shardType, shardIdx, blockIdx, writeErr)
+			}
+
+			var chunkOnDiskSize int64
+			if onDiskBytes > 0 {
+				s.statsChunkCount.Add(1)
+				s.statsChunkBytes.Add(onDiskBytes)
+				chunkOnDiskSize = onDiskBytes
+			} else {
+				if sz, szErr := s.cas.ChunkSize(ctx, chunkHash); szErr == nil {
+					chunkOnDiskSize = sz
 				}
-				if s.chunkRegistry != nil {
-					if err := s.chunkRegistry.UnregisterChunk(hash); err != nil {
-						s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to unregister chunk during rollback")
+			}
+
+			if s.chunkRegistry != nil {
+				if regErr := s.chunkRegistry.RegisterShardChunk(chunkHash, ecPieceSize, versionID, shardType, shardIdx, replicationFactor); regErr != nil {
+					if os.Getenv("DEBUG") != "" || os.Getenv("TUNNELMESH_DEBUG") != "" {
+						fmt.Fprintf(os.Stderr, "chunk registry warning: failed to register %s shard chunk %s: %v\n", shardType, chunkHash[:8], regErr)
 					}
 				}
 			}
-		}
-	}()
 
-	// Process data shards: chunk them using CDC to preserve deduplication.
-	// Data shards also contribute to the ETag MD5.
-	md5Hasher := md5.New()
-	for i, shard := range dataShards {
-		md5Hasher.Write(shard)
+			shardRecords = append(shardRecords, ecShardRecord{
+				hash:      chunkHash,
+				onDisk:    chunkOnDiskSize,
+				shardType: shardType,
+				shardIdx:  shardIdx,
+				blockIdx:  blockIdx,
+			})
 
-		shardHashes, shardMeta, err := s.writeShardChunks(ctx, shard, i, k, "data", versionID, coordID, bucketMeta.ReplicationFactor, now)
-		if err != nil {
-			return nil, err
+			hashes[i] = append(hashes[i], chunkHash)
+			chunks = append(chunks, chunkHash)
 		}
-		for h, m2 := range shardMeta {
-			chunkMetadata[h] = m2
+
+		// ETag: hash data piece bytes including zero-padding on the last block.
+		// This makes the ETag stable across re-uploads of identical files, but
+		// it does not equal MD5(file bytes) for files that are not an exact
+		// multiple of ecStreamBlock — a known semantic departure from S3's ETag
+		// convention for non-multipart uploads.
+		for i := 0; i < ecDataShards; i++ {
+			md5Hasher.Write(pieces[i])
 		}
-		chunks = append(chunks, shardHashes...)
-		dataHashes = append(dataHashes, shardHashes...)
+
+		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read block %d: %w", blockIdx, readErr)
+		}
+		blockIdx++
 	}
 
-	// Process parity shards: CDC-chunk them exactly like data shards so each
-	// chunk is ~2 MB max. A 100 MB file has ~25 MB parity shards per shard —
-	// storing them as single chunks would create 25 MB blobs in the replication
-	// pipeline. CDC keeps all chunks uniformly small for bounded memory use.
-	for i, shard := range parityShards {
-		shardHashes, shardMeta, err := s.writeShardChunks(ctx, shard, i, m, "parity", versionID, coordID, bucketMeta.ReplicationFactor, now)
-		if err != nil {
-			return nil, err
-		}
-		for h, m2 := range shardMeta {
-			chunkMetadata[h] = m2
-		}
-		chunks = append(chunks, shardHashes...)
-		parityHashes = append(parityHashes, shardHashes...)
+	// Verify size if the caller provided a known Content-Length.
+	if size > 0 && actualSize != size {
+		return nil, fmt.Errorf("size mismatch: expected %d bytes, got %d", size, actualSize)
 	}
 
-	hash := md5Hasher.Sum(nil)
-	etag := fmt.Sprintf("\"%s\"", hex.EncodeToString(hash))
+	// Build the chunkMetadata map once from the flat shardRecords slice.
+	// Doing this after the loop (vs inside) keeps per-iteration allocations at
+	// ~64 bytes (ecShardRecord) instead of ~450 bytes (*ChunkMetadata + map header).
+	// For a 10 GB file this reduces peak heap growth during streaming by ~7 MB.
+	// sharedOwners is intentionally aliased across all ChunkMetadata entries to
+	// avoid one allocation per shard. This is safe as long as all consumers treat
+	// Owners as read-only after construction. Callers that need a mutable copy
+	// (e.g., replication merge) must copy before appending: append([]string(nil), m.Owners...).
+	var sharedOwners []string
+	if coordID != "" {
+		sharedOwners = []string{coordID}
+	}
+	chunkMetadata := make(map[string]*ChunkMetadata, len(shardRecords))
+	for _, rec := range shardRecords {
+		vv := make(map[string]uint64, 1)
+		if coordID != "" {
+			vv[coordID] = 1
+		}
+		chunkMetadata[rec.hash] = &ChunkMetadata{
+			Hash:           rec.hash,
+			Size:           ecPieceSize,
+			CompressedSize: rec.onDisk,
+			VersionVector:  vv,
+			Owners:         sharedOwners,
+			FirstSeen:      now,
+			LastModified:   now,
+			ShardType:      rec.shardType,
+			ShardIndex:     rec.shardIdx,
+			ChunkSequence:  rec.blockIdx,
+			ParentFileID:   versionID,
+		}
+	}
 
-	// Pre-create directories outside the lock (MkdirAll is idempotent)
+	// Flatten per-shard hashes into DataHashes and ParityHashes.
+	var dataHashes []string
+	for i := 0; i < ecDataShards; i++ {
+		dataHashes = append(dataHashes, hashes[i]...)
+	}
+	var parityHashes []string
+	for i := ecDataShards; i < ecDataShards+ecParityShards; i++ {
+		parityHashes = append(parityHashes, hashes[i]...)
+	}
+
+	etag := fmt.Sprintf("\"%s\"", hex.EncodeToString(md5Hasher.Sum(nil)))
+
+	// Pre-create directories outside the lock (MkdirAll is idempotent).
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0755); err != nil {
 		return nil, fmt.Errorf("create meta dir: %w", err)
 	}
 
-	// Phase 2: Acquire global lock for the brief metadata operations only.
-	// All writes use atomicWriteFile (no fsync, ~0.1ms each) to minimize lock hold time.
+	// Phase 2: Acquire global lock for brief metadata operations only.
 	s.mu.Lock()
 
-	// Re-check bucket exists (could have been deleted during encoding)
+	// Re-check bucket (could have been deleted during streaming).
 	ecBucketMeta, err := s.getBucketMeta(bucket)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
 
-	// Check if object already exists (for quota update calculation, versioning, and stats)
+	// Check if object already exists (for quota and versioning).
 	var oldSize int64
 	var oldLogicalBytes int64
 	isNewObject := true
-	if oldMeta, err := s.getObjectMeta(bucket, key); err == nil {
+	if oldMeta, metaErr := s.getObjectMeta(bucket, key); metaErr == nil {
 		oldSize = oldMeta.Size
 		isNewObject = false
 		oldLogicalBytes = oldMeta.Size
 	}
 
-	if s.quota != nil && size > oldSize {
-		delta := size - oldSize
+	// Quota check (system bucket is exempt — listing indexes, stats, and other
+	// internal files are infrastructure overhead, not user-quota-tracked data).
+	if s.quota != nil && actualSize > oldSize && bucket != SystemBucket {
+		delta := actualSize - oldSize
 		if !s.quota.CanAllocate(delta) {
 			s.mu.Unlock()
 			return nil, ErrQuotaExceeded
 		}
-		// Per-bucket quota enforcement. Use the persistent ecBucketMeta.SizeBytes
-		// (live object total, written to disk on every put/delete) rather than
-		// s.quota.BucketUsedBytes which resets to 0 on restart.
 		if ecBucketMeta.QuotaBytes > 0 {
 			projected := ecBucketMeta.SizeBytes + delta
 			if projected > ecBucketMeta.QuotaBytes {
@@ -1673,28 +1705,26 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 	}
 
 	// Clear stale version files from a previous object lifecycle at this key.
-	// DeleteObject only removes the live metadata; version files persist on disk.
-	// Without this, re-creating a key would show history from its deleted predecessor.
 	if isNewObject {
 		s.clearVersionDir(bucket, key)
 	}
 
-	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
+	// Archive current version.
 	s.archiveCurrentVersionAtomic(bucket, key)
 
 	var quotaUpdated bool
 	if s.quota != nil {
 		if oldSize > 0 {
-			s.quota.Update(bucket, oldSize, size)
+			s.quota.Update(bucket, oldSize, actualSize)
 		} else {
-			s.quota.Allocate(bucket, size)
+			s.quota.Allocate(bucket, actualSize)
 		}
 		quotaUpdated = true
 	}
 
 	objMeta := ObjectMeta{
 		Key:           key,
-		Size:          size,
+		Size:          actualSize,
 		ContentType:   contentType,
 		ETag:          etag,
 		LastModified:  now,
@@ -1704,12 +1734,12 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		ChunkMetadata: chunkMetadata,
 		VersionVector: fileVersionVector,
 		ErasureCoding: &ErasureCodingInfo{
-			Enabled:      true,
-			DataShards:   k,
-			ParityShards: m,
-			ShardSize:    shardSize,
-			DataHashes:   dataHashes,
-			ParityHashes: parityHashes,
+			Enabled:         true,
+			DataShards:      ecDataShards,
+			ParityShards:    ecParityShards,
+			StreamBlockSize: ecStreamBlock,
+			DataHashes:      dataHashes,
+			ParityHashes:    parityHashes,
 		},
 	}
 
@@ -1718,113 +1748,90 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		objMeta.Expires = &expiry
 	}
 
-	metaData, err := json.MarshalIndent(objMeta, "", "  ")
-	if err != nil {
+	metaData, marshalErr := json.MarshalIndent(objMeta, "", "  ")
+	if marshalErr != nil {
 		if quotaUpdated {
 			if oldSize > 0 {
-				s.quota.Update(bucket, size, oldSize)
+				s.quota.Update(bucket, actualSize, oldSize)
 			} else {
-				s.quota.Release(bucket, size)
+				s.quota.Release(bucket, actualSize)
 			}
 		}
 		s.mu.Unlock()
-		return nil, fmt.Errorf("marshal object meta: %w", err)
+		return nil, fmt.Errorf("marshal object meta: %w", marshalErr)
 	}
 
-	if err := atomicWriteFile(metaPath, metaData, 0644); err != nil {
+	if writeErr := atomicWriteFile(metaPath, metaData, 0644); writeErr != nil {
 		if quotaUpdated {
 			if oldSize > 0 {
-				s.quota.Update(bucket, size, oldSize)
+				s.quota.Update(bucket, actualSize, oldSize)
 			} else {
-				s.quota.Release(bucket, size)
+				s.quota.Release(bucket, actualSize)
 			}
 		}
 		s.mu.Unlock()
-		return nil, fmt.Errorf("write object meta: %w", err)
+		return nil, fmt.Errorf("write object meta: %w", writeErr)
 	}
 
 	if isNewObject {
 		s.statsObjectCount.Add(1)
 	}
-	s.statsLogicalBytes.Add(size - oldLogicalBytes)
+	s.statsLogicalBytes.Add(actualSize - oldLogicalBytes)
 
-	// Update bucket size tracking (inlined to use atomicWriteFile)
-	sizeDelta := size - oldSize
+	// Update bucket size tracking.
+	sizeDelta := actualSize - oldSize
 	if sizeDelta != 0 {
 		ecBucketMeta.SizeBytes += sizeDelta
 		if ecBucketMeta.SizeBytes < 0 {
 			ecBucketMeta.SizeBytes = 0
 		}
-		bmData, marshalErr := json.Marshal(ecBucketMeta)
-		if marshalErr != nil {
-			s.logger.Warn().Err(marshalErr).Str("bucket", bucket).Msg("failed to marshal bucket meta")
-		} else if writeErr := atomicWriteFile(s.bucketMetaPath(bucket), bmData, 0644); writeErr != nil {
-			s.logger.Warn().Err(writeErr).Str("bucket", bucket).Int64("delta", sizeDelta).Msg("failed to update bucket size")
+		bmData, bmErr := json.Marshal(ecBucketMeta)
+		if bmErr != nil {
+			s.logger.Warn().Err(bmErr).Str("bucket", bucket).Msg("failed to marshal bucket meta")
+		} else if bmWriteErr := atomicWriteFile(s.bucketMetaPath(bucket), bmData, 0644); bmWriteErr != nil {
+			s.logger.Warn().Err(bmWriteErr).Str("bucket", bucket).Int64("delta", sizeDelta).Msg("failed to update bucket size")
 		}
 	}
 
-	success = true
 	s.mu.Unlock()
 
 	// Phase 3: After lock — pruning (filesystem walk, safe without lock).
-	// Version files have unique names, os.Remove is atomic/idempotent,
-	// and stats use atomics, so this is safe outside the lock.
 	s.pruneExpiredVersions(ctx, bucket, key)
 
 	return &objMeta, nil
 }
 
-// PutObject writes an object to a bucket using CDC chunks stored in CAS.
-// Archives the current version before overwriting (for version history).
+// PutObject writes an object to a bucket using the universal streaming RS(4,2)
+// erasure encoder. EC is always on — all objects use it regardless of size or
+// bucket settings.
 //
-// Streaming behavior: Data is chunked and written to CAS incrementally as it's read.
-// This provides memory efficiency (peak usage ~64KB regardless of file size) but means
-// that partial uploads on failure will leave orphaned chunks in CAS until the next
-// garbage collection cycle. Orphaned chunks are cleaned up automatically during GC.
+// Lock strategy: the global lock is held only for brief metadata reads/writes,
+// NOT during streaming I/O. CAS writes are safe for concurrent access
+// (content-addressed, atomic rename).
 //
-// Lock strategy: The global lock is held only for brief metadata reads and writes,
-// NOT during the potentially slow streaming I/O phase. CAS writes are inherently
-// safe for concurrent access (content-addressed, atomic rename). This allows
-// concurrent reads (ListObjects, GetObject) to proceed while uploads stream data.
-//
-// Context cancellation: If ctx is canceled mid-upload, the function returns immediately
-// but chunks already written to CAS will remain until GC cleanup.
-//
-//nolint:gocyclo // Complexity inherited from streaming refactor - will be addressed in future refactoring
+// Context cancellation: partial uploads leave orphaned chunks until next GC.
 func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Reader, size int64, contentType string, metadata map[string]string) (*ObjectMeta, error) {
-	// Validate names (defense in depth)
+	// Validate names (defense in depth).
 	if err := validateName(bucket); err != nil {
 		return nil, fmt.Errorf("invalid bucket name: %w", err)
 	}
 	if err := validateName(key); err != nil {
 		return nil, fmt.Errorf("invalid key: %w", err)
 	}
-
-	// CAS must be initialized
 	if s.cas == nil {
 		return nil, fmt.Errorf("CAS not initialized - call InitCAS first")
 	}
 
-	// Phase 1: Read bucket metadata under RLock (fast path)
+	// Read bucket metadata.
 	s.mu.RLock()
 	bucketMeta, err := s.getBucketMeta(bucket)
 	if err != nil {
 		s.mu.RUnlock()
 		return nil, err
 	}
-	replicationFactor := bucketMeta.ReplicationFactor
-	useErasureCoding := bucketMeta.ErasureCoding != nil &&
-		bucketMeta.ErasureCoding.Enabled &&
-		size > 0 &&
-		size <= MaxErasureCodingFileSize
 	s.mu.RUnlock()
 
-	if useErasureCoding {
-		return s.putObjectWithErasureCoding(ctx, bucket, key, reader, size, contentType, metadata, bucketMeta)
-	}
-
-	// Bound concurrent CDC uploads to cap peak heap under burst load.
-	// See Store.uploadSem for the memory budget rationale.
+	// Bound concurrent uploads. Each upload uses ~10 MB peak heap.
 	select {
 	case s.uploadSem <- struct{}{}:
 		defer func() { <-s.uploadSem }()
@@ -1832,257 +1839,7 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, reader io.Rea
 		return nil, ctx.Err()
 	}
 
-	// Phase 2: Stream data through CDC chunker without holding the global lock.
-	// CAS writes are safe for concurrent access (content-addressed, atomic rename).
-	metaPath := s.objectMetaPath(bucket, key)
-	streamChunker := NewStreamingChunkerWithConfig(reader, ChunkConfigForSize(size))
-
-	var chunks []string
-	chunkMetadata := make(map[string]*ChunkMetadata)
-	var written int64
-	md5Hasher := md5.New()
-	now := time.Now().UTC()
-
-	// coordinatorID is set once at init and never changes — safe to read without lock
-	coordID := s.coordinatorID
-
-	// Cleanup on failure: remove all chunks written during Phase 2 from CAS.
-	// Mirrors the EC path's cleanup (putObjectWithErasureCoding ~line 1385).
-	// Handles quota rejection, context cancellation, and other error paths.
-	var success bool
-	defer func() {
-		if !success && len(chunks) > 0 {
-			for _, hash := range chunks {
-				if freed, err := s.cas.DeleteChunk(context.Background(), hash); err != nil {
-					s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to cleanup CDC chunk during rollback")
-				} else if freed > 0 {
-					s.statsChunkCount.Add(-1)
-					s.statsChunkBytes.Add(-freed)
-				}
-				if s.chunkRegistry != nil {
-					if err := s.chunkRegistry.UnregisterChunk(hash); err != nil {
-						s.logger.Warn().Str("hash", hash[:8]).Err(err).Msg("failed to unregister CDC chunk during rollback")
-					}
-				}
-			}
-		}
-	}()
-
-	for {
-		// Check for context cancellation to allow interrupting long uploads
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("upload canceled: %w", ctx.Err())
-		default:
-		}
-
-		chunk, chunkHash, err := streamChunker.NextChunk()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read chunk: %w", err)
-		}
-
-		// Write chunk to CAS immediately (don't accumulate in memory).
-		// Pass chunkHash to skip the redundant SHA-256 (NextChunk already computed it).
-		onDiskBytes, err := s.cas.writeChunkKnown(ctx, chunk, chunkHash)
-		if err != nil {
-			return nil, fmt.Errorf("write chunk %s: %w", chunkHash, err)
-		}
-
-		// Update incremental chunk stats (atomic — no lock needed)
-		var chunkOnDiskSize int64
-		if onDiskBytes > 0 {
-			s.statsChunkCount.Add(1)
-			s.statsChunkBytes.Add(onDiskBytes)
-			chunkOnDiskSize = onDiskBytes
-		} else {
-			if sz, szErr := s.cas.ChunkSize(ctx, chunkHash); szErr == nil {
-				chunkOnDiskSize = sz
-			}
-		}
-
-		// Register chunk ownership in distributed registry with bucket's replication factor
-		if s.chunkRegistry != nil {
-			if err := s.chunkRegistry.RegisterChunkWithReplication(chunkHash, int64(len(chunk)), replicationFactor); err != nil {
-				if os.Getenv("DEBUG") != "" || os.Getenv("TUNNELMESH_DEBUG") != "" {
-					fmt.Fprintf(os.Stderr, "chunk registry warning: failed to register %s: %v\n", chunkHash[:8], err)
-				}
-			}
-		}
-
-		md5Hasher.Write(chunk)
-
-		versionVector := make(map[string]uint64)
-		if coordID != "" {
-			versionVector[coordID] = 1
-		}
-		var owners []string
-		if coordID != "" {
-			owners = []string{coordID}
-		}
-
-		chunkMetadata[chunkHash] = &ChunkMetadata{
-			Hash:           chunkHash,
-			Size:           int64(len(chunk)),
-			CompressedSize: chunkOnDiskSize,
-			VersionVector:  versionVector,
-			Owners:         owners,
-			FirstSeen:      now,
-			LastModified:   now,
-		}
-
-		chunks = append(chunks, chunkHash)
-		written += int64(len(chunk))
-	}
-
-	hash := md5Hasher.Sum(nil)
-	etag := fmt.Sprintf("\"%s\"", hex.EncodeToString(hash))
-
-	fileVersionVector := make(map[string]uint64)
-	if coordID != "" {
-		fileVersionVector[coordID] = 1
-	}
-
-	// Pre-create directories outside the lock (MkdirAll is idempotent)
-	if err := os.MkdirAll(filepath.Dir(metaPath), 0755); err != nil {
-		return nil, fmt.Errorf("create meta dir: %w", err)
-	}
-
-	// Phase 3: Acquire global lock for the brief metadata write only.
-	// All writes use atomicWriteFile (no fsync, ~0.1ms each) to minimize lock hold time.
-	// This mirrors the ImportObjectMeta pattern — metadata is recoverable via replication.
-	s.mu.Lock()
-
-	// Re-check bucket exists (could have been deleted during streaming)
-	bucketMeta, err = s.getBucketMeta(bucket)
-	if err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-
-	// Check if object already exists (for quota update calculation and versioning)
-	var oldSize int64
-	var oldLogicalBytes int64
-	isNewObject := true
-	if oldMeta, err := s.getObjectMeta(bucket, key); err == nil {
-		oldSize = oldMeta.Size
-		isNewObject = false
-		oldLogicalBytes = oldMeta.Size
-	}
-
-	// Check quota if configured (only if object is growing)
-	if s.quota != nil && written > oldSize {
-		delta := written - oldSize
-		if !s.quota.CanAllocate(delta) {
-			s.mu.Unlock()
-			return nil, ErrQuotaExceeded
-		}
-		// Per-bucket quota enforcement. Use the persistent bucketMeta.SizeBytes
-		// (live object total, written to disk on every put/delete) rather than
-		// s.quota.BucketUsedBytes which resets to 0 on restart.
-		if bucketMeta.QuotaBytes > 0 {
-			projected := bucketMeta.SizeBytes + delta
-			if projected > bucketMeta.QuotaBytes {
-				s.mu.Unlock()
-				return nil, fmt.Errorf("%w: using %d of %d bytes", ErrBucketQuotaExceeded, projected, bucketMeta.QuotaBytes)
-			}
-		}
-	}
-
-	// Clear stale version files from a previous object lifecycle at this key.
-	if isNewObject {
-		s.clearVersionDir(bucket, key)
-	}
-
-	// Archive current version using atomicWriteFile (no fsync) to minimize lock hold time
-	s.archiveCurrentVersionAtomic(bucket, key)
-
-	// Update quota tracking
-	var quotaUpdated bool
-	if s.quota != nil {
-		if oldSize > 0 {
-			s.quota.Update(bucket, oldSize, written)
-		} else {
-			s.quota.Allocate(bucket, written)
-		}
-		quotaUpdated = true
-	}
-
-	objMeta := ObjectMeta{
-		Key:           key,
-		Size:          written,
-		ContentType:   contentType,
-		ETag:          etag,
-		LastModified:  now,
-		Metadata:      metadata,
-		VersionID:     generateVersionID(),
-		Chunks:        chunks,
-		ChunkMetadata: chunkMetadata,
-		VersionVector: fileVersionVector,
-	}
-
-	if s.defaultObjectExpiryDays > 0 && bucket != SystemBucket {
-		expiry := now.AddDate(0, 0, s.defaultObjectExpiryDays)
-		objMeta.Expires = &expiry
-	}
-
-	metaData, err := json.MarshalIndent(objMeta, "", "  ")
-	if err != nil {
-		if quotaUpdated {
-			if oldSize > 0 {
-				s.quota.Update(bucket, written, oldSize)
-			} else {
-				s.quota.Release(bucket, written)
-			}
-		}
-		s.mu.Unlock()
-		return nil, fmt.Errorf("marshal object meta: %w", err)
-	}
-
-	if err := atomicWriteFile(metaPath, metaData, 0644); err != nil {
-		if quotaUpdated {
-			if oldSize > 0 {
-				s.quota.Update(bucket, written, oldSize)
-			} else {
-				s.quota.Release(bucket, written)
-			}
-		}
-		s.mu.Unlock()
-		return nil, fmt.Errorf("write object meta: %w", err)
-	}
-
-	if isNewObject {
-		s.statsObjectCount.Add(1)
-	}
-	s.statsLogicalBytes.Add(written - oldLogicalBytes)
-
-	// Update bucket size tracking (inlined to use atomicWriteFile instead of
-	// updateBucketSize → writeBucketMeta → syncedWriteFile)
-	sizeDelta := written - oldSize
-	if sizeDelta != 0 {
-		bucketMeta.SizeBytes += sizeDelta
-		if bucketMeta.SizeBytes < 0 {
-			bucketMeta.SizeBytes = 0
-		}
-		bmData, marshalErr := json.Marshal(bucketMeta)
-		if marshalErr != nil {
-			s.logger.Warn().Err(marshalErr).Str("bucket", bucket).Msg("failed to marshal bucket meta")
-		} else if writeErr := atomicWriteFile(s.bucketMetaPath(bucket), bmData, 0644); writeErr != nil {
-			s.logger.Warn().Err(writeErr).Str("bucket", bucket).Int64("delta", sizeDelta).Msg("failed to update bucket size")
-		}
-	}
-
-	s.mu.Unlock()
-	success = true
-
-	// Phase 4: After lock — pruning (filesystem walk, safe without lock).
-	// Version files have unique names, os.Remove is atomic/idempotent,
-	// and stats use atomics, so this is safe outside the lock.
-	s.pruneExpiredVersions(ctx, bucket, key)
-
-	return &objMeta, nil
+	return s.putObjectWithErasureCoding(ctx, bucket, key, reader, size, contentType, metadata, bucketMeta)
 }
 
 // GetObject retrieves an object from a bucket.
@@ -3002,6 +2759,15 @@ func (s *Store) DeleteUnreferencedChunks(ctx context.Context, chunkHashes []stri
 	}
 
 	// Build reference set once for all chunks (single filesystem walk).
+	//
+	// Known race: an in-progress upload that has written CAS chunks (dedup or new)
+	// but not yet committed its object metadata is invisible to this scan. If that
+	// upload shares a chunk hash with a chunk being purged (common with small files
+	// where zero-padded RS pieces share hashes), the chunk may be deleted here and
+	// the in-progress upload will later produce an unreadable object. The full GC
+	// path mitigates this via GCGracePeriod (only deletes chunks older than 10 min).
+	// TODO: apply the same GCGracePeriod protection here to close the race in
+	// production; requires exposing chunk modification time through the CAS API.
 	referencedChunks := s.buildChunkReferenceSet(ctx)
 
 	var totalFreed int64
@@ -3887,7 +3653,14 @@ func (s *Store) runGC(ctx context.Context, skipGracePeriod bool) GCStats {
 //   - Chunks written during the scan are newer than gcStartTime and will be
 //     skipped by deleteOrphanedChunks
 func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} {
-	referencedChunks := make(map[string]struct{})
+	// Pre-allocate using the live chunk count to avoid O(log N) rehash steps
+	// during the reference set build. statsChunkCount is maintained atomically
+	// at every write/delete, so it's an accurate hint with no extra I/O.
+	hint := int(s.statsChunkCount.Load())
+	if hint < 64 {
+		hint = 64
+	}
+	referencedChunks := make(map[string]struct{}, hint)
 
 	bucketsDir := filepath.Join(s.dataDir, "buckets")
 	bucketEntries, err := os.ReadDir(bucketsDir)
@@ -4438,23 +4211,6 @@ func (s *Store) GetAllObjectKeys(ctx context.Context) (map[string][]string, erro
 	return result, nil
 }
 
-// GetBucketErasureCodingPolicy returns the erasure coding policy for a bucket.
-func (s *Store) GetBucketErasureCodingPolicy(ctx context.Context, bucket string) (bool, int, int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	meta, err := s.getBucketMeta(bucket)
-	if err != nil {
-		return false, 0, 0, fmt.Errorf("get bucket meta: %w", err)
-	}
-
-	if meta.ErasureCoding == nil {
-		return false, 0, 0, nil
-	}
-
-	return meta.ErasureCoding.Enabled, meta.ErasureCoding.DataShards, meta.ErasureCoding.ParityShards, nil
-}
-
 // GetObjectVersion retrieves a specific version of an object.
 func (s *Store) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *ObjectMeta, error) {
 	s.mu.RLock()
@@ -4644,17 +4400,22 @@ func (s *Store) RestoreVersion(ctx context.Context, bucket, key, versionID strin
 		return nil, fmt.Errorf("archive current version: %w", err)
 	}
 
-	// Create new metadata pointing to old content
+	// Create new metadata pointing to old content.
+	// ErasureCoding, ChunkMetadata and VersionVector are preserved so that
+	// GetObject can decode the restored object correctly.
 	now := time.Now().UTC()
 	newMeta := ObjectMeta{
-		Key:          key,
-		Size:         oldMeta.Size,
-		ContentType:  oldMeta.ContentType,
-		ETag:         oldMeta.ETag,
-		LastModified: now,
-		Metadata:     oldMeta.Metadata,
-		VersionID:    generateVersionID(),
-		Chunks:       oldMeta.Chunks, // Reuse same chunks (no duplication)
+		Key:           key,
+		Size:          oldMeta.Size,
+		ContentType:   oldMeta.ContentType,
+		ETag:          oldMeta.ETag,
+		LastModified:  now,
+		Metadata:      oldMeta.Metadata,
+		VersionID:     generateVersionID(),
+		Chunks:        oldMeta.Chunks,        // Reuse same chunks (no duplication)
+		ChunkMetadata: oldMeta.ChunkMetadata, // Required for EC decoding
+		ErasureCoding: oldMeta.ErasureCoding, // Required for GetObject to use EC path
+		VersionVector: oldMeta.VersionVector,
 	}
 
 	// Set expiry if configured

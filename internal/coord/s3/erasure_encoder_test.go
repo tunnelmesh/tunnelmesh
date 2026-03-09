@@ -5,115 +5,135 @@ import (
 	"crypto/rand"
 	"fmt"
 	"testing"
+
+	"github.com/klauspost/reedsolomon"
 )
 
-func TestEncodeFile_Basic(t *testing.T) {
-	data := []byte("Hello, Reed-Solomon erasure coding!")
-	k, m := 3, 2
+// encodeForTest is a test helper that encodes data into k data shards + m parity
+// shards using the same block-streaming layout as putObjectWithErasureCoding.
+// streamBlockSize must be a multiple of k.
+func encodeForTest(data []byte, k, m int, streamBlockSize int) ([][]byte, error) {
+	if k < 1 || m < 1 {
+		return nil, fmt.Errorf("invalid k=%d or m=%d", k, m)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("data must not be empty")
+	}
+	if k+m > 256 {
+		return nil, fmt.Errorf("total shards (k+m) must be <= 256, got %d", k+m)
+	}
+	if streamBlockSize%k != 0 {
+		return nil, fmt.Errorf("streamBlockSize %d is not divisible by k=%d", streamBlockSize, k)
+	}
 
-	dataShards, parityShards, err := EncodeFile(data, k, m)
+	enc, err := reedsolomon.New(k, m)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		return nil, fmt.Errorf("create RS encoder: %w", err)
 	}
 
-	if len(dataShards) != k {
-		t.Errorf("expected %d data shards, got %d", k, len(dataShards))
-	}
-	if len(parityShards) != m {
-		t.Errorf("expected %d parity shards, got %d", m, len(parityShards))
+	pieceSize := streamBlockSize / k
+
+	// Allocate shard output buffers.
+	shards := make([][]byte, k+m)
+	for i := range shards {
+		shards[i] = nil
 	}
 
-	// Verify all shards have same size
-	shardSize := len(dataShards[0])
-	for i, shard := range dataShards {
-		if len(shard) != shardSize {
-			t.Errorf("data shard %d has size %d, expected %d", i, len(shard), shardSize)
+	blockBuf := make([]byte, streamBlockSize)
+	pieces := make([][]byte, k+m)
+	for i := 0; i < k; i++ {
+		pieces[i] = blockBuf[i*pieceSize : (i+1)*pieceSize]
+	}
+	for i := k; i < k+m; i++ {
+		pieces[i] = make([]byte, pieceSize)
+	}
+
+	offset := 0
+	for offset < len(data) {
+		n := copy(blockBuf, data[offset:])
+		// zero-pad remainder
+		for j := n; j < streamBlockSize; j++ {
+			blockBuf[j] = 0
+		}
+		offset += n
+
+		if err := enc.Encode(pieces); err != nil {
+			return nil, fmt.Errorf("encode block: %w", err)
+		}
+
+		for i := 0; i < k+m; i++ {
+			shards[i] = append(shards[i], pieces[i]...)
 		}
 	}
-	for i, shard := range parityShards {
-		if len(shard) != shardSize {
-			t.Errorf("parity shard %d has size %d, expected %d", i, len(shard), shardSize)
-		}
-	}
+	return shards, nil
 }
 
-func TestEncodeFile_RoundTrip(t *testing.T) {
+func TestReconstructBlockwise_RoundTrip(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256 // 1 KB stripe
+
 	tests := []struct {
 		name string
-		data []byte
-		k    int
-		m    int
+		size int
 	}{
-		{"small-3+2", []byte("test"), 3, 2},
-		{"medium-6+3", make([]byte, 1024), 6, 3},
-		{"large-10+3", make([]byte, 100*1024), 10, 3},
-		{"uneven-5+2", []byte("hello world"), 5, 2},
-		{"no-padding-10+3", make([]byte, 10*1024), 10, 3}, // 10 KB with 10 shards = 1024 bytes each, no padding
+		{"small", 35},
+		{"one-block", k * 256},
+		{"multi-block", k * 256 * 3},
+		{"uneven", k*256*2 + 100},
+		{"medium", 10 * 1024},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Generate random data for larger tests
-			if len(tt.data) > 10 {
-				_, _ = rand.Read(tt.data)
-			}
+			original := make([]byte, tt.size)
+			_, _ = rand.Read(original)
 
-			// Encode
-			dataShards, parityShards, err := EncodeFile(tt.data, tt.k, tt.m)
+			shards, err := encodeForTest(original, k, m, streamBlockSize)
 			if err != nil {
-				t.Fatalf("EncodeFile failed: %v", err)
+				t.Fatalf("encodeForTest failed: %v", err)
 			}
 
-			// Combine shards for decoding
-			allShards := make([][]byte, tt.k+tt.m)
-			copy(allShards[:tt.k], dataShards)
-			copy(allShards[tt.k:], parityShards)
+			if len(shards) != k+m {
+				t.Fatalf("expected %d shards, got %d", k+m, len(shards))
+			}
 
-			// Decode (all shards available)
-			decoded, err := DecodeFile(allShards, tt.k, tt.m, int64(len(tt.data)))
+			decoded, err := ReconstructBlockwise(shards, k, m, int64(streamBlockSize), int64(tt.size))
 			if err != nil {
-				t.Fatalf("DecodeFile failed: %v", err)
+				t.Fatalf("ReconstructBlockwise failed: %v", err)
 			}
 
-			// Verify
-			if !bytes.Equal(decoded, tt.data) {
-				t.Errorf("decoded data doesn't match original")
+			if !bytes.Equal(decoded, original) {
+				t.Errorf("decoded data doesn't match original (size=%d)", tt.size)
 			}
 		})
 	}
 }
 
-func TestDecodeFile_MissingDataShards(t *testing.T) {
+func TestReconstructBlockwise_MissingDataShards(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
+
 	data := make([]byte, 10*1024)
 	_, _ = rand.Read(data)
-	k, m := 6, 3
 
-	// Encode
-	dataShards, parityShards, err := EncodeFile(data, k, m)
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		t.Fatalf("encodeForTest failed: %v", err)
 	}
 
-	// Test reconstruction with 1, 2, 3 missing data shards
 	for missing := 1; missing <= m; missing++ {
 		t.Run(fmt.Sprintf("missing_%d_data_shards", missing), func(t *testing.T) {
-			// Combine shards
-			allShards := make([][]byte, k+m)
-			copy(allShards[:k], dataShards)
-			copy(allShards[k:], parityShards)
-
-			// Remove 'missing' data shards
+			testShards := make([][]byte, k+m)
+			copy(testShards, shards)
 			for i := 0; i < missing; i++ {
-				allShards[i] = nil
+				testShards[i] = nil
 			}
 
-			// Decode
-			decoded, err := DecodeFile(allShards, k, m, int64(len(data)))
+			decoded, err := ReconstructBlockwise(testShards, k, m, int64(streamBlockSize), int64(len(data)))
 			if err != nil {
-				t.Fatalf("DecodeFile failed with %d missing shards: %v", missing, err)
+				t.Fatalf("ReconstructBlockwise failed with %d missing shards: %v", missing, err)
 			}
 
-			// Verify
 			if !bytes.Equal(decoded, data) {
 				t.Errorf("decoded data doesn't match original with %d missing shards", missing)
 			}
@@ -121,189 +141,118 @@ func TestDecodeFile_MissingDataShards(t *testing.T) {
 	}
 }
 
-func TestDecodeFile_MissingParityShards(t *testing.T) {
+func TestReconstructBlockwise_MissingParityShards(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
+
 	data := make([]byte, 5*1024)
 	_, _ = rand.Read(data)
-	k, m := 4, 2
 
-	// Encode
-	dataShards, _, err := EncodeFile(data, k, m)
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		t.Fatalf("encodeForTest failed: %v", err)
 	}
 
-	// Remove all parity shards (should still work with all data shards)
-	allShards := make([][]byte, k+m)
-	copy(allShards[:k], dataShards)
-	// parity shards remain nil
+	// Nil out parity shards — should reconstruct fine with all data shards.
+	testShards := make([][]byte, k+m)
+	copy(testShards[:k], shards[:k])
+	// testShards[k:] remain nil
 
-	// Decode
-	decoded, err := DecodeFile(allShards, k, m, int64(len(data)))
+	decoded, err := ReconstructBlockwise(testShards, k, m, int64(streamBlockSize), int64(len(data)))
 	if err != nil {
-		t.Fatalf("DecodeFile failed with missing parity shards: %v", err)
+		t.Fatalf("ReconstructBlockwise failed with missing parity: %v", err)
 	}
 
-	// Verify
 	if !bytes.Equal(decoded, data) {
 		t.Errorf("decoded data doesn't match original with missing parity shards")
 	}
 }
 
-func TestDecodeFile_MixedShards(t *testing.T) {
+func TestReconstructBlockwise_MixedShards(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
+
 	data := make([]byte, 8*1024)
 	_, _ = rand.Read(data)
-	k, m := 10, 3
 
-	// Encode
-	dataShards, parityShards, err := EncodeFile(data, k, m)
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		t.Fatalf("encodeForTest failed: %v", err)
 	}
 
-	// Test various combinations of available shards
-	tests := []struct {
-		name            string
-		availableData   []int // indices of available data shards
-		availableParity []int // indices of available parity shards
-	}{
-		{"first_k", []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, []int{}},
-		{"last_k_data_first_parity", []int{7, 8, 9}, []int{0, 1, 2, 3, 4, 5, 6}},
-		{"scattered", []int{0, 2, 4, 6, 8}, []int{0, 1, 2, 3, 4}},
-		{"exactly_k", []int{1, 3, 5, 7, 9}, []int{0, 2, 4}}, // 5 data + 3 parity = 8 shards available (only need 10)
+	// Remove 1 data shard and 1 parity shard — still within tolerance (m=2).
+	testShards := make([][]byte, k+m)
+	copy(testShards, shards)
+	testShards[0] = nil // missing data shard 0
+	testShards[k] = nil // missing parity shard 0
+
+	decoded, err := ReconstructBlockwise(testShards, k, m, int64(streamBlockSize), int64(len(data)))
+	if err != nil {
+		t.Fatalf("ReconstructBlockwise failed with mixed missing: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			allShards := make([][]byte, k+m)
-
-			// Add available data shards
-			for _, idx := range tt.availableData {
-				if idx < len(dataShards) {
-					allShards[idx] = dataShards[idx]
-				}
-			}
-
-			// Add available parity shards
-			for _, idx := range tt.availableParity {
-				if idx < len(parityShards) {
-					allShards[k+idx] = parityShards[idx]
-				}
-			}
-
-			// Count available
-			available := 0
-			for _, shard := range allShards {
-				if shard != nil {
-					available++
-				}
-			}
-
-			if available < k {
-				t.Skipf("insufficient shards: have %d, need %d", available, k)
-			}
-
-			// Decode
-			decoded, err := DecodeFile(allShards, k, m, int64(len(data)))
-			if err != nil {
-				t.Fatalf("DecodeFile failed: %v", err)
-			}
-
-			// Verify
-			if !bytes.Equal(decoded, data) {
-				t.Errorf("decoded data doesn't match original")
-			}
-		})
+	if !bytes.Equal(decoded, data) {
+		t.Errorf("decoded data doesn't match original with mixed missing shards")
 	}
 }
 
-func TestDecodeFile_InsufficientShards(t *testing.T) {
-	data := []byte("test data")
-	k, m := 5, 2
+func TestReconstructBlockwise_InsufficientShards(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
 
-	// Encode
-	dataShards, _, err := EncodeFile(data, k, m)
+	data := make([]byte, 1024)
+	_, _ = rand.Read(data)
+
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		t.Fatalf("encodeForTest failed: %v", err)
 	}
 
-	// Keep only k-1 shards (insufficient)
-	allShards := make([][]byte, k+m)
-	copy(allShards[:k-1], dataShards[:k-1])
+	// Nil out too many shards (more than m missing).
+	testShards := make([][]byte, k+m)
+	copy(testShards, shards)
+	for i := 0; i < m+1; i++ {
+		testShards[i] = nil
+	}
 
-	// Decode should fail
-	_, err = DecodeFile(allShards, k, m, int64(len(data)))
+	_, err = ReconstructBlockwise(testShards, k, m, int64(streamBlockSize), int64(len(data)))
 	if err == nil {
 		t.Errorf("expected error with insufficient shards, got nil")
 	}
 }
 
-func TestEncodeFile_InvalidParameters(t *testing.T) {
-	data := []byte("test")
+func TestReconstructBlockwise_InvalidInputs(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
 
-	tests := []struct {
-		name string
-		k    int
-		m    int
-	}{
-		{"k_zero", 0, 2},
-		{"m_zero", 3, 0},
-		{"k_negative", -1, 2},
-		{"m_negative", 3, -1},
-		{"total_too_large", 200, 100}, // 300 > 256
-	}
+	data := make([]byte, 1024)
+	_, _ = rand.Read(data)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := EncodeFile(data, tt.k, tt.m)
-			if err == nil {
-				t.Errorf("expected error with k=%d, m=%d, got nil", tt.k, tt.m)
-			}
-		})
-	}
-}
-
-func TestEncodeFile_EmptyData(t *testing.T) {
-	_, _, err := EncodeFile([]byte{}, 3, 2)
-	if err == nil {
-		t.Errorf("expected error with empty data, got nil")
-	}
-}
-
-func TestDecodeFile_InvalidInputs(t *testing.T) {
-	// Valid encode
-	data := []byte("test data")
-	k, m := 3, 2
-	dataShards, parityShards, err := EncodeFile(data, k, m)
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		t.Fatalf("encodeForTest failed: %v", err)
 	}
 
-	allShards := make([][]byte, k+m)
-	copy(allShards[:k], dataShards)
-	copy(allShards[k:], parityShards)
-
-	// Calculate max reconstructible size for oversized test
-	shardSize := int64(len(dataShards[0]))
-	maxSize := shardSize * int64(k)
-
 	tests := []struct {
-		name         string
-		shards       [][]byte
-		k            int
-		m            int
-		originalSize int64
+		name            string
+		shards          [][]byte
+		k               int
+		m               int
+		streamBlockSize int64
+		originalSize    int64
 	}{
-		{"wrong_shard_count", allShards[:k], k, m, int64(len(data))},
-		{"zero_size", allShards, k, m, 0},
-		{"negative_size", allShards, k, m, -1},
-		{"invalid_k", allShards, 0, m, int64(len(data))},
-		{"invalid_m", allShards, k, 0, int64(len(data))},
-		{"oversized", allShards, k, m, maxSize + 1000}, // originalSize exceeds maximum reconstructible
+		{"wrong_shard_count", shards[:k], k, m, int64(streamBlockSize), int64(len(data))},
+		{"zero_original_size", shards, k, m, int64(streamBlockSize), 0},
+		{"negative_original_size", shards, k, m, int64(streamBlockSize), -1},
+		{"invalid_k_zero", shards, 0, m, int64(streamBlockSize), int64(len(data))},
+		{"invalid_m_zero", shards, k, 0, int64(streamBlockSize), int64(len(data))},
+		{"zero_stream_block_size", shards, k, m, 0, int64(len(data))},
+		{"oversized", shards, k, m, int64(streamBlockSize), int64(len(data)) * 100},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := DecodeFile(tt.shards, tt.k, tt.m, tt.originalSize)
+			_, err := ReconstructBlockwise(tt.shards, tt.k, tt.m, tt.streamBlockSize, tt.originalSize)
 			if err == nil {
 				t.Errorf("expected error for %s, got nil", tt.name)
 			}
@@ -311,39 +260,65 @@ func TestDecodeFile_InvalidInputs(t *testing.T) {
 	}
 }
 
-func TestEncodeFile_LargeFile(t *testing.T) {
+func TestEncodeForTest_InvalidParameters(t *testing.T) {
+	data := []byte("test")
+
+	tests := []struct {
+		name            string
+		k               int
+		m               int
+		streamBlockSize int
+	}{
+		{"k_zero", 0, 2, 256},
+		{"m_zero", 3, 0, 3 * 256},
+		{"k_negative", -1, 2, 256},
+		{"m_negative", 3, -1, 3 * 256},
+		{"total_too_large", 200, 100, 200 * 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := encodeForTest(data, tt.k, tt.m, tt.streamBlockSize)
+			if err == nil {
+				t.Errorf("expected error with k=%d, m=%d, got nil", tt.k, tt.m)
+			}
+		})
+	}
+}
+
+func TestEncodeForTest_EmptyData(t *testing.T) {
+	_, err := encodeForTest([]byte{}, 4, 2, 4*256)
+	if err == nil {
+		t.Errorf("expected error with empty data, got nil")
+	}
+}
+
+func TestReconstructBlockwise_LargeFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping large file test in short mode")
 	}
 
-	// 10 MB file
-	data := make([]byte, 10*1024*1024)
+	k, m := 4, 2
+	// Use the canonical 4MB block size
+	streamBlockSize := ecStreamBlock
+
+	data := make([]byte, 10*1024*1024) // 10 MB
 	_, _ = rand.Read(data)
 
-	k, m := 10, 3
-
-	// Encode
-	dataShards, parityShards, err := EncodeFile(data, k, m)
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		t.Fatalf("EncodeFile failed: %v", err)
+		t.Fatalf("encodeForTest failed: %v", err)
 	}
 
-	// Verify shard count
-	if len(dataShards) != k || len(parityShards) != m {
-		t.Errorf("incorrect shard count: data=%d, parity=%d", len(dataShards), len(parityShards))
-	}
+	// Decode with 2 missing data shards (within tolerance of m=2).
+	testShards := make([][]byte, k+m)
+	copy(testShards, shards)
+	testShards[0] = nil
+	testShards[2] = nil
 
-	// Decode with 3 missing data shards
-	allShards := make([][]byte, k+m)
-	copy(allShards[:k], dataShards)
-	copy(allShards[k:], parityShards)
-	allShards[0] = nil
-	allShards[3] = nil
-	allShards[7] = nil
-
-	decoded, err := DecodeFile(allShards, k, m, int64(len(data)))
+	decoded, err := ReconstructBlockwise(testShards, k, m, int64(streamBlockSize), int64(len(data)))
 	if err != nil {
-		t.Fatalf("DecodeFile failed: %v", err)
+		t.Fatalf("ReconstructBlockwise failed: %v", err)
 	}
 
 	if !bytes.Equal(decoded, data) {
@@ -351,80 +326,47 @@ func TestEncodeFile_LargeFile(t *testing.T) {
 	}
 }
 
-func BenchmarkEncodeFile(b *testing.B) {
-	sizes := []int{
-		1 * 1024,         // 1 KB
-		100 * 1024,       // 100 KB
-		1024 * 1024,      // 1 MB
-		10 * 1024 * 1024, // 10 MB
-	}
+func BenchmarkReconstructBlockwise(b *testing.B) {
+	k, m := 4, 2
+	streamBlockSize := ecStreamBlock
 
-	for _, size := range sizes {
-		data := make([]byte, size)
-		_, _ = rand.Read(data)
-
-		b.Run(fmt.Sprintf("size_%dKB", size/1024), func(b *testing.B) {
-			b.SetBytes(int64(size))
-			b.ResetTimer()
-
-			for i := 0; i < b.N; i++ {
-				_, _, err := EncodeFile(data, 10, 3)
-				if err != nil {
-					b.Fatalf("EncodeFile failed: %v", err)
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkDecodeFile(b *testing.B) {
 	data := make([]byte, 1024*1024) // 1 MB
 	_, _ = rand.Read(data)
-	k, m := 10, 3
 
-	// Pre-encode
-	dataShards, parityShards, err := EncodeFile(data, k, m)
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
 	if err != nil {
-		b.Fatalf("EncodeFile failed: %v", err)
+		b.Fatalf("encodeForTest failed: %v", err)
 	}
 
 	tests := []struct {
 		name    string
-		missing int // number of missing data shards
+		missing int
 	}{
 		{"no_missing", 0},
 		{"missing_1", 1},
 		{"missing_2", 2},
-		{"missing_3", 3},
 	}
 
 	for _, tt := range tests {
 		b.Run(tt.name, func(b *testing.B) {
-			// Prepare shards with missing ones
-			allShards := make([][]byte, k+m)
-			copy(allShards[:k], dataShards)
-			copy(allShards[k:], parityShards)
-
-			for i := 0; i < tt.missing; i++ {
-				allShards[i] = nil
-			}
-
 			b.SetBytes(int64(len(data)))
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				// Need to reset nil shards each iteration since Reconstruct modifies
 				testShards := make([][]byte, k+m)
-				for j := range allShards {
-					if allShards[j] != nil {
-						testShards[j] = make([]byte, len(allShards[j]))
-						copy(testShards[j], allShards[j])
+				for j := range shards {
+					if shards[j] != nil {
+						testShards[j] = make([]byte, len(shards[j]))
+						copy(testShards[j], shards[j])
 					}
 				}
+				for j := 0; j < tt.missing; j++ {
+					testShards[j] = nil
+				}
 
-				_, err := DecodeFile(testShards, k, m, int64(len(data)))
+				_, err := ReconstructBlockwise(testShards, k, m, int64(streamBlockSize), int64(len(data)))
 				if err != nil {
-					b.Fatalf("DecodeFile failed: %v", err)
+					b.Fatalf("ReconstructBlockwise failed: %v", err)
 				}
 			}
 		})

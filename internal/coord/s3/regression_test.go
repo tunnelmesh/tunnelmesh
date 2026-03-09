@@ -110,7 +110,7 @@ func TestRegression_GCPreservesReferencedChunks(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
 
-	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2))
 	data := []byte("GC must never delete chunks that are referenced by live metadata")
 	meta := uploadFile(t, store, "mybucket", "file.txt", data)
 	t.Logf("uploaded %d chunks", len(meta.Chunks))
@@ -135,7 +135,7 @@ func TestRegression_ForceGCPreservesReferencedChunks(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
 
-	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2))
 	data := []byte("Force GC must not destroy live data")
 	uploadFile(t, store, "mybucket", "file.txt", data)
 
@@ -156,7 +156,7 @@ func TestRegression_RepeatedImportMetaPreservesFile(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "shared", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "shared", "admin", 2))
 	data := []byte("Repeated imports must not destroy file data")
 	meta := uploadFile(t, src, "shared", "doc.txt", data)
 	metaJSON, _ := json.Marshal(meta)
@@ -188,7 +188,7 @@ func TestRegression_VersionPruningPlusGCPreservesLiveFile(t *testing.T) {
 	ctx := context.Background()
 	store.SetMaxVersionsPerObject(3)
 
-	require.NoError(t, store.CreateBucket(ctx, "versioned", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "versioned", "admin", 2))
 
 	// Upload v1
 	v1Data := []byte("Version 1 content - original file with its own unique chunks")
@@ -235,7 +235,7 @@ func TestRegression_ChunksBeforeMetaSurviveGracePeriod(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2))
 	data := []byte("Chunks replicated before metadata must survive until metadata arrives")
 	meta := uploadFile(t, src, "data", "early.txt", data)
 
@@ -270,7 +270,7 @@ func TestRegression_AgedOrphanedChunksDeletedByGC(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
 
-	require.NoError(t, store.CreateBucket(ctx, "data", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "data", "admin", 2))
 	data := []byte("Orphaned chunks should eventually be cleaned up")
 	meta := uploadFile(t, store, "data", "file.txt", data)
 
@@ -297,8 +297,8 @@ func TestRegression_DeleteUnreferencedChunksRespectsAllBuckets(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
 
-	require.NoError(t, store.CreateBucket(ctx, "bucket1", "admin", 2, nil))
-	require.NoError(t, store.CreateBucket(ctx, "bucket2", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "bucket1", "admin", 2))
+	require.NoError(t, store.CreateBucket(ctx, "bucket2", "admin", 2))
 
 	// Upload the SAME data to two buckets (creates shared chunks via CAS dedup)
 	data := []byte("Shared content across buckets — dedup means same chunk hashes")
@@ -324,7 +324,7 @@ func TestRegression_RecycleBinPurgePreservesLiveChunks(t *testing.T) {
 	ctx := context.Background()
 	store.SetRecycleBinRetentionHours(24) // Enable recycle bin
 
-	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2))
 
 	// Upload same data twice (creates shared chunks)
 	data := []byte("Content shared between deleted and live objects")
@@ -351,7 +351,7 @@ func TestRegression_FullGCCycleMultipleFiles(t *testing.T) {
 	ctx := context.Background()
 	store.SetMaxVersionsPerObject(2)
 
-	require.NoError(t, store.CreateBucket(ctx, "docs", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "docs", "admin", 2))
 
 	// Upload several files
 	files := map[string][]byte{
@@ -477,7 +477,7 @@ func TestRegression_PurgeOrphanedBucketsOnReplicaAfterShareDeletion(t *testing.T
 
 	// But the bucket still exists locally (from replication before deletion)
 	tempBucket := FileShareBucketPrefix + "temp"
-	require.NoError(t, store.CreateBucket(ctx, tempBucket, "alice", 1, nil))
+	require.NoError(t, store.CreateBucket(ctx, tempBucket, "alice", 1))
 
 	// Age the bucket past grace period (well past the 1-hour window)
 	metaPath := filepath.Join(store.DataDir(), "buckets", tempBucket, "_meta.json")
@@ -507,7 +507,7 @@ func TestRegression_MultiCoordReplicationAndGC(t *testing.T) {
 	c2 := newRegressionStore(t, "coord2")
 	c3 := newRegressionStore(t, "coord3")
 
-	require.NoError(t, c1.CreateBucket(ctx, "shared", "admin", 3, nil))
+	require.NoError(t, c1.CreateBucket(ctx, "shared", "admin", 3))
 
 	data := []byte("File replicated across 3 coordinators must survive all cleanup paths")
 	meta := uploadFile(t, c1, "shared", "critical.txt", data)
@@ -555,7 +555,7 @@ func TestRegression_FileUpdateSurvivesImportAndGC(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "docs", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "docs", "admin", 2))
 
 	// Upload v1
 	v1Data := []byte("Version 1 - the original file content")
@@ -590,8 +590,8 @@ func TestRegression_ConcurrentImportFromTwoSources(t *testing.T) {
 	dst := newRegressionStore(t, "coord3")
 	ctx := context.Background()
 
-	require.NoError(t, c1.CreateBucket(ctx, "docs", "admin", 2, nil))
-	require.NoError(t, c2.CreateBucket(ctx, "docs", "admin", 2, nil))
+	require.NoError(t, c1.CreateBucket(ctx, "docs", "admin", 2))
+	require.NoError(t, c2.CreateBucket(ctx, "docs", "admin", 2))
 
 	// c1 and c2 both have the same file
 	data := []byte("File present on two coordinators, both replicate to a third")
@@ -634,11 +634,19 @@ func TestRegression_GCIsolationBetweenBuckets(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
 
-	require.NoError(t, store.CreateBucket(ctx, "keep", "admin", 2, nil))
-	require.NoError(t, store.CreateBucket(ctx, "delete", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "keep", "admin", 2))
+	require.NoError(t, store.CreateBucket(ctx, "delete", "admin", 2))
 
-	keepData := []byte("This file is in the keep bucket and must survive")
-	deleteData := []byte("This file is in the delete bucket and will be purged")
+	// Use ecStreamBlock-sized random data so each RS piece is unique and the two files
+	// do not share chunk hashes via zero-padding deduplication.
+	keepData := make([]byte, ecStreamBlock)
+	deleteData := make([]byte, ecStreamBlock)
+	keepData[0] = 0xAA // distinct first byte ensures non-overlapping chunks
+	deleteData[0] = 0xBB
+	for i := 1; i < len(keepData); i++ {
+		keepData[i] = byte(i * 3)
+		deleteData[i] = byte(i * 7)
+	}
 
 	uploadFile(t, store, "keep", "precious.txt", keepData)
 	meta := uploadFile(t, store, "delete", "temp.txt", deleteData)
@@ -670,7 +678,7 @@ func TestRegression_AutoCreatedBucketSurvivesGC(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "remote", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "remote", "admin", 2))
 	data := []byte("File whose bucket is auto-created on the destination via ImportObjectMeta")
 	meta := uploadFile(t, src, "remote", "file.txt", data)
 
@@ -700,7 +708,7 @@ func TestRegression_SystemBucketSurvivesGC(t *testing.T) {
 	ctx := context.Background()
 
 	// Create system bucket and store config data
-	require.NoError(t, store.CreateBucket(ctx, "_tunnelmesh", "svc:coordinator", 3, nil))
+	require.NoError(t, store.CreateBucket(ctx, "_tunnelmesh", "svc:coordinator", 3))
 
 	configData := []byte(`{"shares":[{"name":"photos","owner":"alice"}]}`)
 	_, err := store.PutObject(ctx, "_tunnelmesh", "auth/file_shares.json",
@@ -726,7 +734,7 @@ func TestRegression_AccordionModeFullCycle(t *testing.T) {
 	c1 := newRegressionStore(t, "coord1")
 	c2 := newRegressionStore(t, "coord2")
 
-	require.NoError(t, c1.CreateBucket(ctx, "data", "admin", 2, nil))
+	require.NoError(t, c1.CreateBucket(ctx, "data", "admin", 2))
 
 	// Upload 3 files
 	files := map[string][]byte{
@@ -787,7 +795,7 @@ func TestRegression_SoftDeleteSharedChunksPreserved(t *testing.T) {
 	ctx := context.Background()
 	store.SetRecycleBinRetentionHours(24)
 
-	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2, nil))
+	require.NoError(t, store.CreateBucket(ctx, "mybucket", "admin", 2))
 
 	// Two files with identical content (shared chunks)
 	data := []byte("Shared chunk data between two objects")
@@ -862,7 +870,7 @@ func TestRegression_IdenticalReimportSkipsVersionArchive(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "docs", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "docs", "admin", 2))
 	data := []byte("Identical re-imports must not create version archives")
 	meta := uploadFile(t, src, "docs", "report.txt", data)
 	require.NotEmpty(t, meta.ETag, "PutObject should set ETag")
@@ -901,7 +909,7 @@ func TestRegression_DifferentETagImportArchivesVersion(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "docs", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "docs", "admin", 2))
 
 	// Upload v1 and replicate
 	dataV1 := []byte("Version 1 content")
@@ -940,7 +948,7 @@ func TestRegression_EmptyETagImportNotSkipped(t *testing.T) {
 	store := newRegressionStore(t, "coord1")
 	ctx := context.Background()
 
-	require.NoError(t, store.CreateBucket(ctx, "legacy", "admin", 1, nil))
+	require.NoError(t, store.CreateBucket(ctx, "legacy", "admin", 1))
 
 	// Import with empty ETag (simulates legacy or test metadata)
 	meta := ObjectMeta{
@@ -974,7 +982,7 @@ func TestRegression_ManifestReconciliationPurgesDeletedObjects(t *testing.T) {
 	dst := newRegressionStore(t, "coord2")
 	ctx := context.Background()
 
-	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2, nil))
+	require.NoError(t, src.CreateBucket(ctx, "data", "admin", 2))
 
 	// Upload 3 files and replicate all to dst
 	files := map[string][]byte{
