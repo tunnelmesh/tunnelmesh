@@ -116,6 +116,18 @@ type ChunkMetadata struct {
 	ParentFileID   string            `json:"parent_file_id,omitempty"`  // Link to parent file VersionID
 }
 
+// ecShardRecord is a lightweight record accumulated during the EC streaming loop.
+// Using this flat struct instead of *ChunkMetadata in the hot path reduces
+// per-iteration allocation from ~450 bytes to ~64 bytes. The full ChunkMetadata
+// map is built once after the loop from these records.
+type ecShardRecord struct {
+	hash      string
+	onDisk    int64
+	shardType string
+	shardIdx  int
+	blockIdx  int
+}
+
 // ErasureCodingInfo contains erasure coding metadata for a specific object version.
 type ErasureCodingInfo struct {
 	Enabled         bool     `json:"enabled"`                 // Whether this object uses erasure coding
@@ -232,6 +244,11 @@ type Store struct {
 	// ~10 MB peak heap (4 MB blockBuf + 2 MB parity bufs). 3 slots = ~30 MB,
 	// well within GOMEMLIMIT. Bounds concurrent CAS write pressure too.
 	uploadSem chan struct{}
+	// ecEncoder is the shared RS(4,2) encoder. Initialized once in NewStore() with
+	// WithAutoGoroutines so Encode() uses 2×GOMAXPROCS goroutines instead of ~96.
+	// Safe for concurrent use: Encode() reads the immutable matrix and operates
+	// only on caller-provided shard slices (no shared mutable state).
+	ecEncoder reedsolomon.Encoder
 	bgWg      sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
 	mu        sync.RWMutex
 
@@ -254,11 +271,19 @@ func NewStore(dataDir string, quota *QuotaManager) (*Store, error) {
 		return nil, fmt.Errorf("create buckets dir: %w", err)
 	}
 
+	enc, err := reedsolomon.New(ecDataShards, ecParityShards,
+		reedsolomon.WithAutoGoroutines(ecPieceSize),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create RS encoder: %w", err)
+	}
+
 	store := &Store{
 		dataDir:   dataDir,
 		quota:     quota,
 		logger:    zerolog.Nop(),          // Default to no-op logger
 		uploadSem: make(chan struct{}, 3), // Allow 3 concurrent EC uploads (~10 MB each)
+		ecEncoder: enc,
 	}
 
 	// Calculate initial quota usage from existing objects
@@ -1418,11 +1443,6 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 //
 //nolint:gocyclo
 func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key string, reader io.Reader, size int64, contentType string, metadata map[string]string, bucketMeta *BucketMeta) (*ObjectMeta, error) {
-	enc, err := reedsolomon.New(ecDataShards, ecParityShards)
-	if err != nil {
-		return nil, fmt.Errorf("create RS encoder: %w", err)
-	}
-
 	metaPath := s.objectMetaPath(bucket, key)
 
 	// blockBuf is the 4 MB scratch buffer. Data pieces alias its sub-slices;
@@ -1443,7 +1463,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 
 	// hashes[i] accumulates CAS chunk hashes for shard i, in block order.
 	hashes := make([][]string, ecDataShards+ecParityShards)
-	chunkMetadata := make(map[string]*ChunkMetadata)
+	var shardRecords []ecShardRecord
 	var chunks []string
 	var actualSize int64
 	blockIdx := 0
@@ -1487,7 +1507,7 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 
 		// Data-piece aliases already point into blockBuf — no reassignment needed.
 		// RS-encode: fills parity pieces in-place.
-		if encErr := enc.Encode(pieces); encErr != nil {
+		if encErr := s.ecEncoder.Encode(pieces); encErr != nil {
 			return nil, fmt.Errorf("rs encode block %d: %w", blockIdx, encErr)
 		}
 
@@ -1527,25 +1547,13 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 				}
 			}
 
-			chunkVV := make(map[string]uint64)
-			var chunkOwners []string
-			if coordID != "" {
-				chunkVV[coordID] = 1
-				chunkOwners = []string{coordID}
-			}
-			chunkMetadata[chunkHash] = &ChunkMetadata{
-				Hash:           chunkHash,
-				Size:           ecPieceSize,
-				CompressedSize: chunkOnDiskSize,
-				VersionVector:  chunkVV,
-				Owners:         chunkOwners,
-				FirstSeen:      now,
-				LastModified:   now,
-				ShardType:      shardType,
-				ShardIndex:     shardIdx,
-				ChunkSequence:  blockIdx,
-				ParentFileID:   versionID,
-			}
+			shardRecords = append(shardRecords, ecShardRecord{
+				hash:      chunkHash,
+				onDisk:    chunkOnDiskSize,
+				shardType: shardType,
+				shardIdx:  shardIdx,
+				blockIdx:  blockIdx,
+			})
 
 			hashes[i] = append(hashes[i], chunkHash)
 			chunks = append(chunks, chunkHash)
@@ -1572,6 +1580,35 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 	// Verify size if the caller provided a known Content-Length.
 	if size > 0 && actualSize != size {
 		return nil, fmt.Errorf("size mismatch: expected %d bytes, got %d", size, actualSize)
+	}
+
+	// Build the chunkMetadata map once from the flat shardRecords slice.
+	// Doing this after the loop (vs inside) keeps per-iteration allocations at
+	// ~64 bytes (ecShardRecord) instead of ~450 bytes (*ChunkMetadata + map header).
+	// For a 10 GB file this reduces peak heap growth during streaming by ~7 MB.
+	var sharedOwners []string
+	if coordID != "" {
+		sharedOwners = []string{coordID}
+	}
+	chunkMetadata := make(map[string]*ChunkMetadata, len(shardRecords))
+	for _, rec := range shardRecords {
+		vv := make(map[string]uint64, 1)
+		if coordID != "" {
+			vv[coordID] = 1
+		}
+		chunkMetadata[rec.hash] = &ChunkMetadata{
+			Hash:           rec.hash,
+			Size:           ecPieceSize,
+			CompressedSize: rec.onDisk,
+			VersionVector:  vv,
+			Owners:         sharedOwners,
+			FirstSeen:      now,
+			LastModified:   now,
+			ShardType:      rec.shardType,
+			ShardIndex:     rec.shardIdx,
+			ChunkSequence:  rec.blockIdx,
+			ParentFileID:   versionID,
+		}
 	}
 
 	// Flatten per-shard hashes into DataHashes and ParityHashes.
