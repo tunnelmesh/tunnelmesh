@@ -2821,8 +2821,9 @@ func (s *Server) StartAdminServer(addr string, tlsCert *tls.Certificate) error {
 		Handler:           redirectToCanonicalDomain(extractTraceMiddleware(s.adminMux)),
 		IdleTimeout:       90 * time.Second,
 		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		// No ReadTimeout or WriteTimeout: S3 uploads/downloads via the web UI can
+		// be arbitrarily large. ReadHeaderTimeout (above) still protects against
+		// slow header attacks. Consistent with the main S3 server's rationale.
 	}
 
 	if tlsCert != nil {
