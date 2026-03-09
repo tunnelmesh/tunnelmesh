@@ -1611,8 +1611,9 @@ func (s *Store) putObjectWithErasureCoding(ctx context.Context, bucket, key stri
 		oldLogicalBytes = oldMeta.Size
 	}
 
-	// Quota check.
-	if s.quota != nil && actualSize > oldSize {
+	// Quota check (system bucket is exempt — listing indexes, stats, and other
+	// internal files are infrastructure overhead, not user-quota-tracked data).
+	if s.quota != nil && actualSize > oldSize && bucket != SystemBucket {
 		delta := actualSize - oldSize
 		if !s.quota.CanAllocate(delta) {
 			s.mu.Unlock()
