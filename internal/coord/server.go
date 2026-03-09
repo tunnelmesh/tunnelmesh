@@ -384,11 +384,16 @@ func NewServer(ctx context.Context, cfg *config.PeerConfig) (*Server, error) {
 	// Shared transport for forwarding S3 writes to other coordinators.
 	// TLS config is set later by SetMeshTLS() with the registration CA.
 	srv.s3ForwardTransport = &http.Transport{
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		DisableCompression:    true, // S3 objects are often already compressed
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:       100,
+		IdleConnTimeout:    90 * time.Second,
+		DisableCompression: true, // S3 objects are often already compressed
+		DialContext:        (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		// ResponseHeaderTimeout: the forwarding coordinator waits for the target to
+		// finish processing the entire upload (EC encoding + writing all chunks) before
+		// it sends response headers. A 300 MB file at ~20 MB/s disk write = ~15 s;
+		// under load this can reach 60–90 s. 120 s gives ample room without allowing
+		// truly stuck targets to hold connections forever.
+		ResponseHeaderTimeout: 120 * time.Second,
 	}
 
 	// Shared HTTP clients for mesh-internal GC forwarding.

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -409,6 +410,17 @@ func (c *CAS) ChunkSize(ctx context.Context, hash string) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+// ChunkModTime returns the modification time of a chunk file on disk.
+// Returns an error (including os.ErrNotExist) if the chunk does not exist.
+// Used by DeleteUnreferencedChunks to apply GCGracePeriod protection.
+func (c *CAS) ChunkModTime(hash string) (time.Time, error) {
+	info, err := os.Stat(c.chunkPath(hash))
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
 }
 
 // TotalSize returns the total size of all chunks in storage.

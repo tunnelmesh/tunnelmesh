@@ -2760,14 +2760,10 @@ func (s *Store) DeleteUnreferencedChunks(ctx context.Context, chunkHashes []stri
 
 	// Build reference set once for all chunks (single filesystem walk).
 	//
-	// Known race: an in-progress upload that has written CAS chunks (dedup or new)
-	// but not yet committed its object metadata is invisible to this scan. If that
-	// upload shares a chunk hash with a chunk being purged (common with small files
-	// where zero-padded RS pieces share hashes), the chunk may be deleted here and
-	// the in-progress upload will later produce an unreadable object. The full GC
-	// path mitigates this via GCGracePeriod (only deletes chunks older than 10 min).
-	// TODO: apply the same GCGracePeriod protection here to close the race in
-	// production; requires exposing chunk modification time through the CAS API.
+	// Chunks written during replication arrive before their metadata is committed.
+	// Apply GCGracePeriod to skip any chunk younger than 10 minutes — the same
+	// protection that RunGarbageCollection uses — so newly-replicated EC pieces
+	// cannot be deleted before their object metadata is saved.
 	referencedChunks := s.buildChunkReferenceSet(ctx)
 
 	var totalFreed int64
@@ -2778,6 +2774,14 @@ func (s *Store) DeleteUnreferencedChunks(ctx context.Context, chunkHashes []stri
 		default:
 		}
 		if _, referenced := referencedChunks[hash]; !referenced {
+			// Grace period: skip chunks that were written recently.
+			// Newly-received replication chunks have no metadata yet; deleting
+			// them before metadata arrives makes the object permanently unreadable.
+			if mtime, err := s.cas.ChunkModTime(hash); err == nil {
+				if time.Since(mtime) < GCGracePeriod {
+					continue
+				}
+			}
 			if freed, err := s.cas.DeleteChunk(ctx, hash); err == nil && freed > 0 {
 				s.statsChunkCount.Add(-1)
 				s.statsChunkBytes.Add(-freed)

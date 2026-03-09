@@ -84,9 +84,13 @@ func InitS3Metrics(registry prometheus.Registerer) *S3Metrics {
 			}, []string{"operation", "status"}),
 
 			RequestDuration: promauto.With(registry).NewHistogramVec(prometheus.HistogramOpts{
-				Name:    "tunnelmesh_s3_request_duration_seconds",
-				Help:    "S3 request duration in seconds",
-				Buckets: prometheus.DefBuckets,
+				Name: "tunnelmesh_s3_request_duration_seconds",
+				Help: "S3 request duration in seconds",
+				// Extended buckets cover large file uploads/downloads that can take
+				// minutes (EC encoding + disk I/O for 100MB–1GB objects). The default
+				// Prometheus buckets top out at 10 s, which clamps all slow uploads
+				// to 10 s in Grafana and hides the real latency distribution.
+				Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 			}, []string{"operation"}),
 
 			BytesUploaded: promauto.With(registry).NewCounter(prometheus.CounterOpts{
