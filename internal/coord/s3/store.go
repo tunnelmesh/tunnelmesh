@@ -544,26 +544,58 @@ func (s *Store) QuotaStats() *QuotaStats {
 	return &stats
 }
 
-// calculateQuotaUsage scans all chunks and updates quota tracking.
-// Uses s.dataDir (immutable after construction) for the filesystem walk,
-// and QuotaManager.SetUsed has its own internal mutex.
+// calculateQuotaUsage scans all object metadata and rebuilds per-bucket quota
+// tracking from logical file sizes. This keeps quota consistent with runtime
+// tracking (which also uses logical sizes) and avoids the double-counting that
+// occurs when physical chunk sizes are mixed with logical bucket sizes.
+//
+// Called at startup (after CAS init) and after GC to reconcile quota.
+// Uses s.dataDir (immutable after construction); QuotaManager.SetUsed has its
+// own internal mutex so no Store lock is needed.
 func (s *Store) calculateQuotaUsage() error {
-	if s.cas == nil {
+	if s.quota == nil {
 		return nil
 	}
 
-	// s.dataDir is immutable after init — no lock needed for the walk.
-	chunksDir := filepath.Join(s.dataDir, "chunks")
-	var totalSize int64
-	_ = filepath.Walk(chunksDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	bucketsDir := filepath.Join(s.dataDir, "buckets")
+	bucketEntries, err := os.ReadDir(bucketsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
 			return nil
 		}
-		totalSize += info.Size()
-		return nil
-	})
-	if totalSize > 0 {
-		s.quota.SetUsed("_chunks", totalSize)
+		return fmt.Errorf("read buckets dir: %w", err)
+	}
+
+	for _, bucketEntry := range bucketEntries {
+		if !bucketEntry.IsDir() {
+			continue
+		}
+		bucketName := bucketEntry.Name()
+		// System bucket is exempt from quota (listing indexes, stats, etc. are
+		// infrastructure overhead, not user-quota-tracked data).
+		if bucketName == SystemBucket {
+			continue
+		}
+
+		// Walk the "meta" subdirectory which holds active (non-recycled) objects.
+		metaDir := filepath.Join(bucketsDir, bucketName, "meta")
+		var bucketLogicalSize int64
+		_ = filepath.Walk(metaDir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil || info.IsDir() || !strings.HasSuffix(path, ".json") {
+				return nil
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			var meta ObjectMeta
+			if jsonErr := json.Unmarshal(data, &meta); jsonErr != nil {
+				return nil
+			}
+			bucketLogicalSize += meta.Size
+			return nil
+		})
+		s.quota.SetUsed(bucketName, bucketLogicalSize)
 	}
 	return nil
 }

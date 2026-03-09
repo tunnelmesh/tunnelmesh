@@ -60,7 +60,8 @@ func ClassifyS3Status(httpStatus int) string {
 }
 
 // ClassifyS3StatusWithError converts HTTP status and error to metric status string.
-// This allows distinguishing between quota_exceeded and access_denied (both use 403).
+// This allows distinguishing between quota_exceeded and access_denied (both use 403),
+// and separates client-initiated cancellations from server errors.
 func ClassifyS3StatusWithError(httpStatus int, err error) string {
 	// Check error type first for semantic classification
 	if err != nil {
@@ -71,6 +72,10 @@ func ClassifyS3StatusWithError(httpStatus int, err error) string {
 			return "access_denied"
 		case errors.Is(err, ErrBucketNotFound), errors.Is(err, ErrObjectNotFound):
 			return "not_found"
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// Client disconnected or timed out — not a server error. Using a separate
+			// label prevents S3HighErrorRate from firing on client-side disconnects.
+			return "canceled"
 		}
 	}
 
