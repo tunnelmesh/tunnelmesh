@@ -418,6 +418,18 @@ func TestConcurrent_DeleteAndRead(t *testing.T) {
 }
 
 // TestConcurrent_BucketOperations tests concurrent bucket creates/deletes.
+//
+// The test is structured in two phases separated by a barrier:
+//   - Phase 1: All workers create their bucket and upload concurrently.
+//   - Phase 2: All workers read, delete, purge, and delete bucket concurrently.
+//
+// The barrier prevents PurgeAllRecycledInBucket (which calls DeleteUnreferencedChunks)
+// from running while another worker's PutObject is still in progress. Small files
+// produce EC shards that are mostly zeros; these shards share the same content hash
+// across workers. If a purge runs while an in-progress upload has written zero-chunks
+// (dedup hit) but not yet committed its object metadata, DeleteUnreferencedChunks
+// can't see the in-progress reference and deletes the shared chunk, causing GetObject
+// to fail with "insufficient shards". The barrier eliminates this race.
 func TestConcurrent_BucketOperations(t *testing.T) {
 	dir := t.TempDir()
 
@@ -425,36 +437,45 @@ func TestConcurrent_BucketOperations(t *testing.T) {
 
 	ctx := context.Background()
 
-	var wg sync.WaitGroup
 	const numWorkers = 10
 	errs := make(chan error, numWorkers*10)
 
+	// Phase 1: concurrent bucket creation and upload.
+	// All uploads complete before any reads/deletes/purges begin.
+	var phase1 sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
+		phase1.Add(1)
 		go func(workerID int) {
-			defer wg.Done()
+			defer phase1.Done()
 
 			bucketName := fmt.Sprintf("bucket-%d", workerID)
 			owner := fmt.Sprintf("owner-%d", workerID)
 
-			// Create bucket
-			err := store.CreateBucket(ctx, bucketName, owner, 2)
-			if err != nil {
+			if err := store.CreateBucket(ctx, bucketName, owner, 2); err != nil {
 				errs <- fmt.Errorf("create bucket: %w", err)
 				return
 			}
 
-			// Upload a file
-			key := "test.txt"
 			data := []byte(fmt.Sprintf("Worker %d", workerID))
-			_, err = store.PutObject(ctx, bucketName, key, bytes.NewReader(data), int64(len(data)), "text/plain", nil)
-			if err != nil {
+			if _, err := store.PutObject(ctx, bucketName, "test.txt", bytes.NewReader(data), int64(len(data)), "text/plain", nil); err != nil {
 				errs <- fmt.Errorf("put object: %w", err)
-				return
 			}
+		}(i)
+	}
+	phase1.Wait()
 
-			// Read it back
-			reader, _, err := store.GetObject(ctx, bucketName, key)
+	// Phase 2: concurrent read → delete → purge → bucket delete.
+	// Because all metadata is committed by phase 1, buildChunkReferenceSet in any
+	// purge will see all live objects and won't delete shared zero-content shards.
+	var phase2 sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		phase2.Add(1)
+		go func(workerID int) {
+			defer phase2.Done()
+
+			bucketName := fmt.Sprintf("bucket-%d", workerID)
+
+			reader, _, err := store.GetObject(ctx, bucketName, "test.txt")
 			if err != nil {
 				errs <- fmt.Errorf("get object: %w", err)
 				return
@@ -462,34 +483,25 @@ func TestConcurrent_BucketOperations(t *testing.T) {
 			_, _ = io.Copy(io.Discard, reader)
 			_ = reader.Close()
 
-			// Delete object (moves to recycle bin)
-			err = store.DeleteObject(ctx, bucketName, key)
-			if err != nil {
+			if err := store.DeleteObject(ctx, bucketName, "test.txt"); err != nil {
 				errs <- fmt.Errorf("delete object: %w", err)
 				return
 			}
 
-			// Purge recycle bin so bucket can be deleted
 			_ = store.PurgeAllRecycledInBucket(ctx, bucketName)
 
-			// Delete bucket
-			err = store.DeleteBucket(ctx, bucketName)
-			if err != nil {
+			if err := store.DeleteBucket(ctx, bucketName); err != nil {
 				errs <- fmt.Errorf("delete bucket: %w", err)
-				return
 			}
 		}(i)
 	}
-
-	wg.Wait()
+	phase2.Wait()
 	close(errs)
 
-	// Check for errors
 	for err := range errs {
 		t.Errorf("Bucket operation failed: %v", err)
 	}
 
-	// Verify all buckets cleaned up
 	buckets, err := store.ListBuckets(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, buckets)

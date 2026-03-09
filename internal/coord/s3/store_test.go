@@ -1930,7 +1930,9 @@ func TestConcurrent_CalculatePrefixSizeNoDeadlock(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 60s to accommodate the -race detector (5-20× slowdown) and coverage
+	// instrumentation on CI. The test is verifying no deadlock, not throughput.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	var wg sync.WaitGroup
@@ -1980,7 +1982,7 @@ func TestConcurrent_CalculatePrefixSizeNoDeadlock(t *testing.T) {
 	case <-done:
 		// Success - no deadlock
 	case <-ctx.Done():
-		t.Fatal("deadlock detected: concurrent CalculatePrefixSize + PutObject timed out after 10s")
+		t.Fatal("deadlock detected: concurrent CalculatePrefixSize + PutObject timed out after 60s")
 	}
 }
 
