@@ -3437,13 +3437,14 @@ func extractChunksFromRecycledEntry(data []byte) ([]string, error) {
 
 // CASStats holds statistics about content-addressed storage.
 type CASStats struct {
-	ChunkCount    int   // Total number of chunks
-	ChunkBytes    int64 // Total bytes in chunks (after dedup)
-	LogicalBytes  int64 // Logical bytes (sum of live object sizes, before dedup)
-	VersionBytes  int64 // Logical bytes in version files
-	RecycledBytes int64 // Logical bytes in recyclebin entries
-	VersionCount  int   // Total number of versions
-	ObjectCount   int   // Total number of current objects
+	ChunkCount     int   // Total number of chunks
+	ChunkBytes     int64 // Total bytes in chunks (after dedup, including EC parity shards)
+	DataChunkBytes int64 // ChunkBytes adjusted for EC parity overhead (data shards only)
+	LogicalBytes   int64 // Logical bytes (sum of live object sizes, before dedup)
+	VersionBytes   int64 // Logical bytes in version files
+	RecycledBytes  int64 // Logical bytes in recyclebin entries
+	VersionCount   int   // Total number of versions
+	ObjectCount    int   // Total number of current objects
 }
 
 // initCASStats populates the atomic stat counters from a one-time filesystem walk.
@@ -3560,14 +3561,16 @@ func (s *Store) GetCASStats() CASStats {
 		return CASStats{}
 	}
 
+	chunkBytes := s.statsChunkBytes.Load()
 	return CASStats{
-		ChunkCount:    int(s.statsChunkCount.Load()),
-		ChunkBytes:    s.statsChunkBytes.Load(),
-		ObjectCount:   int(s.statsObjectCount.Load()),
-		VersionCount:  int(s.statsVersionCount.Load()),
-		LogicalBytes:  s.statsLogicalBytes.Load(),
-		VersionBytes:  s.statsVersionBytes.Load(),
-		RecycledBytes: s.statsRecycledBytes.Load(),
+		ChunkCount:     int(s.statsChunkCount.Load()),
+		ChunkBytes:     chunkBytes,
+		DataChunkBytes: chunkBytes * ecDataShards / (ecDataShards + ecParityShards),
+		ObjectCount:    int(s.statsObjectCount.Load()),
+		VersionCount:   int(s.statsVersionCount.Load()),
+		LogicalBytes:   s.statsLogicalBytes.Load(),
+		VersionBytes:   s.statsVersionBytes.Load(),
+		RecycledBytes:  s.statsRecycledBytes.Load(),
 	}
 }
 
