@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -587,4 +588,27 @@ func TestCASEncoderMemoryBudget(t *testing.T) {
 	assert.Less(t, ms.HeapIdle, uint64(maxIdle),
 		"HeapIdle=%d MiB after FreeOSMemory; want < 100 MiB — idle pages should be returned to OS promptly under GOMEMLIMIT pressure",
 		ms.HeapIdle/1024/1024)
+}
+
+// TestCAS_ChunkModTime verifies that ChunkModTime returns a recent time after
+// writing a chunk and an error for a non-existent chunk.
+func TestCAS_ChunkModTime(t *testing.T) {
+	cas := newTestCAS(t)
+	ctx := context.Background()
+
+	// Non-existent chunk must return error
+	_, err := cas.ChunkModTime("deadbeef")
+	assert.Error(t, err, "ChunkModTime on missing chunk should return error")
+
+	// Write a chunk and check mod time
+	before := time.Now().Add(-time.Second)
+	data := []byte("mod time test data")
+	hash, _, err := cas.WriteChunk(ctx, data)
+	require.NoError(t, err)
+	after := time.Now().Add(time.Second)
+
+	mtime, err := cas.ChunkModTime(hash)
+	require.NoError(t, err, "ChunkModTime on existing chunk should succeed")
+	assert.True(t, mtime.After(before), "mtime should be after test start")
+	assert.True(t, mtime.Before(after), "mtime should be before test end")
 }

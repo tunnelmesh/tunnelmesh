@@ -2383,6 +2383,9 @@ func TestDeleteUnreferencedChunks(t *testing.T) {
 	_, err = store.ImportObjectMeta(ctx, "mybucket", "doc.txt", metaJSON, "")
 	require.NoError(t, err)
 
+	// Age chunks past GCGracePeriod so orphaned chunks are eligible for deletion.
+	ageAllChunks(t, store, 15*time.Minute)
+
 	// Record stats before cleanup
 	statsBefore := store.GetCASStats()
 
@@ -2437,6 +2440,35 @@ func TestDeleteUnreferencedChunks_AllReferenced(t *testing.T) {
 	statsAfter := store.GetCASStats()
 	assert.Equal(t, statsBefore.ChunkCount, statsAfter.ChunkCount)
 	assert.Equal(t, statsBefore.ChunkBytes, statsAfter.ChunkBytes)
+}
+
+// TestDeleteUnreferencedChunks_GracePeriod verifies that freshly-written chunks
+// are protected from deletion even when unreferenced (no metadata yet).
+// This is the core fix for the replication regression: EC chunks arriving before
+// their metadata must not be deleted by a concurrent PurgeObject call.
+func TestDeleteUnreferencedChunks_GracePeriod(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.CreateBucket(ctx, "mybucket", "alice", 1))
+
+	// Write a chunk but do NOT create any metadata referencing it
+	// (simulates an EC chunk received during replication before metadata arrives).
+	orphan := []byte("recently replicated EC chunk, no metadata yet")
+	hash := ContentHash(orphan)
+	require.NoError(t, store.WriteChunkDirect(ctx, hash, orphan))
+
+	// Attempt to delete — should be protected by GCGracePeriod (chunk is fresh).
+	freed := store.DeleteUnreferencedChunks(ctx, []string{hash})
+	assert.Equal(t, int64(0), freed, "fresh unreferenced chunk must be protected by GCGracePeriod")
+	assert.True(t, store.ChunkExists(hash), "fresh chunk must still exist after DeleteUnreferencedChunks")
+
+	// Age the chunk past GCGracePeriod — now it should be eligible for deletion.
+	ageAllChunks(t, store, 15*time.Minute)
+
+	freed = store.DeleteUnreferencedChunks(ctx, []string{hash})
+	assert.Greater(t, freed, int64(0), "aged unreferenced chunk must be deleted after GCGracePeriod")
+	assert.False(t, store.ChunkExists(hash), "aged unreferenced chunk must be gone")
 }
 
 func TestSyncedWriteFileAtomic(t *testing.T) {
@@ -3346,6 +3378,10 @@ func TestPurgeObject_UnregistersChunksFromRegistry(t *testing.T) {
 	registeredCount := len(reg.registered)
 	reg.mu.Unlock()
 	require.Greater(t, registeredCount, 0, "PutObject should register chunks in the registry")
+
+	// Age chunks past GCGracePeriod so DeleteUnreferencedChunks (called by PurgeObject)
+	// can actually delete them and unregister from the registry.
+	ageAllChunks(t, store, 15*time.Minute)
 
 	// PurgeObject deletes the object, its chunks (via DeleteUnreferencedChunks), and
 	// must now also unregister them from the chunk registry.
