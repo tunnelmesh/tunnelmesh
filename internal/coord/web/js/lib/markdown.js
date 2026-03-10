@@ -89,44 +89,57 @@
         // Escape HTML first to prevent XSS
         let result = escapeHtml(text);
 
+        // Use placeholders to protect already-emitted HTML spans from being
+        // re-processed by subsequent regex passes (e.g. italic matching `*`
+        // inside a bold `data-md="**text**"` attribute).
+        // Uses \uFFFE (Unicode non-character) as a sentinel that won't appear in markdown.
+        const spans = [];
+        function protect(html) {
+            spans.push(html);
+            return `\uFFFE${spans.length - 1}\uFFFE`;
+        }
+
         // Inline code first (prevents formatting inside code)
         // After escaping, markdown backticks are still literal backticks
         result = result.replace(/`([^`]+)`/g, (match, code) => {
-            return `<code data-md="${escapeHtml(match)}">${code}</code>`;
+            return protect(`<code data-md="${escapeHtml(match)}">${code}</code>`);
         });
 
         // Images: ![alt](url)
         result = result.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
             const safeUrl = sanitizeUrl(url);
-            return `<img src="${escapeHtml(safeUrl)}" alt="${alt}" data-md="${escapeHtml(match)}" />`;
+            return protect(`<img src="${escapeHtml(safeUrl)}" alt="${alt}" data-md="${escapeHtml(match)}" />`);
         });
 
         // Links: [text](url)
         result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
             const safeUrl = sanitizeUrl(url);
-            return `<a href="${escapeHtml(safeUrl)}" data-md="${escapeHtml(match)}">${linkText}</a>`;
+            return protect(`<a href="${escapeHtml(safeUrl)}" data-md="${escapeHtml(match)}">${linkText}</a>`);
         });
 
         // Bold: **text** or __text__
         result = result.replace(/\*\*(.+?)\*\*/g, (match, content) => {
-            return `<strong data-md="${escapeHtml(match)}">${content}</strong>`;
+            return protect(`<strong data-md="${escapeHtml(match)}">${content}</strong>`);
         });
         result = result.replace(/__(.+?)__/g, (match, content) => {
-            return `<strong data-md="${escapeHtml(match)}">${content}</strong>`;
+            return protect(`<strong data-md="${escapeHtml(match)}">${content}</strong>`);
         });
 
         // Italic: *text* or _text_
         result = result.replace(/\*(.+?)\*/g, (match, content) => {
-            return `<em data-md="${escapeHtml(match)}">${content}</em>`;
+            return protect(`<em data-md="${escapeHtml(match)}">${content}</em>`);
         });
         result = result.replace(/_(.+?)_/g, (match, content) => {
-            return `<em data-md="${escapeHtml(match)}">${content}</em>`;
+            return protect(`<em data-md="${escapeHtml(match)}">${content}</em>`);
         });
 
         // Strikethrough: ~~text~~
         result = result.replace(/~~(.+?)~~/g, (match, content) => {
-            return `<del data-md="${escapeHtml(match)}">${content}</del>`;
+            return protect(`<del data-md="${escapeHtml(match)}">${content}</del>`);
         });
+
+        // Restore protected spans
+        result = result.replace(/\uFFFE(\d+)\uFFFE/g, (_, i) => spans[parseInt(i, 10)]);
 
         return result;
     }
