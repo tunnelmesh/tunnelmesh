@@ -1217,6 +1217,8 @@ func newTestStoreWithCAS(t *testing.T) *Store {
 		17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
 	store, err := NewStoreWithCAS(tmpDir, nil, masterKey)
 	require.NoError(t, err)
+	// Disable GC CPU throttle to prevent proportional sleeps on slow CI runners.
+	store.gcThrottleDisabled = true
 	return store
 }
 
@@ -2651,6 +2653,27 @@ func TestGetCASStats_LegacyObjectsUseMetaSize(t *testing.T) {
 	// LogicalBytes uses meta.Size which is always available regardless of ChunkMetadata
 	assert.Equal(t, int64(len(content)), stats.LogicalBytes,
 		"legacy objects should use meta.Size for LogicalBytes")
+}
+
+func TestGetCASStats_DataChunkBytesIsECAdjusted(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.CreateBucket(ctx, "test-bucket", "alice", 2))
+
+	content := []byte("some content to upload for EC parity test")
+	_, err := store.PutObject(ctx, "test-bucket", "file.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
+	require.NoError(t, err)
+
+	stats := store.GetCASStats()
+
+	assert.Greater(t, stats.ChunkBytes, int64(0), "should have chunk bytes on disk")
+	// DataChunkBytes must equal ChunkBytes * 4/6 (data shards / total shards for RS(4,2))
+	expected := stats.ChunkBytes * ecDataShards / (ecDataShards + ecParityShards)
+	assert.Equal(t, expected, stats.DataChunkBytes,
+		"DataChunkBytes should be ChunkBytes * 4/6 (data shards only, EC parity excluded)")
+	assert.Less(t, stats.DataChunkBytes, stats.ChunkBytes,
+		"DataChunkBytes must be less than ChunkBytes (parity shards excluded)")
 }
 
 func TestGetCASStats_VersionCountAfterOverwrite(t *testing.T) {

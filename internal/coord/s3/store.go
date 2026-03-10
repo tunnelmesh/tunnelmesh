@@ -21,7 +21,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/klauspost/reedsolomon"
@@ -249,9 +248,10 @@ type Store struct {
 	// WithAutoGoroutines so Encode() uses 2×GOMAXPROCS goroutines instead of ~96.
 	// Safe for concurrent use: Encode() reads the immutable matrix and operates
 	// only on caller-provided shard slices (no shared mutable state).
-	ecEncoder reedsolomon.Encoder
-	bgWg      sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu        sync.RWMutex
+	ecEncoder          reedsolomon.Encoder
+	bgWg               sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	gcThrottleDisabled bool           // Skip GC CPU throttle sleeps (set by tests to avoid long waits)
+	mu                 sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -3563,8 +3563,10 @@ func (s *Store) GetCASStats() CASStats {
 
 	chunkBytes := s.statsChunkBytes.Load()
 	return CASStats{
-		ChunkCount:     int(s.statsChunkCount.Load()),
-		ChunkBytes:     chunkBytes,
+		ChunkCount: int(s.statsChunkCount.Load()),
+		ChunkBytes: chunkBytes,
+		// Integer division is intentional: truncation error < 1 byte per 6 bytes,
+		// negligible for any real-world chunk corpus.
 		DataChunkBytes: chunkBytes * ecDataShards / (ecDataShards + ecParityShards),
 		ObjectCount:    int(s.statsObjectCount.Load()),
 		VersionCount:   int(s.statsVersionCount.Load()),
@@ -3760,7 +3762,7 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 		// GC completes well within the 5-minute interval even with throttling.
 		// Skip under go test: the proportional sleep turns into hundreds of
 		// seconds on slow Ubuntu CI runners (slow I/O → long elapsed → long sleep).
-		if elapsed := time.Since(bucketStart); elapsed > 0 && !testing.Testing() {
+		if elapsed := time.Since(bucketStart); elapsed > 0 && !s.gcThrottleDisabled {
 			select {
 			case <-ctx.Done():
 				return referencedChunks

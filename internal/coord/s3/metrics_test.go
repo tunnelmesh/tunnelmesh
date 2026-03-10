@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -11,6 +12,66 @@ func gaugeValue(g prometheus.Gauge) float64 {
 	m := &dto.Metric{}
 	_ = g.Write(m)
 	return m.GetGauge().GetValue()
+}
+
+// newCASMetricsForTest creates a fresh S3Metrics instance backed by an isolated registry.
+// Each call resets the once guard so tests get independent metric objects.
+func newCASMetricsForTest(t *testing.T) *S3Metrics {
+	t.Helper()
+	s3MetricsOnce = sync.Once{} // reset singleton for test isolation
+	reg := prometheus.NewRegistry()
+	m := InitS3Metrics(reg)
+	if m == nil {
+		t.Fatal("expected non-nil metrics")
+	}
+	t.Cleanup(func() { s3MetricsOnce = sync.Once{} })
+	return m
+}
+
+func TestUpdateCASMetrics_DedupRatioBaselineIsOne(t *testing.T) {
+	m := newCASMetricsForTest(t)
+
+	// With no dedup savings: logical == dataChunkBytes → ratio should be exactly 1.0
+	const dataChunkBytes = 1000
+	m.UpdateCASMetrics(10, 1500, dataChunkBytes, dataChunkBytes, 0, 0, 0)
+
+	if v := gaugeValue(m.DedupRatio); v != 1.0 {
+		t.Errorf("DedupRatio = %v, want 1.0 (no dedup savings, EC-normalized baseline)", v)
+	}
+}
+
+func TestUpdateCASMetrics_DedupRatioWithSavings(t *testing.T) {
+	m := newCASMetricsForTest(t)
+
+	// logical = 3000 (3 identical objects, 1000 bytes each), dataChunkBytes = 1000 (stored once)
+	// → ratio should be 3.0
+	m.UpdateCASMetrics(10, 1500, 1000, 3000, 0, 0, 0)
+
+	if v := gaugeValue(m.DedupRatio); v != 3.0 {
+		t.Errorf("DedupRatio = %v, want 3.0 (3x dedup savings)", v)
+	}
+}
+
+func TestUpdateCASMetrics_DedupRatioClampedDuringGC(t *testing.T) {
+	m := newCASMetricsForTest(t)
+
+	// Transient GC state: logical briefly < dataChunkBytes → must clamp to 1.0
+	m.UpdateCASMetrics(10, 1500, 1000, 500, 0, 0, 0)
+
+	if v := gaugeValue(m.DedupRatio); v != 1.0 {
+		t.Errorf("DedupRatio = %v, want 1.0 (clamped during transient GC state)", v)
+	}
+}
+
+func TestUpdateCASMetrics_DedupRatioZeroDataBytes(t *testing.T) {
+	m := newCASMetricsForTest(t)
+
+	// Zero dataChunkBytes (empty store) → safe default of 1.0
+	m.UpdateCASMetrics(0, 0, 0, 0, 0, 0, 0)
+
+	if v := gaugeValue(m.DedupRatio); v != 1.0 {
+		t.Errorf("DedupRatio = %v, want 1.0 (empty store)", v)
+	}
 }
 
 func TestUpdateVolumeMetrics(t *testing.T) {

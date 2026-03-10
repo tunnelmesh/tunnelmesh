@@ -1,7 +1,6 @@
 package s3
 
 import (
-	"math"
 	"sync"
 	"sync/atomic"
 
@@ -312,7 +311,7 @@ func (m *S3Metrics) UpdateCASMetrics(chunks int, chunkBytes, dataChunkBytes, log
 	// DedupRatio == 1.0 with no dedup savings. Clamped to >=1.0 to avoid transient
 	// sub-1 values during GC.
 	if dataChunkBytes > 0 {
-		m.DedupRatio.Set(math.Max(1.0, float64(totalLogical)/float64(dataChunkBytes)))
+		m.DedupRatio.Set(max(1.0, float64(totalLogical)/float64(dataChunkBytes)))
 	} else {
 		m.DedupRatio.Set(1.0)
 	}
