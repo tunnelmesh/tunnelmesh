@@ -1250,7 +1250,6 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 		}
 		dataShards[shardIdx] = shardData
 	}
-	_ = dataShardPieces // release reference; shards now hold the assembled data
 
 	// Phase 3: Fetch parity shards (only needed when data shards are missing)
 	// Check for cancellation before fetching parity shards
@@ -1368,8 +1367,9 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 
 	// Stream reconstruction: ReconstructBlockwiseWriter writes one RS stripe at a
 	// time to the pipe, keeping memory at O(ecStreamBlock) instead of O(fileSize).
-	// If the caller closes the reader (e.g. request canceled), the next Write to
-	// pw returns io.ErrClosedPipe and the goroutine exits promptly.
+	// Context cancellation is handled via pipe backpressure: if the caller closes
+	// pr (e.g. HTTP handler done or context canceled), the next pw.Write returns
+	// io.ErrClosedPipe, causing the goroutine to exit promptly via CloseWithError.
 	pr, pw := io.Pipe()
 	vID := meta.VersionID
 	go func() {

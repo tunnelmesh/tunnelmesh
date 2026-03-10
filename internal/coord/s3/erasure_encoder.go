@@ -119,6 +119,9 @@ func ReconstructBlockwiseWriter(w io.Writer, shards [][]byte, k, m int, streamBl
 			if werr != nil {
 				return fmt.Errorf("write block %d shard %d: %w", blockIdx, i, werr)
 			}
+			if n != len(toWrite) {
+				return fmt.Errorf("short write block %d shard %d: wrote %d of %d bytes", blockIdx, i, n, len(toWrite))
+			}
 		}
 	}
 
