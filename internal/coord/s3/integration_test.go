@@ -377,13 +377,15 @@ func TestConcurrent_DeleteAndRead(t *testing.T) {
 		}(i)
 	}
 
+	// atLeastOneDelete is signalled after the first successful delete so we can
+	// stop relying on a fixed sleep and avoid flakiness on slow CI runners.
+	atLeastOneDelete := make(chan struct{}, 1)
+
 	// Launch deleters
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-
-			time.Sleep(5 * time.Millisecond) // Let readers get started
 
 			for j := 0; j < 10; j++ {
 				select {
@@ -394,14 +396,24 @@ func TestConcurrent_DeleteAndRead(t *testing.T) {
 					err := store.DeleteObject(ctx, "test-bucket", key)
 					if err == nil {
 						deleted.Add(1)
+						select {
+						case atLeastOneDelete <- struct{}{}:
+						default:
+						}
 					}
 				}
 			}
 		}(i)
 	}
 
-	// Run for a bit
-	time.Sleep(50 * time.Millisecond)
+	// Wait until at least one delete has completed, then give readers a chance to
+	// observe the deletion. 10s timeout guards against broken environments.
+	select {
+	case <-atLeastOneDelete:
+		time.Sleep(10 * time.Millisecond)
+	case <-time.After(10 * time.Second):
+		t.Error("timed out waiting for any delete to complete")
+	}
 	close(stopAll)
 	wg.Wait()
 

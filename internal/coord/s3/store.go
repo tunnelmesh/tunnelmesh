@@ -248,9 +248,10 @@ type Store struct {
 	// WithAutoGoroutines so Encode() uses 2×GOMAXPROCS goroutines instead of ~96.
 	// Safe for concurrent use: Encode() reads the immutable matrix and operates
 	// only on caller-provided shard slices (no shared mutable state).
-	ecEncoder reedsolomon.Encoder
-	bgWg      sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
-	mu        sync.RWMutex
+	ecEncoder          reedsolomon.Encoder
+	bgWg               sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
+	gcThrottleDisabled bool           // Skip GC CPU throttle sleeps (set by tests to avoid long waits)
+	mu                 sync.RWMutex
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -3436,13 +3437,14 @@ func extractChunksFromRecycledEntry(data []byte) ([]string, error) {
 
 // CASStats holds statistics about content-addressed storage.
 type CASStats struct {
-	ChunkCount    int   // Total number of chunks
-	ChunkBytes    int64 // Total bytes in chunks (after dedup)
-	LogicalBytes  int64 // Logical bytes (sum of live object sizes, before dedup)
-	VersionBytes  int64 // Logical bytes in version files
-	RecycledBytes int64 // Logical bytes in recyclebin entries
-	VersionCount  int   // Total number of versions
-	ObjectCount   int   // Total number of current objects
+	ChunkCount     int   // Total number of chunks
+	ChunkBytes     int64 // Total bytes in chunks (after dedup, including EC parity shards)
+	DataChunkBytes int64 // ChunkBytes adjusted for EC parity overhead (data shards only)
+	LogicalBytes   int64 // Logical bytes (sum of live object sizes, before dedup)
+	VersionBytes   int64 // Logical bytes in version files
+	RecycledBytes  int64 // Logical bytes in recyclebin entries
+	VersionCount   int   // Total number of versions
+	ObjectCount    int   // Total number of current objects
 }
 
 // initCASStats populates the atomic stat counters from a one-time filesystem walk.
@@ -3559,14 +3561,18 @@ func (s *Store) GetCASStats() CASStats {
 		return CASStats{}
 	}
 
+	chunkBytes := s.statsChunkBytes.Load()
 	return CASStats{
-		ChunkCount:    int(s.statsChunkCount.Load()),
-		ChunkBytes:    s.statsChunkBytes.Load(),
-		ObjectCount:   int(s.statsObjectCount.Load()),
-		VersionCount:  int(s.statsVersionCount.Load()),
-		LogicalBytes:  s.statsLogicalBytes.Load(),
-		VersionBytes:  s.statsVersionBytes.Load(),
-		RecycledBytes: s.statsRecycledBytes.Load(),
+		ChunkCount: int(s.statsChunkCount.Load()),
+		ChunkBytes: chunkBytes,
+		// Integer division is intentional: truncation error < 1 byte per 6 bytes,
+		// negligible for any real-world chunk corpus.
+		DataChunkBytes: chunkBytes * ecDataShards / (ecDataShards + ecParityShards),
+		ObjectCount:    int(s.statsObjectCount.Load()),
+		VersionCount:   int(s.statsVersionCount.Load()),
+		LogicalBytes:   s.statsLogicalBytes.Load(),
+		VersionBytes:   s.statsVersionBytes.Load(),
+		RecycledBytes:  s.statsRecycledBytes.Load(),
 	}
 }
 
@@ -3754,7 +3760,9 @@ func (s *Store) buildChunkReferenceSet(ctx context.Context) map[string]struct{} 
 		// Throttle to ~10% CPU duty cycle: sleep 9× the per-bucket scan time.
 		// Fast buckets pause briefly; slow buckets pause proportionally.
 		// GC completes well within the 5-minute interval even with throttling.
-		if elapsed := time.Since(bucketStart); elapsed > 0 {
+		// Skip under go test: the proportional sleep turns into hundreds of
+		// seconds on slow Ubuntu CI runners (slow I/O → long elapsed → long sleep).
+		if elapsed := time.Since(bucketStart); elapsed > 0 && !s.gcThrottleDisabled {
 			select {
 			case <-ctx.Done():
 				return referencedChunks

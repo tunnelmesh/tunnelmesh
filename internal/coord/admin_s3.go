@@ -482,9 +482,10 @@ func (s *Server) handleS3ListBuckets(w http.ResponseWriter, r *http.Request) {
 	casStats := s.s3Store.GetCASStats()
 	totalLogical := casStats.LogicalBytes + casStats.VersionBytes + casStats.RecycledBytes
 	dedupRatio := 1.0
-	if casStats.ChunkBytes > 0 {
-		// Clamp to >=1.0: transient states during GC can briefly have logical < physical
-		dedupRatio = max(1.0, float64(totalLogical)/float64(casStats.ChunkBytes))
+	if casStats.DataChunkBytes > 0 {
+		// Use EC-adjusted bytes (data shards only) so DedupRatio == 1.0 with no savings.
+		// Clamp to >=1.0: transient states during GC can briefly have logical < physical.
+		dedupRatio = max(1.0, float64(totalLogical)/float64(casStats.DataChunkBytes))
 	}
 	resp.Storage = &S3StorageInfo{
 		PhysicalBytes: casStats.ChunkBytes,

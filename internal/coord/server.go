@@ -1146,6 +1146,7 @@ func (s *Server) updateS3Metrics() {
 	metrics.UpdateCASMetrics(
 		casStats.ChunkCount,
 		casStats.ChunkBytes,
+		casStats.DataChunkBytes,
 		casStats.LogicalBytes,
 		casStats.VersionBytes,
 		casStats.RecycledBytes,

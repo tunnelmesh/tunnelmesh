@@ -297,17 +297,21 @@ func (m *S3Metrics) SetRegisteredUsers(count int) {
 
 // UpdateCASMetrics updates content-addressed storage metrics.
 // totalLogical includes live objects + versions + recyclebin for accurate dedup ratio.
-func (m *S3Metrics) UpdateCASMetrics(chunks int, chunkBytes, logicalBytes, versionBytes, recycledBytes int64, versions int) {
+// dataChunkBytes is ChunkBytes normalized for EC parity (data shards only), so that
+// DedupRatio == 1.0 when there are no dedup savings regardless of the EC coding rate.
+func (m *S3Metrics) UpdateCASMetrics(chunks int, chunkBytes, dataChunkBytes, logicalBytes, versionBytes, recycledBytes int64, versions int) {
 	m.ChunksTotal.Set(float64(chunks))
 	m.ChunkStorageBytes.Set(float64(chunkBytes))
 	totalLogical := logicalBytes + versionBytes + recycledBytes
 	m.LogicalBytes.Set(float64(totalLogical))
 	m.VersionsTotal.Set(float64(versions))
 
-	// Calculate dedup ratio (logical/physical)
-	// A ratio > 1 means we're saving space through deduplication
-	if chunkBytes > 0 {
-		m.DedupRatio.Set(float64(totalLogical) / float64(chunkBytes))
+	// Calculate dedup ratio (logical / EC-adjusted physical).
+	// Using dataChunkBytes (data shards only) removes EC parity overhead so that
+	// DedupRatio == 1.0 with no dedup savings. Clamped to >=1.0 to avoid transient
+	// sub-1 values during GC.
+	if dataChunkBytes > 0 {
+		m.DedupRatio.Set(max(1.0, float64(totalLogical)/float64(dataChunkBytes)))
 	} else {
 		m.DedupRatio.Set(1.0)
 	}
