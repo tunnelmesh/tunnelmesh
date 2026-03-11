@@ -52,14 +52,25 @@ func TestUpdateCASMetrics_DedupRatioWithSavings(t *testing.T) {
 	}
 }
 
-func TestUpdateCASMetrics_DedupRatioClampedDuringGC(t *testing.T) {
+func TestUpdateCASMetrics_DedupRatioBelowOneForPaddingWaste(t *testing.T) {
 	m := newCASMetricsForTest(t)
 
-	// Transient GC state: logical briefly < dataChunkBytes → must clamp to 1.0
+	// Small objects in large EC blocks: logical (500) < dataChunkBytes (1000)
+	// → ratio = 0.5, surfacing EC padding inefficiency (not clamped to 1.0)
 	m.UpdateCASMetrics(10, 1500, 1000, 500, 0, 0, 0)
 
-	if v := gaugeValue(m.DedupRatio); v != 1.0 {
-		t.Errorf("DedupRatio = %v, want 1.0 (clamped during transient GC state)", v)
+	if v := gaugeValue(m.DedupRatio); v != 0.5 {
+		t.Errorf("DedupRatio = %v, want 0.5 (EC padding waste, sub-1.0 allowed)", v)
+	}
+}
+
+func TestUpdateCASMetrics_DataChunkStorageBytesSet(t *testing.T) {
+	m := newCASMetricsForTest(t)
+
+	m.UpdateCASMetrics(10, 1500, 800, 1000, 0, 0, 0)
+
+	if v := gaugeValue(m.DataChunkStorageBytes); v != 800 {
+		t.Errorf("DataChunkStorageBytes = %v, want 800", v)
 	}
 }
 

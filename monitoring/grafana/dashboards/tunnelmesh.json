@@ -2237,8 +2237,8 @@
         },
         {
           "editorMode": "code",
-          "expr": "tunnelmesh_s3_chunk_storage_bytes",
-          "legendFormat": "{{ peer }} - Physical (after dedup)",
+          "expr": "tunnelmesh_s3_data_chunk_storage_bytes",
+          "legendFormat": "{{ peer }} - Physical (EC-normalized)",
           "range": true,
           "refId": "B"
         }

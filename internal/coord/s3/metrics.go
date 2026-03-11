@@ -36,11 +36,12 @@ type S3Metrics struct {
 	RegisteredUsers prometheus.Gauge // tunnelmesh_s3_registered_users
 
 	// CAS/Chunking metrics
-	ChunksTotal       prometheus.Gauge // tunnelmesh_s3_chunks_total
-	ChunkStorageBytes prometheus.Gauge // tunnelmesh_s3_chunk_storage_bytes (actual on-disk after dedup)
-	LogicalBytes      prometheus.Gauge // tunnelmesh_s3_logical_bytes (total without dedup)
-	DedupRatio        prometheus.Gauge // tunnelmesh_s3_dedup_ratio (logical/physical, >1 means savings)
-	VersionsTotal     prometheus.Gauge // tunnelmesh_s3_versions_total
+	ChunksTotal           prometheus.Gauge // tunnelmesh_s3_chunks_total
+	ChunkStorageBytes     prometheus.Gauge // tunnelmesh_s3_chunk_storage_bytes (actual on-disk after dedup, includes EC parity)
+	DataChunkStorageBytes prometheus.Gauge // tunnelmesh_s3_data_chunk_storage_bytes (EC-normalized physical: data shards only)
+	LogicalBytes          prometheus.Gauge // tunnelmesh_s3_logical_bytes (total without dedup)
+	DedupRatio            prometheus.Gauge // tunnelmesh_s3_dedup_ratio (logical/EC-normalized-physical, <1 means padding waste)
+	VersionsTotal         prometheus.Gauge // tunnelmesh_s3_versions_total
 
 	// GC metrics (counters for cumulative totals)
 	GCRunsTotal       prometheus.Counter   // tunnelmesh_s3_gc_runs_total
@@ -141,7 +142,12 @@ func InitS3Metrics(registry prometheus.Registerer) *S3Metrics {
 
 			ChunkStorageBytes: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
 				Name: "tunnelmesh_s3_chunk_storage_bytes",
-				Help: "Actual bytes stored in chunks (after deduplication)",
+				Help: "Actual bytes stored in chunks (after deduplication, includes EC parity shards)",
+			}),
+
+			DataChunkStorageBytes: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
+				Name: "tunnelmesh_s3_data_chunk_storage_bytes",
+				Help: "EC-normalized physical bytes (data shards only, parity excluded). Compare to logical bytes for true dedup efficiency.",
 			}),
 
 			LogicalBytes: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
@@ -151,7 +157,7 @@ func InitS3Metrics(registry prometheus.Registerer) *S3Metrics {
 
 			DedupRatio: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
 				Name: "tunnelmesh_s3_dedup_ratio",
-				Help: "Deduplication ratio (logical/physical bytes, >1 means space savings)",
+				Help: "Deduplication ratio (logical/EC-normalized-physical). >1 means dedup savings, <1 means EC padding overhead exceeds savings (e.g. small objects in large EC blocks).",
 			}),
 
 			VersionsTotal: promauto.With(registry).NewGauge(prometheus.GaugeOpts{
@@ -306,12 +312,16 @@ func (m *S3Metrics) UpdateCASMetrics(chunks int, chunkBytes, dataChunkBytes, log
 	m.LogicalBytes.Set(float64(totalLogical))
 	m.VersionsTotal.Set(float64(versions))
 
-	// Calculate dedup ratio (logical / EC-adjusted physical).
+	m.DataChunkStorageBytes.Set(float64(dataChunkBytes))
+
+	// Calculate dedup ratio (logical / EC-normalized physical).
 	// Using dataChunkBytes (data shards only) removes EC parity overhead so that
-	// DedupRatio == 1.0 with no dedup savings. Clamped to >=1.0 to avoid transient
-	// sub-1 values during GC.
+	// DedupRatio == 1.0 when there are no dedup savings. Sub-1.0 values are valid
+	// and indicate that EC padding overhead exceeds dedup savings (e.g. small objects
+	// stored in large EC blocks). Clamped to >=0.0 only to guard against degenerate
+	// negative values.
 	if dataChunkBytes > 0 {
-		m.DedupRatio.Set(max(1.0, float64(totalLogical)/float64(dataChunkBytes)))
+		m.DedupRatio.Set(max(0.0, float64(totalLogical)/float64(dataChunkBytes)))
 	} else {
 		m.DedupRatio.Set(1.0)
 	}

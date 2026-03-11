@@ -326,6 +326,80 @@ func TestReconstructBlockwise_LargeFile(t *testing.T) {
 	}
 }
 
+func TestReconstructBlockwiseWriter_RoundTrip(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
+
+	tests := []struct {
+		name    string
+		size    int
+		missing int
+	}{
+		{"small_no_missing", 35, 0},
+		{"multi_block_no_missing", k * 256 * 3, 0},
+		{"small_missing_1", 35, 1},
+		{"large_missing_2", k * 256 * 5, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := make([]byte, tt.size)
+			_, _ = rand.Read(original)
+
+			shards, err := encodeForTest(original, k, m, streamBlockSize)
+			if err != nil {
+				t.Fatalf("encodeForTest failed: %v", err)
+			}
+
+			for i := 0; i < tt.missing; i++ {
+				shards[i] = nil
+			}
+
+			var buf bytes.Buffer
+			err = ReconstructBlockwiseWriter(&buf, shards, k, m, int64(streamBlockSize), int64(tt.size))
+			if err != nil {
+				t.Fatalf("ReconstructBlockwiseWriter failed: %v", err)
+			}
+
+			if !bytes.Equal(buf.Bytes(), original) {
+				t.Errorf("decoded data doesn't match original (size=%d, missing=%d)", tt.size, tt.missing)
+			}
+		})
+	}
+}
+
+func TestReconstructBlockwiseWriter_WriterError(t *testing.T) {
+	k, m := 4, 2
+	streamBlockSize := k * 256
+	data := make([]byte, 1024)
+	_, _ = rand.Read(data)
+
+	shards, err := encodeForTest(data, k, m, streamBlockSize)
+	if err != nil {
+		t.Fatalf("encodeForTest failed: %v", err)
+	}
+
+	// errorWriter fails after the first write
+	ew := &struct{ written bool }{}
+	w := writerFunc(func(p []byte) (int, error) {
+		if ew.written {
+			return 0, fmt.Errorf("simulated write error")
+		}
+		ew.written = true
+		return len(p), nil
+	})
+
+	err = ReconstructBlockwiseWriter(w, shards, k, m, int64(streamBlockSize), int64(len(data)))
+	if err == nil {
+		t.Error("expected error from writer, got nil")
+	}
+}
+
+// writerFunc is an io.Writer backed by a function.
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
 func BenchmarkReconstructBlockwise(b *testing.B) {
 	k, m := 4, 2
 	streamBlockSize := ecStreamBlock

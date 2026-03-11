@@ -1192,14 +1192,13 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 		dataShardPieces[shardIdx][blockIdx] = chunk
 	}
 
-	// Assemble each data shard by concatenating its pieces in block order.
-	dataShards := make([][]byte, k)
+	// Determine which data shards are complete without assembling them yet.
+	shardComplete := make([]bool, k)
+	availableDataShards := 0
 	for shardIdx := 0; shardIdx < k; shardIdx++ {
 		if incompleteShard[shardIdx] {
-			dataShards[shardIdx] = nil
 			continue
 		}
-		// Verify all blocks are present.
 		allPresent := true
 		totalSize := 0
 		for _, piece := range dataShardPieces[shardIdx] {
@@ -1209,78 +1208,47 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 			}
 			totalSize += len(piece)
 		}
-		if !allPresent || totalSize == 0 {
+		if allPresent && totalSize > 0 {
+			shardComplete[shardIdx] = true
+			availableDataShards++
+		}
+	}
+
+	// Phase 2: Fast path — all data shards available, skip parity fetch entirely.
+	// Build an interleaved multi-reader directly from the fetched piece buffers;
+	// no additional copy is needed. The write path stores each RS piece (ecPieceSize)
+	// as a single CAS chunk, so dataShardPieces[i][b] is exactly one piece.
+	// io.LimitReader trims RS zero-padding without a separate fileData buffer.
+	if availableDataShards == k {
+		readers := make([]io.Reader, 0, numDataBlocks*k)
+		for b := 0; b < numDataBlocks; b++ {
+			for i := 0; i < k; i++ {
+				piece := dataShardPieces[i][b]
+				if piece == nil {
+					return nil, nil, fmt.Errorf("data shard %d block %d nil in fast path (versionID=%s)", i, b, meta.VersionID)
+				}
+				readers = append(readers, bytes.NewReader(piece))
+			}
+		}
+		return io.NopCloser(io.LimitReader(io.MultiReader(readers...), meta.Size)), meta, nil
+	}
+
+	// Reconstruction path: assemble data shards from pieces for RS decoding.
+	dataShards := make([][]byte, k)
+	for shardIdx := 0; shardIdx < k; shardIdx++ {
+		if !shardComplete[shardIdx] {
 			dataShards[shardIdx] = nil
 			continue
+		}
+		totalSize := 0
+		for _, piece := range dataShardPieces[shardIdx] {
+			totalSize += len(piece)
 		}
 		shardData := make([]byte, 0, totalSize)
 		for _, piece := range dataShardPieces[shardIdx] {
 			shardData = append(shardData, piece...)
 		}
 		dataShards[shardIdx] = shardData
-	}
-
-	// Count available data shards
-	availableDataShards := 0
-	for i := 0; i < k; i++ {
-		if dataShards[i] != nil {
-			availableDataShards++
-		}
-	}
-
-	// Phase 2: Fast path - all data shards available, skip parity fetch entirely
-	if availableDataShards == k {
-		// No reconstruction needed — reassemble original bytes from data shards.
-		// The write path splits each RS stripe (ecStreamBlock) into k equal pieces
-		// and appends block b's piece to shard[i]. To recover the original byte
-		// stream we must interleave pieces in block order:
-		//   for each block b: concat shard[0][b], shard[1][b], ..., shard[k-1][b]
-		// Concatenating entire shards (shard-major) produces the wrong order for
-		// files > ecPieceSize (1 MB).
-		pieceSize := int64(0)
-		if numDataBlocks > 0 && k > 0 && len(dataShards[0]) > 0 {
-			pieceSize = int64(len(dataShards[0])) / int64(numDataBlocks)
-		}
-		var fileData []byte
-		if pieceSize > 0 && numDataBlocks > 1 {
-			// Multi-block: interleave pieces from each shard.
-			// All data shards must have exactly numDataBlocks*pieceSize bytes;
-			// CAS hash validation guards against corruption, but a length mismatch
-			// would cause silent truncation without this explicit check.
-			for i := 0; i < k; i++ {
-				expected := int64(numDataBlocks) * pieceSize
-				if int64(len(dataShards[i])) != expected {
-					return nil, nil, fmt.Errorf("data shard %d length %d, expected %d (versionID=%s)",
-						i, len(dataShards[i]), expected, meta.VersionID)
-				}
-			}
-			fileData = make([]byte, 0, meta.Size)
-			for b := 0; b < numDataBlocks; b++ {
-				for i := 0; i < k; i++ {
-					start := int64(b) * pieceSize
-					fileData = append(fileData, dataShards[i][start:start+pieceSize]...)
-				}
-			}
-		} else {
-			// Single-block (common case for files <= ecStreamBlock = 4 MB):
-			// k pieces are already in order, concatenate directly.
-			totalShardSize := int64(0)
-			for i := 0; i < k; i++ {
-				totalShardSize += int64(len(dataShards[i]))
-			}
-			fileData = make([]byte, 0, totalShardSize)
-			for i := 0; i < k; i++ {
-				fileData = append(fileData, dataShards[i]...)
-			}
-		}
-
-		// Trim to original size (remove RS zero-padding from last block).
-		if int64(len(fileData)) < meta.Size {
-			return nil, nil, fmt.Errorf("reassembled data too small: got %d bytes, expected %d (versionID=%s)", len(fileData), meta.Size, meta.VersionID)
-		}
-		fileData = fileData[:meta.Size]
-
-		return io.NopCloser(bytes.NewReader(fileData)), meta, nil
 	}
 
 	// Phase 3: Fetch parity shards (only needed when data shards are missing)
@@ -1366,7 +1334,8 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 		}
 	}
 
-	// Phase 4: Reconstruction path - some data shards missing
+	// Phase 4: Reconstruction path — stream RS-decoded blocks via pipe.
+	// Memory: O(ecStreamBlock) per block; no full-file output buffer allocated.
 	totalAvailable := availableDataShards + availableParityShards
 	if totalAvailable < k {
 		return nil, nil, fmt.Errorf("insufficient shards: need %d, have %d data + %d parity = %d total (versionID=%s)",
@@ -1380,7 +1349,7 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 		Str("version", meta.VersionID).
 		Msg("reconstructing erasure-coded object")
 
-	// Combine data + parity shards into single array for DecodeFile
+	// Combine data + parity shards into single array for RS decoder.
 	allShards := make([][]byte, k+m)
 	for i := 0; i < k; i++ {
 		allShards[i] = dataShards[i]
@@ -1389,79 +1358,31 @@ func (s *Store) getObjectContentWithErasureCoding(ctx context.Context, bucket, k
 		allShards[k+i] = parityShards[i]
 	}
 
-	// Check for cancellation before expensive reconstruction
+	// Check for cancellation before starting reconstruction goroutine.
 	select {
 	case <-ctx.Done():
 		return nil, nil, fmt.Errorf("context canceled before reconstruction: %w", ctx.Err())
 	default:
 	}
 
-	// Reconstruct using Reed-Solomon (block-wise streaming decoder).
-	// ReconstructBlockwise uses ec.StreamBlockSize to know how large each RS stripe is.
-	reconstructedData, err := ReconstructBlockwise(allShards, k, m, ec.StreamBlockSize, meta.Size)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to reconstruct file (versionID=%s): %w", meta.VersionID, err)
-	}
-
-	// Phase 5: Cache reconstructed data shards (best-effort, async)
-	// This improves future read performance by storing reconstructed shards locally.
-	// Deep copy reconstructed shards since ReconstructBlockwise may modify allShards in-place
-	// and the caller may still be reading reconstructedData.
-	cachedK := k
-	cachedShards := make([][]byte, k)
-	missingShards := make([]bool, k)
-	for i := 0; i < k; i++ {
-		missingShards[i] = dataShards[i] == nil
-		if missingShards[i] && allShards[i] != nil {
-			cachedShards[i] = make([]byte, len(allShards[i]))
-			copy(cachedShards[i], allShards[i])
-		}
-	}
-	s.bgWg.Add(1)
+	// Stream reconstruction: ReconstructBlockwiseWriter writes one RS stripe at a
+	// time to the pipe, keeping memory at O(ecStreamBlock) instead of O(fileSize).
+	// Context cancellation is handled via pipe backpressure: if the caller closes
+	// pr (e.g. HTTP handler done or context canceled), the next pw.Write returns
+	// io.ErrClosedPipe, causing the goroutine to exit promptly via CloseWithError.
+	pr, pw := io.Pipe()
+	vID := meta.VersionID
 	go func() {
-		defer s.bgWg.Done()
-		// Use background context since original request may have completed
-		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		// Cache any data shards that were reconstructed
-		for i := 0; i < cachedK; i++ {
-			if !missingShards[i] {
-				// Already had this shard
-				continue
-			}
-
-			// This shard was reconstructed - cache it by chunking and storing
-			reconstructedShard := cachedShards[i]
-			if reconstructedShard == nil {
-				s.logger.Warn().Int("shard", i).Msg("reconstructed shard is nil, skipping cache")
-				continue
-			}
-
-			shardChunker := NewStreamingChunker(bytes.NewReader(reconstructedShard))
-			for {
-				chunk, chunkHash, err := shardChunker.NextChunk()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					s.logger.Warn().Err(err).Int("shard", i).Msg("failed to chunk reconstructed shard")
-					break
-				}
-
-				// Write chunk to local CAS (best-effort); pass chunkHash to skip redundant SHA-256.
-				if _, err := s.cas.writeChunkKnown(bgCtx, chunk, chunkHash); err != nil {
-					if len(chunkHash) >= 8 {
-						s.logger.Warn().Err(err).Int("shard", i).Str("hash", chunkHash[:8]).Msg("failed to cache reconstructed chunk")
-					} else {
-						s.logger.Warn().Err(err).Int("shard", i).Str("hash", chunkHash).Msg("failed to cache reconstructed chunk")
-					}
-				}
-			}
+		err := ReconstructBlockwiseWriter(pw, allShards, k, m, ec.StreamBlockSize, meta.Size)
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("reconstruct (versionID=%s): %w", vID, err))
+			return
+		}
+		if cerr := pw.Close(); cerr != nil {
+			s.logger.Warn().Err(cerr).Str("version", vID).Msg("failed to close reconstruction pipe")
 		}
 	}()
-
-	return io.NopCloser(bytes.NewReader(reconstructedData)), meta, nil
+	return pr, meta, nil
 }
 
 // putObjectWithErasureCoding stores an object using the streaming RS(4,2)

@@ -2,36 +2,37 @@ package s3
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/klauspost/reedsolomon"
 )
 
-// ReconstructBlockwise reconstructs the original file from partial shards
-// encoded by the streaming block method. shards[i] is nil if the shard is
-// unavailable. Each non-nil shard contains concatenated fixed-size pieces:
-// piece for block 0, piece for block 1, …, piece for block N-1.
+// ReconstructBlockwiseWriter reconstructs the original file from partial shards
+// and streams it block-by-block to w. Memory: O(streamBlockSize) constant
+// regardless of file size (one RS stripe processed at a time).
+//
+// shards[i] is nil if the shard is unavailable. Each non-nil shard contains
+// concatenated fixed-size pieces: piece for block 0, piece for block 1, …, block N-1.
 //
 // streamBlockSize is the RS stripe size (e.g. 4 MB for RS(4,2));
-// pieceSize = streamBlockSize / k. originalSize is the true file byte count
-// used to trim RS zero-padding from the last block.
+// pieceSize = streamBlockSize / k. originalSize trims RS zero-padding from the last block.
 //
-// Memory: O(fileSize) — assembles all shard buffers before block-wise RS
-// decode. Streaming block-by-block reconstruction is future work.
-func ReconstructBlockwise(shards [][]byte, k, m int, streamBlockSize, originalSize int64) ([]byte, error) {
+//nolint:gocyclo // Complexity from shard validation + block loop + write trimming
+func ReconstructBlockwiseWriter(w io.Writer, shards [][]byte, k, m int, streamBlockSize, originalSize int64) error {
 	if k < 1 || m < 1 {
-		return nil, fmt.Errorf("invalid k=%d or m=%d", k, m)
+		return fmt.Errorf("invalid k=%d or m=%d", k, m)
 	}
 	if len(shards) != k+m {
-		return nil, fmt.Errorf("expected %d shards (k+m), got %d", k+m, len(shards))
+		return fmt.Errorf("expected %d shards (k+m), got %d", k+m, len(shards))
 	}
 	if originalSize <= 0 {
-		return nil, fmt.Errorf("originalSize must be > 0, got %d", originalSize)
+		return fmt.Errorf("originalSize must be > 0, got %d", originalSize)
 	}
 	if streamBlockSize <= 0 {
-		return nil, fmt.Errorf("streamBlockSize must be > 0, got %d", streamBlockSize)
+		return fmt.Errorf("streamBlockSize must be > 0, got %d", streamBlockSize)
 	}
 	if int64(k) > streamBlockSize {
-		return nil, fmt.Errorf("k=%d exceeds streamBlockSize=%d", k, streamBlockSize)
+		return fmt.Errorf("k=%d exceeds streamBlockSize=%d", k, streamBlockSize)
 	}
 
 	// Count available shards
@@ -42,12 +43,12 @@ func ReconstructBlockwise(shards [][]byte, k, m int, streamBlockSize, originalSi
 		}
 	}
 	if available < k {
-		return nil, fmt.Errorf("insufficient shards: need %d, have %d", k, available)
+		return fmt.Errorf("insufficient shards: need %d, have %d", k, available)
 	}
 
 	enc, err := reedsolomon.New(k, m)
 	if err != nil {
-		return nil, fmt.Errorf("create RS decoder: %w", err)
+		return fmt.Errorf("create RS decoder: %w", err)
 	}
 
 	pieceSize := streamBlockSize / int64(k)
@@ -60,19 +61,17 @@ func ReconstructBlockwise(shards [][]byte, k, m int, streamBlockSize, originalSi
 		}
 	}
 	if maxShardLen == 0 {
-		return nil, fmt.Errorf("all shards are empty")
+		return fmt.Errorf("all shards are empty")
 	}
 	numBlocks := (maxShardLen + pieceSize - 1) / pieceSize
 
-	result := make([]byte, 0, originalSize)
-
-	for blockIdx := int64(0); blockIdx < numBlocks; blockIdx++ {
+	written := int64(0)
+	for blockIdx := int64(0); blockIdx < numBlocks && written < originalSize; blockIdx++ {
 		pieceStart := blockIdx * pieceSize
 		pieceEnd := pieceStart + pieceSize
 
 		// Extract and copy pieces for this block from each shard.
-		// Reconstruct modifies slices in-place, so each must be an
-		// independently allocated buffer.
+		// ReconstructData modifies slices in-place, so each must be independently allocated.
 		blockPieces := make([][]byte, k+m)
 		for i, shard := range shards {
 			if shard == nil {
@@ -102,22 +101,55 @@ func ReconstructBlockwise(shards [][]byte, k, m int, streamBlockSize, originalSi
 		}
 		if needsReconstruction {
 			if err := enc.ReconstructData(blockPieces); err != nil {
-				return nil, fmt.Errorf("reconstruct block %d: %w", blockIdx, err)
+				return fmt.Errorf("reconstruct block %d: %w", blockIdx, err)
 			}
 		}
 
-		// Append data pieces to result.
-		for i := 0; i < k; i++ {
+		// Write data pieces to w, trimming RS zero-padding at end of file.
+		for i := 0; i < k && written < originalSize; i++ {
 			if blockPieces[i] == nil {
-				return nil, fmt.Errorf("data shard %d nil after reconstruction (block %d)", i, blockIdx)
+				return fmt.Errorf("data shard %d nil after reconstruction (block %d)", i, blockIdx)
 			}
-			result = append(result, blockPieces[i]...)
+			toWrite := blockPieces[i]
+			if remaining := originalSize - written; int64(len(toWrite)) > remaining {
+				toWrite = toWrite[:remaining]
+			}
+			n, werr := w.Write(toWrite)
+			written += int64(n)
+			if werr != nil {
+				return fmt.Errorf("write block %d shard %d: %w", blockIdx, i, werr)
+			}
+			if n != len(toWrite) {
+				return fmt.Errorf("short write block %d shard %d: wrote %d of %d bytes", blockIdx, i, n, len(toWrite))
+			}
 		}
 	}
 
-	// Trim RS zero-padding to the original file size.
-	if int64(len(result)) < originalSize {
-		return nil, fmt.Errorf("reconstructed %d bytes, expected %d", len(result), originalSize)
+	if written < originalSize {
+		return fmt.Errorf("reconstructed %d bytes, expected %d", written, originalSize)
 	}
-	return result[:originalSize], nil
+	return nil
+}
+
+// ReconstructBlockwise reconstructs the original file from partial shards into
+// a byte slice. For large files, prefer ReconstructBlockwiseWriter to avoid an
+// O(fileSize) output buffer.
+func ReconstructBlockwise(shards [][]byte, k, m int, streamBlockSize, originalSize int64) ([]byte, error) {
+	var buf []byte
+	if originalSize > 0 {
+		buf = make([]byte, 0, originalSize)
+	}
+	w := &appendWriter{buf: &buf}
+	if err := ReconstructBlockwiseWriter(w, shards, k, m, streamBlockSize, originalSize); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// appendWriter is an io.Writer that appends to a *[]byte.
+type appendWriter struct{ buf *[]byte }
+
+func (w *appendWriter) Write(p []byte) (int, error) {
+	*w.buf = append(*w.buf, p...)
+	return len(p), nil
 }
