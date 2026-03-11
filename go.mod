@@ -14,7 +14,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/kardianos/service v1.2.4
 	github.com/klauspost/compress v1.18.4
-	github.com/klauspost/reedsolomon v1.13.2
+	github.com/klauspost/reedsolomon v1.13.3
 	github.com/miekg/dns v1.1.72
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
@@ -29,8 +29,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.42.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.48.0
-	golang.org/x/sys v0.41.0
-	golang.org/x/time v0.14.0
+	golang.org/x/sys v0.42.0
+	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
