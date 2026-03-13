@@ -169,14 +169,14 @@ func (f *FilterConfig) IsDefaultDeny() bool {
 func (f *FilterConfig) Validate() error {
 	for i, rule := range f.Rules {
 		if rule.Port == 0 {
-			return fmt.Errorf("filter.rules[%d].port is required", i)
+			return fmt.Errorf("filter.rules[%d].port must be between 1 and 65535 (got 0)", i)
 		}
 		proto := strings.ToLower(rule.Protocol)
 		if proto != "tcp" && proto != "udp" {
-			return fmt.Errorf("filter.rules[%d].protocol must be 'tcp' or 'udp', got %q", i, rule.Protocol)
+			return fmt.Errorf("filter.rules[%d]: invalid protocol %q - must be one of: tcp, udp", i, rule.Protocol)
 		}
 		if rule.Action != "allow" && rule.Action != "deny" {
-			return fmt.Errorf("filter.rules[%d].action must be 'allow' or 'deny', got %q", i, rule.Action)
+			return fmt.Errorf("filter.rules[%d]: invalid action %q - must be one of: allow, deny", i, rule.Action)
 		}
 	}
 	return nil

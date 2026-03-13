@@ -112,6 +112,9 @@ func runShareList(_ *cobra.Command, _ []string) error {
 
 func runShareCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := validateBucketOrShareName(name); err != nil {
+		return fmt.Errorf("invalid share name: %w", err)
+	}
 	description, _ := cmd.Flags().GetString("description")
 
 	adminURL := getAdminURL()

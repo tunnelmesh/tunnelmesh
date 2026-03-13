@@ -107,7 +107,7 @@ func runContextCreate(cmd *cobra.Command, args []string) error {
 
 	// Validate config file exists
 	if _, err := os.Stat(contextConfigPath); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", contextConfigPath)
+		return fmt.Errorf("config file not found: %s - create the config first (e.g. via 'tunnelmesh join') or specify a different path with --config", contextConfigPath)
 	}
 
 	// Load config to extract server info
@@ -214,7 +214,7 @@ func runContextUse(cmd *cobra.Command, args []string) error {
 
 	ctx := store.Get(name)
 	if ctx == nil {
-		return fmt.Errorf("context %q not found", name)
+		return fmt.Errorf("context %q not found - use 'tunnelmesh context list' to see available contexts", name)
 	}
 
 	// Get the old active context for DNS switching
@@ -255,7 +255,7 @@ func runContextShow(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		ctx = store.Get(args[0])
 		if ctx == nil {
-			return fmt.Errorf("context %q not found", args[0])
+			return fmt.Errorf("context %q not found - use 'tunnelmesh context list' to see available contexts", args[0])
 		}
 	} else {
 		ctx = store.GetActive()
@@ -287,7 +287,7 @@ func runContextDelete(cmd *cobra.Command, args []string) error {
 
 	ctx := store.Get(name)
 	if ctx == nil {
-		return fmt.Errorf("context %q not found", name)
+		return fmt.Errorf("context %q not found - use 'tunnelmesh context list' to see available contexts", name)
 	}
 
 	reader := bufio.NewReader(os.Stdin)

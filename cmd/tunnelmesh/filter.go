@@ -125,15 +125,15 @@ Examples:
   tunnelmesh filter add --port 80 --protocol tcp --action deny --source-peer untrusted-peer`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if port == 0 {
-				return fmt.Errorf("--port is required")
+				return fmt.Errorf("--port is required - must be between 1 and 65535")
 			}
 			protocol = strings.ToLower(protocol)
 			if protocol != "tcp" && protocol != "udp" {
-				return fmt.Errorf("--protocol must be 'tcp' or 'udp'")
+				return fmt.Errorf("invalid protocol %q - must be one of: tcp, udp", protocol)
 			}
 			action = strings.ToLower(action)
 			if action != "allow" && action != "deny" {
-				return fmt.Errorf("--action must be 'allow' or 'deny'")
+				return fmt.Errorf("invalid action %q - must be one of: allow, deny", action)
 			}
 
 			if socketPath == "" {
@@ -194,11 +194,11 @@ Examples:
   tunnelmesh filter remove --port 22 --protocol tcp --source-peer untrusted-peer`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if port == 0 {
-				return fmt.Errorf("--port is required")
+				return fmt.Errorf("--port is required - must be between 1 and 65535")
 			}
 			protocol = strings.ToLower(protocol)
 			if protocol != "tcp" && protocol != "udp" {
-				return fmt.Errorf("--protocol must be 'tcp' or 'udp'")
+				return fmt.Errorf("invalid protocol %q - must be one of: tcp, udp", protocol)
 			}
 
 			if socketPath == "" {

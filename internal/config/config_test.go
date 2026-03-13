@@ -952,7 +952,7 @@ func TestFilterConfig_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "port is required",
+			errMsg:  "must be between 1 and 65535",
 		},
 		{
 			name: "invalid protocol",
@@ -962,7 +962,7 @@ func TestFilterConfig_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "protocol must be 'tcp' or 'udp'",
+			errMsg:  "must be one of: tcp, udp",
 		},
 		{
 			name: "invalid action",
@@ -972,7 +972,7 @@ func TestFilterConfig_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "action must be 'allow' or 'deny'",
+			errMsg:  "must be one of: allow, deny",
 		},
 		{
 			name: "empty action",
@@ -982,7 +982,7 @@ func TestFilterConfig_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "action must be 'allow' or 'deny'",
+			errMsg:  "must be one of: allow, deny",
 		},
 	}
 

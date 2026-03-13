@@ -160,7 +160,8 @@ func TestClient_InvalidProtocol(t *testing.T) {
 
 	err := client.FilterAdd(8080, "icmp", "allow", 0)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "protocol must be 'tcp' or 'udp'")
+	assert.Contains(t, err.Error(), "invalid protocol")
+	assert.Contains(t, err.Error(), "must be one of: tcp, udp")
 }
 
 func TestClient_MissingPort(t *testing.T) {
@@ -180,6 +181,7 @@ func TestClient_MissingPort(t *testing.T) {
 	err := client.FilterAdd(0, "tcp", "allow", 0)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "port is required")
+	assert.Contains(t, err.Error(), "1 and 65535")
 }
 
 func TestClient_ConnectionRefused(t *testing.T) {

@@ -257,11 +257,11 @@ func (s *Server) handleFilterAdd(filter *routing.PacketFilter, payload json.RawM
 
 	// Validate
 	if req.Port == 0 {
-		return Response{Success: false, Error: "port is required"}
+		return Response{Success: false, Error: "invalid port: must be between 1 and 65535 (port is required)"}
 	}
 	proto := routing.ProtocolFromString(req.Protocol)
 	if proto == 0 {
-		return Response{Success: false, Error: "protocol must be 'tcp' or 'udp'"}
+		return Response{Success: false, Error: fmt.Sprintf("invalid protocol %q - must be one of: tcp, udp", req.Protocol)}
 	}
 	action := routing.ParseFilterAction(req.Action)
 
@@ -313,7 +313,7 @@ func (s *Server) handleFilterRemove(filter *routing.PacketFilter, payload json.R
 
 	proto := routing.ProtocolFromString(req.Protocol)
 	if proto == 0 {
-		return Response{Success: false, Error: "protocol must be 'tcp' or 'udp'"}
+		return Response{Success: false, Error: fmt.Sprintf("invalid protocol %q - must be one of: tcp, udp", req.Protocol)}
 	}
 
 	filter.RemoveTemporaryRuleForPeer(req.Port, proto, req.SourcePeer)

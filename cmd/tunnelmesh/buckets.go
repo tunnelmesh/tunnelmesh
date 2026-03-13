@@ -259,6 +259,9 @@ func runBucketsList(cmd *cobra.Command, args []string) error {
 // nolint:dupl // Create and delete operations follow similar pattern with different HTTP methods
 func runBucketsCreate(cmd *cobra.Command, args []string) error {
 	bucketName := args[0]
+	if err := validateBucketOrShareName(bucketName); err != nil {
+		return fmt.Errorf("invalid bucket name: %w", err)
+	}
 
 	client, err := newS3Client()
 	if err != nil {
