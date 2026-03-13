@@ -7,11 +7,42 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tunnelmesh/tunnelmesh/internal/coord/replication"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 )
+
+// mockGCRoundTripper redirects all HTTP(S) requests to a target base URL.
+// Used in tests to intercept mesh-internal GC calls without TLS.
+type mockGCRoundTripper struct {
+	targetBase string // e.g., "http://127.0.0.1:12345"
+}
+
+func (m *mockGCRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	newURL := m.targetBase + req.URL.Path
+	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, newURL, req.Body)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range req.Header {
+		newReq.Header[k] = v
+	}
+	return http.DefaultTransport.RoundTrip(newReq)
+}
+
+// noopReplicationTransport satisfies replication.Transport for tests that only need
+// a real *replication.Replicator to call GetPeers() — no actual message passing.
+type noopReplicationTransport struct{}
+
+func (n *noopReplicationTransport) SendToCoordinator(_ context.Context, _ string, _ []byte) error {
+	return nil
+}
+
+func (n *noopReplicationTransport) RegisterHandler(_ func(ctx context.Context, from string, data []byte) error) {
+}
 
 func TestShares_List_NoManager(t *testing.T) {
 	srv := newTestServer(t)
@@ -125,4 +156,70 @@ func TestForwardBucketDeletion_Payload(t *testing.T) {
 	// Bucket must be gone
 	_, err := srv.s3Store.HeadBucket(t.Context(), bucketName)
 	assert.Error(t, err, "bucket should be gone after force delete")
+}
+
+// TestShareDelete_PeerForwardingIsSynchronous verifies that the DELETE /api/shares/{name}
+// HTTP response is not returned until peer bucket deletion completes.
+// If forwarding ran in a goroutine, the handler would close handlerDone before the
+// mock peer receives the request, causing the test to fail.
+func TestShareDelete_PeerForwardingIsSynchronous(t *testing.T) {
+	srv := newTestServerWithS3AndBucket(t)
+
+	// Create a file share directly (bypasses TLS-based owner auth in the HTTP handler)
+	_, err := srv.fileShareMgr.Create(t.Context(), "sync-test", "Test share", "testowner", 0, nil)
+	require.NoError(t, err)
+
+	// Track when the mock peer GC endpoint receives the deletion request.
+	peerReceived := make(chan struct{}, 1)
+	mockPeer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case peerReceived <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deleted_buckets":1}`))
+	}))
+	defer mockPeer.Close()
+
+	// Override shareGCClient to route mesh HTTPS calls to the mock HTTP server.
+	srv.shareGCClient = &http.Client{
+		Transport: &mockGCRoundTripper{targetBase: mockPeer.URL},
+	}
+
+	// Inject a minimal replicator with one fake peer so forwardBucketDeletionToPeers
+	// has a non-empty peer list and actually makes the HTTP call.
+	fakeReplicator := replication.NewReplicator(replication.Config{
+		Transport: &noopReplicationTransport{},
+	})
+	fakeReplicator.AddPeer("10.99.99.99", "mock-coord")
+	srv.replicator = fakeReplicator
+
+	// Call DELETE in a goroutine so we can observe ordering.
+	handlerDone := make(chan struct{})
+	go func() {
+		req := httptest.NewRequest(http.MethodDelete, "/api/shares/sync-test", nil)
+		rec := httptest.NewRecorder()
+		srv.adminMux.ServeHTTP(rec, req)
+		close(handlerDone)
+	}()
+
+	// Synchronous forwarding: peer must receive the request before the handler returns.
+	// If forwarding is async (the old bug), handlerDone fires first.
+	select {
+	case <-peerReceived:
+		// Good: peer was notified before the handler returned
+	case <-handlerDone:
+		t.Error("handler returned before peer received the deletion request (forwarding must be synchronous)")
+		return
+	case <-time.After(5 * time.Second):
+		t.Error("timeout waiting for peer notification")
+		return
+	}
+
+	// Wait for the handler to complete
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Error("timeout waiting for handler to complete")
+	}
 }

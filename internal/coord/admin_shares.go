@@ -253,13 +253,15 @@ func (s *Server) handleShareByName(w http.ResponseWriter, r *http.Request) {
 			// without waiting for the next 5-minute auto-sync cycle.
 			s.replicator.TriggerManifestSync()
 
-			// Explicitly purge the bucket on peer coordinators without waiting for
-			// PurgeOrphanedFileShareBuckets' 10-minute grace period to expire.
-			// In accordion scenarios this prevents per-iteration data accumulation.
-			// Use context.WithoutCancel so the goroutine isn't cancelled when the
-			// HTTP handler returns and the request context is done.
+			// Synchronously delete the bucket on peer coordinators so the HTTP
+			// response is not returned until all reachable peers have deleted the
+			// bucket. This prevents GC from seeing orphaned chunks before
+			// PurgeOrphanedFileShareBuckets runs on the peers.
+			// Use a 5-second timeout so an unreachable peer doesn't stall the handler.
 			bucketName := s3.FileShareBucketPrefix + shareName
-			go s.forwardBucketDeletionToPeers(context.WithoutCancel(r.Context()), bucketName)
+			peerCtx, peerCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			s.forwardBucketDeletionToPeers(peerCtx, bucketName)
+			peerCancel()
 		}
 
 		w.Header().Set("Content-Type", "application/json")

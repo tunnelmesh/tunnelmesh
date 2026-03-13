@@ -139,15 +139,24 @@ func (s *Server) handleS3GC(w http.ResponseWriter, r *http.Request) {
 	// concurrently with a full GC cycle. Keeping it outside gcMu prevents forwarded
 	// bucket deletions from returning 429 when a full GC happens to be running.
 	if req.BucketsOnly {
+		var validBuckets []string
 		var deletedBuckets int
 		for _, bucket := range req.ForceDeleteBuckets {
 			if !strings.HasPrefix(bucket, s3.FileShareBucketPrefix) {
 				continue // Safety: only allow fs+ buckets via this mechanism
 			}
+			validBuckets = append(validBuckets, bucket)
 			if err := s.s3Store.ForceDeleteBucket(r.Context(), bucket); err != nil {
 				log.Warn().Err(err).Str("bucket", bucket).Msg("force delete bucket during GC")
 			} else {
 				deletedBuckets++
+			}
+		}
+		// Forward to peer coordinators when this is not already a forwarded request.
+		// forwardBucketDeletionToPeers sends no_forward=true to prevent infinite loops.
+		if !req.NoForward {
+			for _, bucket := range validBuckets {
+				s.forwardBucketDeletionToPeers(r.Context(), bucket)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
