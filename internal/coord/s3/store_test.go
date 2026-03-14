@@ -153,6 +153,50 @@ func TestForceDeleteBucket(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestForceDeleteBucket_TombstonePreventsResurrection verifies that
+// ImportObjectMeta and ImportVersionHistory silently drop deliveries for a
+// bucket that was recently force-deleted. This prevents in-flight replication
+// workers from resurrecting the bucket by auto-creating _meta.json.
+func TestForceDeleteBucket_TombstonePreventsResurrection(t *testing.T) {
+	store := newTestStoreWithCAS(t)
+	ctx := context.Background()
+
+	bucketName := "fs+tombstone-test"
+	require.NoError(t, store.CreateBucket(ctx, bucketName, "alice", 1))
+
+	// Put an object so we have valid metadata to replay
+	content := []byte("hello")
+	meta, err := store.PutObject(ctx, bucketName, "doc.txt", bytes.NewReader(content), int64(len(content)), "text/plain", nil)
+	require.NoError(t, err)
+	metaJSON, err := json.Marshal(meta)
+	require.NoError(t, err)
+
+	// Force-delete the bucket (simulates share deletion on this coordinator)
+	require.NoError(t, store.ForceDeleteBucket(ctx, bucketName))
+	_, err = store.HeadBucket(ctx, bucketName)
+	require.ErrorIs(t, err, ErrBucketNotFound, "bucket must be gone after ForceDeleteBucket")
+
+	// Simulate in-flight replication delivering the object after deletion.
+	// Without tombstone, this recreates the bucket with CreatedAt=now.
+	chunks, importErr := store.ImportObjectMeta(ctx, bucketName, "doc.txt", metaJSON, "alice")
+	assert.NoError(t, importErr, "tombstone should silently drop, not error")
+	assert.Nil(t, chunks, "no chunks should be returned for tombstoned bucket")
+
+	// Bucket must NOT have been resurrected
+	_, err = store.HeadBucket(ctx, bucketName)
+	assert.ErrorIs(t, err, ErrBucketNotFound, "ImportObjectMeta must not resurrect a tombstoned bucket")
+
+	// Also verify ImportVersionHistory is suppressed
+	versions := []VersionHistoryEntry{{VersionID: "v1", MetaJSON: metaJSON}}
+	imported, _, versionErr := store.ImportVersionHistory(ctx, bucketName, "doc.txt", versions)
+	assert.NoError(t, versionErr)
+	assert.Equal(t, 0, imported, "ImportVersionHistory must not write versions for tombstoned bucket")
+
+	// Bucket still absent
+	_, err = store.HeadBucket(ctx, bucketName)
+	assert.ErrorIs(t, err, ErrBucketNotFound, "bucket must remain deleted after tombstoned version import")
+}
+
 func TestStoreHeadBucketNotFound(t *testing.T) {
 	store := newTestStoreWithCAS(t)
 

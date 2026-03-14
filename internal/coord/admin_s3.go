@@ -153,10 +153,13 @@ func (s *Server) handleS3GC(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Forward to peer coordinators when this is not already a forwarded request.
-		// forwardBucketDeletionToPeers sends no_forward=true to prevent infinite loops.
-		if !req.NoForward {
+		// Use a 5-second timeout matching the shares handler to prevent a dead peer
+		// from stalling the response for the full shareGCClient timeout (30s × N_buckets).
+		if !req.NoForward && len(validBuckets) > 0 {
+			fwdCtx, fwdCancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer fwdCancel()
 			for _, bucket := range validBuckets {
-				s.forwardBucketDeletionToPeers(r.Context(), bucket)
+				s.forwardBucketDeletionToPeers(fwdCtx, bucket)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

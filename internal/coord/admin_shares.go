@@ -260,8 +260,8 @@ func (s *Server) handleShareByName(w http.ResponseWriter, r *http.Request) {
 			// Use a 5-second timeout so an unreachable peer doesn't stall the handler.
 			bucketName := s3.FileShareBucketPrefix + shareName
 			peerCtx, peerCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer peerCancel()
 			s.forwardBucketDeletionToPeers(peerCtx, bucketName)
-			peerCancel()
 		}
 
 		w.Header().Set("Content-Type", "application/json")
