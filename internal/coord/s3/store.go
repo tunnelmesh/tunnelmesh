@@ -710,6 +710,11 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 		return fmt.Errorf("write bucket meta: %w", err)
 	}
 
+	// Clear any tombstone for this bucket so replication is not suppressed
+	// if the same bucket name is reused (e.g., accordion scenarios recreating
+	// a share with the same name within the tombstone TTL window).
+	delete(s.deletedBuckets, bucket)
+
 	return nil
 }
 
@@ -2613,9 +2618,16 @@ func (s *Store) ImportObjectMeta(ctx context.Context, bucket, key string, metaJS
 	// Reject replication for recently force-deleted buckets. A replication worker
 	// may have read the object before the bucket was deleted; delivering it now
 	// would auto-create a new _meta.json, silently resurrecting the bucket.
+	// Exception: if the object was modified AFTER the bucket was deleted, it belongs
+	// to a new share with the same name (e.g., accordion reuse). Allow it through
+	// and clear the tombstone so subsequent replication for this new share is not blocked.
 	if deletedAt, ok := s.deletedBuckets[bucket]; ok && time.Since(deletedAt) < deletedBucketTombstoneTTL {
-		s.mu.Unlock()
-		return nil, nil // silently drop — bucket was recently deleted
+		if !meta.LastModified.IsZero() && meta.LastModified.After(deletedAt) {
+			delete(s.deletedBuckets, bucket) // new share with same name — clear tombstone
+		} else {
+			s.mu.Unlock()
+			return nil, nil // silently drop — stale replication from before bucket deletion
+		}
 	}
 
 	// Ensure bucket exists — create bucket meta if needed
