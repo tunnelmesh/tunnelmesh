@@ -37,6 +37,12 @@ import (
 // For large file uploads or high-latency networks: Consider 1 hour or more
 const GCGracePeriod = 10 * time.Minute
 
+// deletedBucketTombstoneTTL is how long ForceDeleteBucket suppresses replication
+// imports for a bucket. Replication in-flight messages have a 10-second ack timeout
+// and the shareGCClient has a 30-second overall timeout, so 5 minutes provides
+// ample margin for all in-flight deliveries to clear before the tombstone expires.
+const deletedBucketTombstoneTTL = 5 * time.Minute
+
 // ecDataShards is the number of data shards for the universal RS(4,2) encoder.
 const ecDataShards = 4
 
@@ -252,6 +258,11 @@ type Store struct {
 	bgWg               sync.WaitGroup // Tracks background goroutines (e.g., shard caching)
 	gcThrottleDisabled bool           // Skip GC CPU throttle sleeps (set by tests to avoid long waits)
 	mu                 sync.RWMutex
+	// deletedBuckets is a tombstone set tracking recently force-deleted buckets (mu-protected).
+	// Prevents ImportObjectMeta / ImportVersionHistory from silently resurrecting a bucket
+	// when in-flight replication delivers objects after ForceDeleteBucket has run.
+	// Entries expire after deletedBucketTombstoneTTL; cleaned up lazily in ForceDeleteBucket.
+	deletedBuckets map[string]time.Time
 
 	// Incremental CAS stats — atomic for lock-free metrics reads.
 	// Initialized from filesystem walk at startup, updated at each mutation point.
@@ -280,11 +291,12 @@ func NewStore(dataDir string, quota *QuotaManager) (*Store, error) {
 	}
 
 	store := &Store{
-		dataDir:   dataDir,
-		quota:     quota,
-		logger:    zerolog.Nop(),          // Default to no-op logger
-		uploadSem: make(chan struct{}, 3), // Allow 3 concurrent EC uploads (~10 MB each)
-		ecEncoder: enc,
+		dataDir:        dataDir,
+		quota:          quota,
+		logger:         zerolog.Nop(),          // Default to no-op logger
+		uploadSem:      make(chan struct{}, 3), // Allow 3 concurrent EC uploads (~10 MB each)
+		ecEncoder:      enc,
+		deletedBuckets: make(map[string]time.Time),
 	}
 
 	// Calculate initial quota usage from existing objects
@@ -698,6 +710,11 @@ func (s *Store) CreateBucket(ctx context.Context, bucket, owner string, replicat
 		return fmt.Errorf("write bucket meta: %w", err)
 	}
 
+	// Clear any tombstone for this bucket so replication is not suppressed
+	// if the same bucket name is reused (e.g., accordion scenarios recreating
+	// a share with the same name within the tombstone TTL window).
+	delete(s.deletedBuckets, bucket)
+
 	return nil
 }
 
@@ -785,18 +802,33 @@ func (s *Store) DeleteBucket(ctx context.Context, bucket string) error {
 // to the next GC cycle. Much faster than purging each object individually.
 func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	bucketDir := s.bucketPath(bucket)
 
 	// Check if bucket exists
 	if _, err := os.Stat(bucketDir); os.IsNotExist(err) {
+		s.mu.Unlock()
 		return nil // Idempotent
 	}
 
-	// Decrement stats for all objects being removed.
-	// Corrupted files that can't be read/unmarshalled will cause stats drift
-	// until the next initCASStats on restart — log a warning so it's diagnosable.
+	// Remove the bucket meta file under the lock. This marks the bucket as
+	// logically deleted: concurrent getBucketMeta calls return ErrBucketNotFound,
+	// so new PutObject / ImportObjectMeta calls are rejected immediately.
+	// The tombstone provides the same guarantee for in-flight replication.
+	_ = os.Remove(s.bucketMetaPath(bucket))
+
+	// Set tombstone and capture the callback pointer while still under the lock.
+	// All slow disk I/O (stat walks + RemoveAll) happens after the lock is released
+	// to avoid blocking concurrent S3 reads/writes for the duration of the deletion.
+	s.evictExpiredTombstones()
+	s.deletedBuckets[bucket] = time.Now()
+	callback := s.onBucketRemovedCallback
+
+	s.mu.Unlock() // Release lock — bucket is now logically deleted.
+
+	// Decrement stats for all objects being removed. Stat counters are atomics
+	// so they don't need s.mu. Corrupted files cause stats drift until the next
+	// initCASStats on restart — log a warning so it's diagnosable.
 	metaDir := filepath.Join(bucketDir, "meta")
 	_ = filepath.Walk(metaDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
@@ -860,16 +892,12 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 		return nil
 	})
 
-	// Remove the entire bucket directory
-	var removeErr error
+	// Remove the entire bucket directory (outside the lock).
 	retries := 1
 	if runtime.GOOS == "windows" {
 		retries = windowsFileRetries
 	}
-
-	// Capture callback before loop to ensure consistent access pattern
-	callback := s.onBucketRemovedCallback
-
+	var removeErr error
 	for i := 0; i < retries; i++ {
 		removeErr = os.RemoveAll(bucketDir)
 		if removeErr == nil {
@@ -884,6 +912,16 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 		}
 	}
 	return fmt.Errorf("remove bucket: %w", removeErr)
+}
+
+// evictExpiredTombstones removes tombstone entries older than deletedBucketTombstoneTTL.
+// Must be called with s.mu held.
+func (s *Store) evictExpiredTombstones() {
+	for b, t := range s.deletedBuckets {
+		if time.Since(t) > deletedBucketTombstoneTTL {
+			delete(s.deletedBuckets, b)
+		}
+	}
 }
 
 // writeBucketMeta writes bucket metadata (caller must hold lock).
@@ -2583,6 +2621,21 @@ func (s *Store) ImportObjectMeta(ctx context.Context, bucket, key string, metaJS
 
 	s.mu.Lock()
 
+	// Reject replication for recently force-deleted buckets. A replication worker
+	// may have read the object before the bucket was deleted; delivering it now
+	// would auto-create a new _meta.json, silently resurrecting the bucket.
+	// Exception: if the object was modified AFTER the bucket was deleted, it belongs
+	// to a new share with the same name (e.g., accordion reuse). Allow it through
+	// and clear the tombstone so subsequent replication for this new share is not blocked.
+	if deletedAt, ok := s.deletedBuckets[bucket]; ok && time.Since(deletedAt) < deletedBucketTombstoneTTL {
+		if !meta.LastModified.IsZero() && meta.LastModified.After(deletedAt) {
+			delete(s.deletedBuckets, bucket) // new share with same name — clear tombstone
+		} else {
+			s.mu.Unlock()
+			return nil, nil // silently drop — stale replication from before bucket deletion
+		}
+	}
+
 	// Ensure bucket exists — create bucket meta if needed
 	bucketMeta, err := s.getBucketMeta(bucket)
 	if err != nil {
@@ -4045,6 +4098,12 @@ func (s *Store) ImportVersionHistory(ctx context.Context, bucket, key string, ve
 	}
 
 	s.mu.Lock()
+
+	// Reject version replication for recently force-deleted buckets (same race as ImportObjectMeta).
+	if deletedAt, ok := s.deletedBuckets[bucket]; ok && time.Since(deletedAt) < deletedBucketTombstoneTTL {
+		s.mu.Unlock()
+		return 0, nil, nil // silently drop — bucket was recently deleted
+	}
 
 	imported := 0
 	for _, v := range versions {

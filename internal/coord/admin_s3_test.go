@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tunnelmesh/tunnelmesh/internal/coord/replication"
 	"github.com/tunnelmesh/tunnelmesh/internal/coord/s3"
 )
 
@@ -178,4 +179,67 @@ func TestForceDeleteBuckets_NonFSPrefixIgnored(t *testing.T) {
 	meta, err := srv.s3Store.HeadBucket(t.Context(), "test-bucket")
 	require.NoError(t, err)
 	assert.NotNil(t, meta, "non-fs+ bucket should not be deleted by force_delete_buckets")
+}
+
+// TestBucketsOnly_ForwardsToPeers verifies that BucketsOnly=true with NoForward=false (default)
+// forwards the force_delete_buckets request to peer coordinators.
+// This ensures that manually calling POST /api/s3/gc with explicit bucket names produces
+// cluster-wide deletion rather than local-only deletion.
+func TestBucketsOnly_ForwardsToPeers(t *testing.T) {
+	srv := newTestServerWithS3AndBucket(t)
+	makeTestAdmin(srv)
+
+	// Create an fs+ bucket to delete
+	bucketName := s3.FileShareBucketPrefix + "peer-forward-test"
+	require.NoError(t, srv.s3Store.CreateBucket(t.Context(), bucketName, "owner", 1))
+
+	// Track whether the mock peer receives a forwarded deletion request
+	peerReceived := make(chan struct{}, 1)
+	mockPeer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case peerReceived <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deleted_buckets":1}`))
+	}))
+	defer mockPeer.Close()
+
+	// Override shareGCClient to route mesh HTTPS calls to the mock HTTP server.
+	srv.shareGCClient = &http.Client{
+		Transport: &mockGCRoundTripper{targetBase: mockPeer.URL},
+	}
+
+	// Inject a minimal replicator with one fake peer.
+	fakeReplicator := replication.NewReplicator(replication.Config{
+		Transport: &noopReplicationTransport{},
+	})
+	fakeReplicator.AddPeer("10.99.99.99", "mock-coord")
+	srv.replicator = fakeReplicator
+
+	// POST /api/s3/gc with buckets_only=true — no_forward is omitted (false), so
+	// the handler should forward the deletion to peer coordinators.
+	body, _ := json.Marshal(map[string]interface{}{
+		"force_delete_buckets": []string{bucketName},
+		"buckets_only":         true,
+		// no_forward intentionally omitted to test the forwarding path
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/s3/gc", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.adminMux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, float64(1), resp["deleted_buckets"])
+
+	// Forwarding is synchronous: peer must have received the request before handler returned.
+	select {
+	case <-peerReceived:
+		// Good: peer coordinator was notified
+	default:
+		t.Error("peer coordinator was not notified (BucketsOnly=true should forward to peers when NoForward=false)")
+	}
 }
