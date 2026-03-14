@@ -802,18 +802,33 @@ func (s *Store) DeleteBucket(ctx context.Context, bucket string) error {
 // to the next GC cycle. Much faster than purging each object individually.
 func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	bucketDir := s.bucketPath(bucket)
 
 	// Check if bucket exists
 	if _, err := os.Stat(bucketDir); os.IsNotExist(err) {
+		s.mu.Unlock()
 		return nil // Idempotent
 	}
 
-	// Decrement stats for all objects being removed.
-	// Corrupted files that can't be read/unmarshalled will cause stats drift
-	// until the next initCASStats on restart — log a warning so it's diagnosable.
+	// Remove the bucket meta file under the lock. This marks the bucket as
+	// logically deleted: concurrent getBucketMeta calls return ErrBucketNotFound,
+	// so new PutObject / ImportObjectMeta calls are rejected immediately.
+	// The tombstone provides the same guarantee for in-flight replication.
+	_ = os.Remove(s.bucketMetaPath(bucket))
+
+	// Set tombstone and capture the callback pointer while still under the lock.
+	// All slow disk I/O (stat walks + RemoveAll) happens after the lock is released
+	// to avoid blocking concurrent S3 reads/writes for the duration of the deletion.
+	s.evictExpiredTombstones()
+	s.deletedBuckets[bucket] = time.Now()
+	callback := s.onBucketRemovedCallback
+
+	s.mu.Unlock() // Release lock — bucket is now logically deleted.
+
+	// Decrement stats for all objects being removed. Stat counters are atomics
+	// so they don't need s.mu. Corrupted files cause stats drift until the next
+	// initCASStats on restart — log a warning so it's diagnosable.
 	metaDir := filepath.Join(bucketDir, "meta")
 	_ = filepath.Walk(metaDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || filepath.Ext(path) != ".json" {
@@ -877,16 +892,12 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 		return nil
 	})
 
-	// Remove the entire bucket directory
-	var removeErr error
+	// Remove the entire bucket directory (outside the lock).
 	retries := 1
 	if runtime.GOOS == "windows" {
 		retries = windowsFileRetries
 	}
-
-	// Capture callback before loop to ensure consistent access pattern
-	callback := s.onBucketRemovedCallback
-
+	var removeErr error
 	for i := 0; i < retries; i++ {
 		removeErr = os.RemoveAll(bucketDir)
 		if removeErr == nil {
@@ -894,11 +905,6 @@ func (s *Store) ForceDeleteBucket(ctx context.Context, bucket string) error {
 			if callback != nil {
 				callback(bucket)
 			}
-			// Tombstone this bucket so in-flight replication deliveries do not
-			// resurrect it. ImportObjectMeta / ImportVersionHistory check this set
-			// under lock and drop deliveries for recently-deleted buckets.
-			s.evictExpiredTombstones()
-			s.deletedBuckets[bucket] = time.Now()
 			return nil
 		}
 		if i < retries-1 {
