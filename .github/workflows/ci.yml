@@ -78,7 +78,7 @@ jobs:
         run: go test -short -race -coverprofile=coverage.out $(go list ./... | grep -v s3bench)
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.out
@@ -141,7 +141,7 @@ jobs:
         run: bun test --coverage
       - name: Upload JS coverage to Codecov
         if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./internal/coord/web/coverage/lcov.info
