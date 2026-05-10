@@ -25,11 +25,6 @@ type nfsReadResponse struct {
 // MaxRead is the advertised largest buffer the server is willing to read
 const MaxRead = 1 << 24
 
-// CheckRead is a size where - if a request to read is larger than this,
-// the server will stat the file to learn it's actual size before allocating
-// a buffer to read into.
-const CheckRead = 1 << 15
-
 func onRead(ctx context.Context, w *response, userHandle Handler) error {
 	w.errorFmt = opAttrErrorFormatter
 	var obj nfsReadArgs
@@ -52,15 +47,19 @@ func onRead(ctx context.Context, w *response, userHandle Handler) error {
 	defer fh.Close()
 
 	resp := nfsReadResponse{}
+	setEOF := false
 
-	if obj.Count > CheckRead {
-		info, err := fs.Stat(fs.Join(path...))
-		if err != nil {
-			return &NFSStatusError{NFSStatusAccess, err}
-		}
-		if info.Size()-int64(obj.Offset) < int64(obj.Count) {
-			obj.Count = uint32(uint64(info.Size()) - obj.Offset)
-		}
+	fullPath := fs.Join(path...)
+	info, err := fs.Stat(fullPath)
+	if err != nil {
+		return &NFSStatusError{NFSStatusAccess, err}
+	}
+	if int64(obj.Offset) >= info.Size() {
+		obj.Count = 0
+		setEOF = true
+	} else if info.Size()-int64(obj.Offset) <= int64(obj.Count) {
+		obj.Count = uint32(uint64(info.Size()) - obj.Offset)
+		setEOF = true
 	}
 	if obj.Count > MaxRead {
 		obj.Count = MaxRead
@@ -73,7 +72,7 @@ func onRead(ctx context.Context, w *response, userHandle Handler) error {
 	}
 	resp.Count = uint32(cnt)
 	resp.Data = resp.Data[:resp.Count]
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || setEOF {
 		resp.EOF = 1
 	}
 
@@ -81,7 +80,7 @@ func onRead(ctx context.Context, w *response, userHandle Handler) error {
 	if err := xdr.Write(writer, uint32(NFSStatusOk)); err != nil {
 		return &NFSStatusError{NFSStatusServerFault, err}
 	}
-	if err := WritePostOpAttrs(writer, tryStat(fs, path)); err != nil {
+	if err := WritePostOpAttrs(writer, ToFileAttribute(info, fullPath)); err != nil {
 		return &NFSStatusError{NFSStatusServerFault, err}
 	}
 
