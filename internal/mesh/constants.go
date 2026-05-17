@@ -1,4 +1,3 @@
-// Package mesh provides constants for the TunnelMesh network configuration.
 package mesh
 
 const (
