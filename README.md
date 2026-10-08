@@ -1,7 +1,7 @@
 ![Admin Dashboard](docs/images/tunnelmesh_banner.webp)
 
 > [!WARNING]
-> **Highly experimental**: Stable but still tightening bolts. Not for Production use.
+> **Discontinued**: A failed implementation.
 
 # tunnelmesh
 
